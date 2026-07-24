@@ -65,6 +65,8 @@
       minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
       alphaDeviceAllow =
         hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.DeviceAllow;
+      alphaTapRequires = hostConfiguration.config.systemd.services.seter-tap-alpha.requires;
+      nftablesConfig = hostConfiguration.config.networking.nftables;
       lifecycleSudoRules = lib.filter (
         rule: builtins.elem "seter-operators" (rule.groups or [ ])
       ) hostConfiguration.config.security.sudo.extraRules;
@@ -256,6 +258,10 @@
           assert minimalStoreSocket == "/run/seter/minimal/virtiofs-ro-store.sock";
           assert builtins.elem "vhost_vsock" hostConfiguration.config.boot.kernelModules;
           assert builtins.elem "/dev/vhost-vsock rw" alphaDeviceAllow;
+          assert builtins.elem "nftables.service" alphaTapRequires;
+          assert nftablesConfig.enable;
+          assert nftablesConfig.tables.seter_l2.family == "bridge";
+          assert nftablesConfig.tables.seter_l3.family == "inet";
           assert builtins.any (
             entry: entry.command == "${lifecycleHelper} __start alpha" && builtins.elem "NOPASSWD" entry.options
           ) lifecycleSudoCommands;
@@ -441,6 +447,9 @@
             start_all()
 
             machine.wait_for_unit("seter-bridge.service")
+            machine.wait_for_unit("nftables.service")
+            machine.succeed("nft list table bridge seter_l2")
+            machine.succeed("nft list table inet seter_l3")
             machine.succeed("ip link show dev seter0")
             machine.succeed("ip -4 address show dev seter0 | grep -F '10.100.0.1/24'")
             machine.fail("ip link show dev seter-alpha")
@@ -449,6 +458,7 @@
             machine.wait_for_unit("seter-tap-alpha.service")
             machine.wait_for_unit("seter-virtiofsd-alpha.service")
             machine.succeed("ip link show dev seter-alpha | grep -F 'master seter0'")
+            machine.succeed("bridge -details link show dev seter-alpha | grep -F 'isolated on'")
             machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); ip tuntap show dev seter-alpha | grep -F \"user $uid\"")
             machine.succeed("test $(stat -c %a /var/lib/seter/workspaces/alpha) = 700")
             machine.succeed("account=$(stat -c %G /run/lock/seter/alpha.lock); test \"$account\" = $(stat -c %U /var/lib/seter/workspaces/alpha)")
@@ -501,6 +511,140 @@
             machine.succeed("ip link show dev seter0")
             machine.succeed("ip link delete dev seter0")
             machine.succeed("systemctl reset-failed seter-bridge.service")
+          '';
+        };
+
+        network-isolation = pkgs.testers.runNixOSTest {
+          name = "seter-network-isolation";
+
+          nodes.machine = {
+            imports = [ self.nixosModules.host ];
+
+            environment.systemPackages = [
+              pkgs.iproute2
+              pkgs.iputils
+              pkgs.jq
+              pkgs.nftables
+            ];
+
+            # The test deliberately enables forwarding and disables the
+            # ordinary NixOS firewall. The Seter-owned policy must still keep
+            # workspace interfaces fail-closed on a permissive host.
+            boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
+            networking.firewall.enable = false;
+            # Exercise the strongest reload mode: Seter's managed tables must
+            # be recreated as part of the same transaction after a full flush.
+            networking.nftables.flushRuleset = true;
+
+            seter.host = {
+              enable = true;
+              workspaces = validWorkspaces;
+            };
+
+            virtualisation.memorySize = 1024;
+            system.stateVersion = "24.11";
+          };
+
+          testScript = ''
+            start_all()
+
+            machine.wait_for_unit("seter-bridge.service")
+            machine.wait_for_unit("nftables.service")
+            machine.succeed("nft list table bridge seter_l2")
+            machine.succeed("nft list table inet seter_l3")
+
+            # Use network namespaces as lightweight hostile guests. Their host
+            # veth names and guest identities match the registered TAPs, so
+            # packets traverse the exact generated nftables rules.
+            machine.succeed("ip netns add alpha; ip link add seter-alpha type veth peer name eth0 netns alpha")
+            machine.succeed("ip link set seter-alpha master seter0; bridge link set dev seter-alpha isolated on; ip link set seter-alpha up")
+            machine.succeed("ip -n alpha link set lo up; ip -n alpha link set eth0 address 02:00:00:00:00:10; ip -n alpha link set eth0 up; ip -n alpha address add 10.100.0.10/24 dev eth0; ip -n alpha route add default via 10.100.0.1")
+
+            machine.succeed("ip netns add beta; ip link add seter-beta type veth peer name eth0 netns beta")
+            machine.succeed("ip link set seter-beta master seter0; bridge link set dev seter-beta isolated on; ip link set seter-beta up")
+            machine.succeed("ip -n beta link set lo up; ip -n beta link set eth0 address 02:00:00:00:00:11; ip -n beta link set eth0 up; ip -n beta address add 10.100.0.11/24 dev eth0; ip -n beta route add default via 10.100.0.1")
+
+            # An unregistered, non-isolated bridge port must not create a
+            # layer-2 escape path from a registered workspace.
+            machine.succeed("ip netns add bridge-peer; ip link add peer-host type veth peer name eth0 netns bridge-peer")
+            machine.succeed("ip link set peer-host master seter0; ip link set peer-host up")
+            machine.succeed("ip -n bridge-peer link set lo up; ip -n bridge-peer link set eth0 up; ip -n bridge-peer address add 10.100.0.12/24 dev eth0")
+
+            # A routed outside namespace proves that the default deny is not
+            # merely an accidental consequence of forwarding being disabled.
+            machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
+            machine.succeed("ip address add 192.0.2.1/24 dev outside-host; ip link set outside-host up")
+            machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 192.0.2.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 192.0.2.1")
+
+            # A host nftables reload, including a complete ruleset flush, must
+            # atomically recreate the Seter tables while workspaces are live.
+            machine.succeed("systemctl reload nftables.service")
+            machine.succeed("nft list table bridge seter_l2")
+            machine.succeed("nft list table inet seter_l3")
+
+            # The host may initiate connections to a workspace. A workspace
+            # may not initiate connections to the host, its peers, or routed
+            # networks.
+            machine.succeed("ping -c 1 -W 1 10.100.0.10")
+            machine.succeed("ping -c 1 -W 1 10.100.0.11")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 10.100.0.1")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 10.100.0.11")
+            # nftables remains a second lateral boundary if bridge-port
+            # isolation is accidentally removed at runtime.
+            machine.succeed("bridge link set dev seter-alpha isolated off; bridge link set dev seter-beta isolated off; nft reset counters table bridge seter_l2")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 10.100.0.11")
+            machine.succeed("test $(nft --json list chain bridge seter_l2 forward | jq '[.nftables[].rule | select(.comment == \"seter lateral isolation alpha\") | .expr[].counter.packets?] | add // 0') -gt 0; bridge link set dev seter-alpha isolated on; bridge link set dev seter-beta isolated on")
+
+            # The blanket bridge-forward rule also rejects non-workspace ports.
+            machine.succeed("nft reset counters table bridge seter_l2")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 10.100.0.12")
+            machine.succeed("test $(nft --json list chain bridge seter_l2 forward | jq '[.nftables[].rule | select(.comment == \"seter lateral isolation alpha\") | .expr[].counter.packets?] | add // 0') -gt 0")
+
+            machine.succeed("nft reset counters table inet seter_l3")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 192.0.2.2")
+            machine.succeed("test $(nft --json list chain inet seter_l3 forward | jq '[.nftables[].rule | select(.comment == \"seter default-deny alpha\") | .expr[].counter.packets?] | add // 0') -gt 0")
+
+            # Registered IPv4/ARP packets pass the bridge identity chain and
+            # are denied later by the host-input chain.
+            machine.succeed("nft reset counters table inet seter_l3")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 10.100.0.1")
+            machine.succeed("test $(nft --json list chain inet seter_l3 input | jq '[.nftables[].rule | select(.comment == \"seter host isolation alpha\") | .expr[].counter.packets?] | add // 0') -gt 0")
+
+            # A forged IPv4 source is rejected even when ARP is bypassed with a
+            # permanent neighbor entry.
+            machine.succeed("ip -n alpha address add 10.100.0.99/24 dev eth0; gateway_mac=$(cat /sys/class/net/seter0/address); ip -n alpha neighbor replace 10.100.0.1 lladdr $gateway_mac dev eth0 nud permanent")
+            machine.succeed("before=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); ip netns exec alpha ping -c 1 -W 1 -I 10.100.0.99 10.100.0.1 || true; after=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); test \"$after\" -gt \"$before\"")
+
+            # Forged ARP sender identities are rejected independently.
+            machine.succeed("ip -n alpha neighbor del 10.100.0.1 dev eth0; before=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); ip netns exec alpha arping -c 1 -w 1 -s 10.100.0.99 -I eth0 10.100.0.1 || true; after=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); test \"$after\" -gt \"$before\"")
+            machine.succeed("ip -n alpha address del 10.100.0.99/24 dev eth0")
+
+            # The guest cannot adopt another MAC address either.
+            machine.succeed("ip -n alpha link set eth0 down; ip -n alpha link set eth0 address 02:00:00:00:00:99; ip -n alpha link set eth0 up")
+            machine.succeed("before=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); ip netns exec alpha ping -c 1 -W 1 10.100.0.1 || true; after=$(nft --json list chain bridge seter_l2 ingress | jq '[.nftables[].rule | select(.comment == \"seter anti-spoof alpha\") | .expr[].counter.packets?] | add // 0'); test \"$after\" -gt \"$before\"")
+            machine.succeed("ip -n alpha link set eth0 down; ip -n alpha link set eth0 address 02:00:00:00:00:10; ip -n alpha link set eth0 up")
+
+            # IPv6 is closed until Seter has an explicit IPv6 policy.
+            machine.succeed("ip -6 address add fd00::1/64 dev seter0; ip -n alpha -6 address add fd00::10/64 dev eth0")
+            machine.fail("ip netns exec alpha ping -6 -c 1 -W 1 fd00::1")
+
+            machine.succeed("ip netns del alpha; ip netns del beta; ip netns del bridge-peer; ip netns del outside; ip link del seter-alpha 2>/dev/null || true; ip link del seter-beta 2>/dev/null || true")
+
+            # Stopping the required nftables backend tears down active
+            # workspace plumbing before its policy tables are removed.
+            machine.succeed("systemctl start seter-runtime-alpha.target")
+            machine.succeed("ip link show dev seter-alpha")
+            machine.succeed("systemctl stop nftables.service")
+            machine.wait_until_fails("ip link show dev seter-alpha")
+            machine.fail("nft list table bridge seter_l2")
+            machine.fail("nft list table inet seter_l3")
+
+            # If the nftables policy cannot load, its dependency prevents a
+            # registered TAP from being created.
+            machine.succeed("mkdir -p /run/systemd/system/nftables.service.d; printf '[Service]\\nExecStart=\\nExecStart=${pkgs.coreutils}/bin/false\\n' > /run/systemd/system/nftables.service.d/fail.conf; systemctl daemon-reload")
+            machine.fail("systemctl start seter-runtime-alpha.target")
+            machine.fail("ip link show dev seter-alpha")
+            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
           '';
         };
       };

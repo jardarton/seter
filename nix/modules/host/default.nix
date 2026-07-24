@@ -156,6 +156,7 @@ let
           group ${lib.escapeShellArg account} \
           vnet_hdr multi_queue
         ${pkgs.iproute2}/bin/ip link set dev ${lib.escapeShellArg tap} master ${lib.escapeShellArg cfg.bridge}
+        ${pkgs.iproute2}/bin/bridge link set dev ${lib.escapeShellArg tap} isolated on
         ${pkgs.iproute2}/bin/ip link set dev ${lib.escapeShellArg tap} up
 
         trap - EXIT
@@ -169,8 +170,14 @@ let
     in
     nameValuePair "seter-tap-${name}" {
       description = "Seter TAP interface for workspace ${name}";
-      after = [ "seter-bridge.service" ];
-      requires = [ "seter-bridge.service" ];
+      after = [
+        "nftables.service"
+        "seter-bridge.service"
+      ];
+      requires = [
+        "nftables.service"
+        "seter-bridge.service"
+      ];
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
         Type = "oneshot";
@@ -349,6 +356,8 @@ let
   '';
 in
 {
+  imports = [ ./network-policy.nix ];
+
   options.seter.host = {
     enable = mkEnableOption "the Seter micro-VM host";
 

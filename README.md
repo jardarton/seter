@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior is implemented as an early vertical slice; network policy enforcement and secret handling are not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior and a fail-closed workspace network boundary are implemented as an early vertical slice; DNS, permitted egress, proxying, and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -73,7 +73,17 @@ sudo systemctl stop seter-runtime-project.target
 
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
-These units provide VM plumbing only. They do not start the VM, configure DNS, enable forwarding or NAT, or enforce the eventual egress policy.
+These units provide VM plumbing only. They do not start the VM, configure DNS, or enable forwarding, NAT, or permitted egress. A separate host-owned nftables policy keeps every workspace fail-closed.
+
+## Network isolation
+
+Every workspace TAP is an isolated bridge port. Host-owned nftables rules bind each TAP to its registered IPv4 and MAC addresses, reject forged ARP and IPv4 identities, block IPv6 until it has an explicit policy, and deny workspace-initiated traffic to the host, other workspaces, and routed networks. Host-initiated connections such as `seter shell` remain available.
+
+Seter requires and enables NixOS's native `networking.nftables` backend so its tables participate in the host's complete atomic firewall transaction. **This switches the host firewall backend from legacy iptables and may require changes for Docker, libvirt, or other software that manages iptables rules. Review those services before enabling the host module.**
+
+The nftables policy is installed before any TAP can start. A policy-loading failure prevents the workspace runtime from starting, and stopping nftables stops active workspace TAPs before removing their rules. The boundary does not rely on forwarding being disabled or on unrelated firewall rules rejecting traffic.
+
+There is intentionally no permitted guest egress yet. DNS, direct TCP allowances, HTTP proxying, and secret injection remain future milestones.
 
 ## VM lifecycle
 
@@ -120,4 +130,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Host policy enforcement is not implemented yet; the project deliberately does not claim to enforce egress policy or secret handling.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Permitted egress, DNS, proxy enforcement, and secret handling are not implemented yet.
