@@ -19,6 +19,12 @@ in
       example = "github:owner/project#nixosConfigurations.guest.config.microvm.declaredRunner";
     };
 
+    storage.image = mkOption {
+      type = types.strMatching "[a-zA-Z0-9_.-]+";
+      default = "${name}-project.img";
+      description = "Project volume image name inside the workspace state directory.";
+    };
+
     network = {
       address = mkOption {
         type = types.str;

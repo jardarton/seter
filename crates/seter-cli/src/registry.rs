@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 1;
+const REGISTRY_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,7 @@ pub struct Workspace {
     pub network: Network,
     pub resources: Resources,
     pub ssh: Ssh,
+    pub storage: Storage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +57,12 @@ pub struct Resources {
 pub struct Ssh {
     pub user: String,
     pub known_host_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Storage {
+    pub image: String,
 }
 
 impl Registry {
@@ -115,6 +122,13 @@ impl Registry {
                 !workspace.ssh.user.trim().is_empty(),
                 "workspace {name:?} has an empty SSH user"
             );
+            ensure!(
+                !workspace.storage.image.trim().is_empty()
+                    && !workspace.storage.image.contains('/')
+                    && workspace.storage.image != "."
+                    && workspace.storage.image != "..",
+                "workspace {name:?} has an invalid project image name"
+            );
             if let Some(host_key) = &workspace.ssh.known_host_key {
                 ensure!(
                     !host_key.trim().is_empty(),
@@ -154,7 +168,7 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 1,
+      "version": 2,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
@@ -165,14 +179,15 @@ mod tests {
             "tap": "seter-minimal"
           },
           "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
-          "ssh": { "user": "seter", "knownHostKey": null }
+          "ssh": { "user": "seter", "knownHostKey": null },
+          "storage": { "image": "minimal-project.img" }
         }
       }
     }
     "#;
 
     #[test]
-    fn parses_version_one_registry() {
+    fn parses_version_two_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -186,7 +201,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 1", "\"version\": 2", 1);
+        let input = VALID.replacen("\"version\": 2", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()
@@ -205,7 +220,8 @@ mod tests {
             "tap": "seter-other"
           },
           "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
-          "ssh": { "user": "seter", "knownHostKey": null }
+          "ssh": { "user": "seter", "knownHostKey": null },
+          "storage": { "image": "other-project.img" }
         }
         "#;
         let input = VALID.replacen(
@@ -229,7 +245,8 @@ mod tests {
             "tap": "seter-other"
           },
           "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
-          "ssh": { "user": "seter", "knownHostKey": null }
+          "ssh": { "user": "seter", "knownHostKey": null },
+          "storage": { "image": "other-project.img" }
         }
         "#;
         let input = VALID.replacen(

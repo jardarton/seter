@@ -43,12 +43,15 @@ Adding a workspace = one registry entry + one flake import.
 
 ### VM lifecycle
 
-- `vm up <name>` — builds the microvm runner from the project flake **on the host** (so outputs land in the shared store and deduplicate across projects), registers a GC root under `/nix/var/nix/gcroots/per-project/<name>`, ensures the tap interface exists, and starts the runner as a systemd **transient unit** (`systemd-run --unit=microvm-<name>`) with per-project `MemoryMax`/`CPUQuota` from the registry.
+- `vm update <name>` — builds the microvm runner from the project flake **on the host** (so outputs land in the shared store and deduplicate across projects) and atomically registers it under `/nix/var/nix/gcroots/per-project/<name>`.
+- `vm up <name>` — starts the last-built runner through a fixed, host-declared per-workspace systemd unit with `MemoryMax`/`CPUQuota` from the registry. Runner code executes as the dedicated workspace account, never as root.
 - `vm run <name> -- <cmd>` — ephemeral mode: boots with tmpfs-only root, waits for SSH (pinned host key from the registry), runs the command via `direnv exec /project -- <cmd>` so ephemeral and interactive modes see identical environments, propagates the exit code, tears down.
-- `vm down <name>` — graceful ACPI/`systemctl poweroff` first, `systemctl stop` of the transient unit after a timeout as the hammer.
+- `vm down <name>` — asks the matching runner to send an ACPI power-button event, then lets the fixed systemd unit terminate the VMM after a timeout as the hammer.
 - `vm ls`, `vm status`, `vm ip`, `vm shell`, `vm update` (explicit rebuild), `vm gc` (remove GC roots for retired projects).
 - `vm up` boots the **last-built** runner; rebuilding is deliberate via `vm update`. Starts stay instant and GC roots stay meaningful.
 - On macOS, the launcher transparently starts the outer Lima VM if needed and proxies commands into it.
+
+Starting and stopping host system units requires authorization, but project code must not run as root. On NixOS, an explicit Seter operator group receives passwordless sudo permission only for exact hidden start/stop commands generated for registered workspaces. The privileged half reloads the host-owned registry and constructs the fixed systemd unit name; it does not accept arbitrary units or commands. Read-only status and SSH shell operations remain unprivileged.
 
 ### Filesystem
 

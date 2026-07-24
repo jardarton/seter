@@ -21,6 +21,8 @@ let
     ;
 
   workspaceType = types.submodule (import ./workspace.nix);
+  defaultPackage = pkgs.callPackage ../../package.nix { };
+  lifecycleLockDirectory = "/run/lock/seter";
   workspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
 
   valuesFor = select: map select workspaces;
@@ -77,7 +79,7 @@ let
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
   lifecycleRegistry = {
-    version = 1;
+    version = 2;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace) hostname;
       inherit (workspace)
@@ -85,6 +87,7 @@ let
         network
         resources
         ssh
+        storage
         ;
     }) cfg.workspaces;
   };
@@ -99,11 +102,25 @@ let
     in
     {
       inherit account workspace;
+      lifecycleLock = "${lifecycleLockDirectory}/${name}.lock";
       runtimeDirectory = "seter/${name}";
       socket = "/run/seter/${name}/virtiofs-ro-store.sock";
       stateDirectory = "/var/lib/seter/workspaces/${name}";
     }
   ) cfg.workspaces;
+
+  lifecycleSudoCommands = concatMap (
+    name:
+    map
+      (operation: {
+        command = "${lib.getExe cfg.package} ${operation} ${name}";
+        options = [ "NOPASSWD" ];
+      })
+      [
+        "__start"
+        "__stop"
+      ]
+  ) (attrNames cfg.workspaces);
 
   tapServices = mapAttrs' (
     name: runtime:
@@ -233,6 +250,67 @@ let
       description = "Host runtime plumbing for Seter workspace ${name}";
       requires = [ "seter-virtiofsd-${name}.service" ];
       after = [ "seter-virtiofsd-${name}.service" ];
+      # Stopping either half of the lifecycle tears down the other. The VM
+      # service also has PartOf= on this target so operators may still stop
+      # the plumbing target directly.
+      partOf = [ "seter-vm-${name}.service" ];
+    }
+  ) workspaceRuntime;
+
+  vmServices = mapAttrs' (
+    name: runtime:
+    let
+      inherit (runtime) account lifecycleLock stateDirectory;
+      workspace = runtime.workspace;
+      runVm = pkgs.writeShellScript "seter-vm-${name}-run" ''
+        set -eu
+        exec {lifecycle_lock}<${lib.escapeShellArg lifecycleLock}
+        ${pkgs.util-linux}/bin/flock --exclusive "$lifecycle_lock"
+        runner=$(${pkgs.coreutils}/bin/readlink -f ${lib.escapeShellArg "${stateDirectory}/current"})
+        test -x "$runner/bin/microvm-run"
+        test -x "$runner/bin/microvm-shutdown"
+        ${pkgs.coreutils}/bin/ln -sTf "$runner" ${lib.escapeShellArg "${stateDirectory}/booted"}
+        exec ${lib.escapeShellArg "${stateDirectory}/booted/bin/microvm-run"}
+      '';
+      removeBooted = pkgs.writeShellScript "seter-vm-${name}-cleanup" ''
+        ${pkgs.coreutils}/bin/rm -f ${lib.escapeShellArg "${stateDirectory}/booted"}
+      '';
+    in
+    nameValuePair "seter-vm-${name}" {
+      description = "Seter microVM for workspace ${name}";
+      requires = [ "seter-runtime-${name}.target" ];
+      after = [ "seter-runtime-${name}.target" ];
+      partOf = [ "seter-runtime-${name}.target" ];
+      unitConfig.ConditionPathExists = "${stateDirectory}/current/bin/microvm-run";
+      serviceConfig = {
+        Type = "simple";
+        User = account;
+        Group = account;
+        WorkingDirectory = stateDirectory;
+        ExecStart = runVm;
+        ExecStop = "${stateDirectory}/booted/bin/microvm-shutdown";
+        ExecStopPost = removeBooted;
+        TimeoutStopSec = "30s";
+        KillMode = "mixed";
+        Restart = "no";
+        MemoryMax = workspace.resources.memoryMiB * 1024 * 1024;
+        CPUQuota = "${toString workspace.resources.cpuQuotaPercent}%";
+        LimitNOFILE = 1048576;
+        LimitMEMLOCK = "infinity";
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ stateDirectory ];
+        DevicePolicy = "closed";
+        DeviceAllow = [
+          "/dev/kvm rw"
+          "/dev/net/tun rw"
+          "/dev/vhost-net rw"
+          "/dev/vhost-vsock rw"
+        ];
+      };
     }
   ) workspaceRuntime;
 
@@ -297,6 +375,19 @@ in
       default = { };
       description = "Typed workspace registry used by the host and Seter CLI.";
     };
+
+    package = mkOption {
+      type = types.package;
+      default = defaultPackage;
+      defaultText = lib.literalExpression "the Seter package from this module's source";
+      description = "Seter CLI package installed on the host and authorized for lifecycle helpers.";
+    };
+
+    operatorGroup = mkOption {
+      type = types.strMatching "[a-z_][a-z0-9_-]*";
+      default = "seter-operators";
+      description = "Host group allowed to start and stop registered Seter workspaces without a sudo password.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -351,6 +442,12 @@ in
         assertion = hasUniqueValues (valuesFor (workspace: lib.toLower workspace.hostname));
         message = "seter.host.workspaces must assign a unique hostname to every workspace";
       }
+      {
+        assertion = lib.all (runtime: runtime.account != cfg.operatorGroup) (
+          builtins.attrValues workspaceRuntime
+        );
+        message = "seter.host.operatorGroup must not collide with a workspace runtime account";
+      }
     ]
     ++ concatMap (workspace: [
       {
@@ -390,6 +487,7 @@ in
     boot.kernelModules = [
       "tun"
       "vhost_net"
+      "vhost_vsock"
     ];
 
     networking.dhcpcd.denyInterfaces = [
@@ -404,6 +502,7 @@ in
     systemd.services =
       tapServices
       // virtiofsdServices
+      // vmServices
       // {
         seter-bridge = {
           description = "Seter workspace bridge";
@@ -418,7 +517,10 @@ in
         };
       };
 
-    users.groups = mapAttrs' (_: runtime: nameValuePair runtime.account { }) workspaceRuntime;
+    users.groups = {
+      ${cfg.operatorGroup} = { };
+    }
+    // mapAttrs' (_: runtime: nameValuePair runtime.account { }) workspaceRuntime;
     users.users = mapAttrs' (
       _: runtime:
       nameValuePair runtime.account {
@@ -439,6 +541,11 @@ in
         group = "root";
         mode = "0711";
       };
+      ${lifecycleLockDirectory}.d = {
+        user = "root";
+        group = "root";
+        mode = "0755";
+      };
     }
     // mapAttrs' (
       _: runtime:
@@ -449,12 +556,41 @@ in
           mode = "0700";
         };
       }
+    ) workspaceRuntime
+    // mapAttrs' (
+      _: runtime:
+      nameValuePair runtime.lifecycleLock {
+        f = {
+          user = "root";
+          group = runtime.account;
+          mode = "0640";
+        };
+      }
     ) workspaceRuntime;
 
     systemd.targets = runtimeTargets;
 
-    # DNS, policy enforcement, and VM lifecycle remain separate milestones.
-    # These host-owned units deliberately expose only the registered TAP and
-    # a read-only /nix/store share; they never execute workspace runner helpers.
+    # Authorize only exact internal commands for configured workspaces. The
+    # privileged command reloads the root-owned registry and constructs the
+    # systemd unit name itself; operators never receive general systemctl or
+    # unrestricted Seter access through sudo.
+    security.sudo.extraRules = lib.optional (lifecycleSudoCommands != [ ]) {
+      groups = [ cfg.operatorGroup ];
+      runAs = "root";
+      commands = lifecycleSudoCommands;
+    };
+
+    # These are used by lifecycle commands for strict SSH host-key handling
+    # and offline enrollment from the persistent ext4 image.
+    environment.systemPackages = [
+      cfg.package
+      pkgs.e2fsprogs
+      pkgs.openssh
+    ];
+
+    # DNS and policy enforcement remain separate milestones. The plumbing
+    # units expose only the registered TAP and read-only /nix/store share and
+    # never invoke runner-provided setup helpers. Only seter-vm-* executes the
+    # runner, always as the dedicated unprivileged workspace account.
   };
 }

@@ -45,6 +45,10 @@ in
 
   config = mkIf cfg.enable {
     environment.etc."vm-guest".text = "seter\n";
+    # The root, including /var/log, is ephemeral. Running the default log
+    # rotation machinery adds no value and currently leaves a failed
+    # logrotate-checkconf unit in this minimal image.
+    services.logrotate.enable = lib.mkDefault false;
     environment.sessionVariables = mkIf (cfg.proxy != null) {
       HTTP_PROXY = cfg.proxy;
       HTTPS_PROXY = cfg.proxy;

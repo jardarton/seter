@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -34,6 +36,8 @@ pub enum Command {
     Ip { workspace: String },
     /// Explicitly rebuild a workspace runner.
     Update { workspace: String },
+    /// Print the guest SSH host key from its offline project image.
+    SshHostKey { workspace: String },
     /// Remove GC roots belonging to retired workspaces.
     Gc,
     /// Generate shell completion code.
@@ -41,6 +45,18 @@ pub enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+    /// Privileged half of `seter update`.
+    #[command(name = "__install-runner", hide = true)]
+    InstallRunner { workspace: String, runner: PathBuf },
+    /// Privileged half of `seter ssh-host-key`.
+    #[command(name = "__read-host-key", hide = true)]
+    ReadHostKey { workspace: String },
+    /// Privileged half of `seter up`.
+    #[command(name = "__start", hide = true)]
+    StartWorkspace { workspace: String },
+    /// Privileged half of `seter down`.
+    #[command(name = "__stop", hide = true)]
+    StopWorkspace { workspace: String },
 }
 
 #[derive(Clone, Debug, ValueEnum)]

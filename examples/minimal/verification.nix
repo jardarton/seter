@@ -55,6 +55,7 @@
         exit 1
       fi
       systemctl is-active --quiet sshd.service
+      test -z "$(systemctl --failed --no-legend)"
 
       printf '%s\n' marker root-tmpfs project-writable store-read-only ssh-active ssh-host-key-persistent > "$report"
       sync

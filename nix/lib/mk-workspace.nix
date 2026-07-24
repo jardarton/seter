@@ -8,6 +8,7 @@
   cpuQuotaPercent ? 200,
   sshUser ? "seter",
   knownHostKey ? null,
+  projectImage ? null,
   allowedHTTPHosts ? [ ],
   passthroughHosts ? [ ],
   allowedTCP ? [ ],
@@ -29,6 +30,8 @@
     user = sshUser;
     inherit knownHostKey;
   };
+
+  storage = if projectImage == null then { } else { image = projectImage; };
 
   egress = {
     httpHosts = allowedHTTPHosts;

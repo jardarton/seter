@@ -23,6 +23,6 @@ nix run .#test-minimal
 
 The verification boots a dedicated test variant twice and checks the boundary marker, tmpfs root, writable project volume, read-only Nix store, active SSH service, and persistent SSH host identity. It runs outside the Nix build sandbox because it requires `/dev/kvm` and host-side virtiofs.
 
-Cloud Hypervisor requires a separately running `virtiofsd` for command-line runners. The eventual Seter host module will manage it and the tap interface. For manual experimentation, use the runner's `virtiofsd-run` helper before `microvm-run` and create/configure the `seter-minimal` tap interface.
+Cloud Hypervisor requires a separately running `virtiofsd` for command-line runners. Seter's host module manages it and the tap interface for registered workspaces. For manual experimentation outside that module, use the runner's `virtiofsd-run` helper before `microvm-run` and create/configure the `seter-minimal` tap interface.
 
 The example deliberately contains no authorized key, secrets, personal addresses, or host-specific paths. Override `seter.guest.ssh.authorizedKeys` and networking values in a real workspace definition.

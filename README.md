@@ -1,6 +1,6 @@
 # Seter
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. It is currently an early scaffold; lifecycle and enforcement behavior are not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior is implemented as an early vertical slice; network policy enforcement and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -24,6 +24,18 @@ project flake                     NixOS host
 
 `seter update <workspace>` builds the installable and retains its runner. `seter up <workspace>` starts that last-built runner without rebuilding, so configuration changes only take effect after an explicit update.
 
+The lifecycle is explicit:
+
+```console
+seter update project        # builds unprivileged, then prompts for the install step
+seter up project
+seter status project
+seter shell project
+seter down project
+```
+
+`update` atomically installs the immutable runner under the workspace state directory and registers a GC root under `/nix/var/nix/gcroots/per-project`. `up` never evaluates Nix. The VM runs as its dedicated `seter-*` system account with the registry's memory and CPU limits; runner-provided TAP and VirtioFS helpers are not executed.
+
 ## Host workspace registry
 
 Host workspace entries are typed and validated by `nixosModules.host`:
@@ -39,9 +51,12 @@ seter.host = {
     tap = "seter-project";
   };
 };
+
+# Starting and stopping registered workspaces is an explicit host capability.
+users.users.alice.extraGroups = [ "seter-operators" ];
 ```
 
-Every workspace on one host bridge must have a unique IPv4 address, MAC address, tap interface, and hostname. Evaluation fails when entries conflict. The host module writes a versioned, lifecycle-only projection to `/etc/seter/workspaces.json`; `seter list` and `seter ip <workspace>` read this registry.
+Every workspace on one host bridge must have a unique IPv4 address, MAC address, tap interface, and hostname. Evaluation fails when entries conflict. If the guest overrides `seter.guest.projectVolume.image`, pass the same basename as `projectImage` to `mkWorkspace` so offline host-key enrollment reads the correct volume. The host module writes a versioned, lifecycle-only projection to `/etc/seter/workspaces.json`; lifecycle commands read this registry.
 
 ## Host runtime plumbing
 
@@ -55,6 +70,28 @@ sudo systemctl stop seter-runtime-project.target
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
 These units provide VM plumbing only. They do not start the VM, configure DNS, enable forwarding or NAT, or enforce the eventual egress policy.
+
+## VM lifecycle
+
+The host also declares an on-demand `seter-vm-<workspace>.service`. The CLI controls that fixed unit rather than executing a VMM itself. Starting it brings up `seter-runtime-<workspace>.target`, snapshots the installed runner as `booted`, and launches `microvm-run` from the workspace's private state directory. Stopping it uses the matching `booted/bin/microvm-shutdown`, with a systemd timeout and forced termination as a fallback, then removes the TAP and VirtioFS socket. The project volume is retained.
+
+`seter status [workspace]` reports `not-built`, `stopped`, `starting`, `running`, `stopping`, or `failed`. A stopped single-workspace status exits with code 3 for scripting.
+
+Lifecycle control is privileged through systemd. Members of `seter.host.operatorGroup` (`seter-operators` by default) may use `seter up` and `seter down` without a sudo password. The CLI elevates only an exact hidden start or stop operation for the named, registered workspace; generated sudoers rules do not grant arbitrary `seter`, `systemctl`, or root command execution. The privileged operation discards environment overrides, reloads the root-owned registry, and constructs the fixed unit name itself.
+
+`seter update` still performs the potentially untrusted Nix build as the invoking user, then separately elevates its narrowly scoped install operation to update root-owned state and GC roots. Project runner code always executes as the workspace account, never as root. See [Lifecycle authorization](./docs/lifecycle-authorization.md) for the trust boundary and implementation rules.
+
+## SSH host-key enrollment
+
+SSH never silently trusts a network-provided key. After the first boot has generated the guest identity, stop the workspace and read its public key directly from the host-owned ext4 project image:
+
+```console
+seter up project
+seter down project
+seter ssh-host-key project
+```
+
+Review the printed fingerprint, copy the public key into the workspace registry's `knownHostKey`, rebuild the host configuration, and then use `seter shell project`. Shell connections use the registered IP and user, strict host-key checking, and no SSH agent or X11 forwarding. The guest flake must separately include the developer's public login key in `seter.guest.ssh.authorizedKeys`.
 
 ## Development
 
@@ -77,4 +114,4 @@ nix flake check
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry consumed by `seter list` and `seter ip`, plus tested bridge, lifecycle-owned TAP, and read-only VirtioFS plumbing. VM lifecycle and host policy enforcement are not implemented yet; the project deliberately does not claim to enforce isolation, egress policy, or secret handling.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Host policy enforcement is not implemented yet; the project deliberately does not claim to enforce egress policy or secret handling.
