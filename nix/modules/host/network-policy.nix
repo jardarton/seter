@@ -11,7 +11,18 @@ let
     mkIf
     ;
 
-  workspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
+  dnsPorts = import ./dns-ports.nix {
+    inherit lib;
+    workspaces = cfg.workspaces;
+  };
+  workspaces = mapAttrsToList (
+    name: workspace:
+    workspace
+    // {
+      inherit name;
+      dnsPort = dnsPorts.${name};
+    }
+  ) cfg.workspaces;
 
   bridgeIngressRules = concatMapStringsSep "\n" (
     workspace:
@@ -45,6 +56,8 @@ let
       address = workspace.network.address;
     in
     ''
+      iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} udp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
+      iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ct state established,related accept
       iifname "${cfg.bridge}" ip saddr ${address} counter drop comment "seter host isolation ${workspace.name}"
     ''

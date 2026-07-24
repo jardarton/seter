@@ -173,10 +173,12 @@ let
       after = [
         "nftables.service"
         "seter-bridge.service"
+        "seter-dns-${name}.service"
       ];
       requires = [
         "nftables.service"
         "seter-bridge.service"
+        "seter-dns-${name}.service"
       ];
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
@@ -356,7 +358,10 @@ let
   '';
 in
 {
-  imports = [ ./network-policy.nix ];
+  imports = [
+    ./dns.nix
+    ./network-policy.nix
+  ];
 
   options.seter.host = {
     enable = mkEnableOption "the Seter micro-VM host";

@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior and a fail-closed workspace network boundary are implemented as an early vertical slice; DNS, permitted egress, proxying, and secret handling are not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, and restricted guest DNS are implemented as an early vertical slice; permitted application egress, proxying, and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -73,7 +73,7 @@ sudo systemctl stop seter-runtime-project.target
 
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
-These units provide VM plumbing only. They do not start the VM, configure DNS, or enable forwarding, NAT, or permitted egress. A separate host-owned nftables policy keeps every workspace fail-closed.
+These units provide VM plumbing only. They do not start the VM or enable forwarding, NAT, or permitted application egress. Separate host-owned DNS and nftables services keep every workspace fail-closed.
 
 ## Network isolation
 
@@ -83,7 +83,11 @@ Seter requires and enables NixOS's native `networking.nftables` backend so its t
 
 The nftables policy is installed before any TAP can start. A policy-loading failure prevents the workspace runtime from starting, and stopping nftables stops active workspace TAPs before removing their rules. The boundary does not rely on forwarding being disabled or on unrelated firewall rules rejecting traffic.
 
-There is intentionally no permitted guest egress yet. DNS, direct TCP allowances, HTTP proxying, and secret injection remain future milestones.
+A separate unprivileged dnsmasq instance runs on demand for each active workspace behind the bridge gateway. Workspaces may query the gateway over TCP or UDP, but only names derived from that workspace's configured HTTP, passthrough, and direct-TCP egress destinations are forwarded. nftables redirects each registered source address to its own resolver, so one workspace's destinations do not broaden another's DNS policy. dnsmasq forwarding accepts the configured name and its subdomains; this suffix behavior is an accepted initial limitation, while later connection enforcement will still use the configured destination policy. AAAA answers are filtered until Seter has an IPv6 policy. Direct DNS to outside resolvers remains blocked.
+
+By default DNS queries are logged to each workspace's `seter-dns-<workspace>.service` journal. This provides useful early policy visibility but can be noisy and can reveal project access patterns; set `seter.host.dns.logQueries = false` to disable it. Query logging is an initial audit mechanism and may be replaced with more selective logging later. Set `seter.host.dns.upstreamServers` to explicit IPv4 resolver addresses, or leave it empty to use the host's existing `/etc/resolv.conf` resolvers. Host applications resolve registered workspace hostnames through generated `/etc/hosts` entries; Seter does not replace the host resolver.
+
+There is intentionally no permitted application egress yet. Direct TCP allowances, HTTP proxying, and secret injection remain future milestones.
 
 ## VM lifecycle
 
@@ -130,4 +134,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Permitted egress, DNS, proxy enforcement, and secret handling are not implemented yet.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Permitted application egress, proxy enforcement, and secret handling are not implemented yet.

@@ -60,12 +60,19 @@
         };
       };
 
+      dnsPortsFor = workspaces: import ../nix/modules/host/dns-ports.nix { inherit lib workspaces; };
+      workspaceDnsPorts = dnsPortsFor validWorkspaces;
+      alphaDnsPort = workspaceDnsPorts.alpha;
+      betaDnsPort = workspaceDnsPorts.beta;
+      alphaDnsPortWithEarlierWorkspace = (dnsPortsFor ({ aardvark = { }; } // validWorkspaces)).alpha;
+
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
       minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
       alphaDeviceAllow =
         hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.DeviceAllow;
       alphaTapRequires = hostConfiguration.config.systemd.services.seter-tap-alpha.requires;
+      dnsService = hostConfiguration.config.systemd.services.seter-dns-alpha;
       nftablesConfig = hostConfiguration.config.networking.nftables;
       lifecycleSudoRules = lib.filter (
         rule: builtins.elem "seter-operators" (rule.groups or [ ])
@@ -259,9 +266,20 @@
           assert builtins.elem "vhost_vsock" hostConfiguration.config.boot.kernelModules;
           assert builtins.elem "/dev/vhost-vsock rw" alphaDeviceAllow;
           assert builtins.elem "nftables.service" alphaTapRequires;
+          assert builtins.elem "seter-dns-alpha.service" alphaTapRequires;
+          assert builtins.elem "seter-bridge.service" dnsService.requires;
+          assert builtins.elem "nftables.service" dnsService.requires;
+          assert alphaDnsPort == alphaDnsPortWithEarlierWorkspace;
+          assert alphaDnsPort != betaDnsPort;
+          assert builtins.elem "alpha.vm" hostConfiguration.config.networking.hosts."10.100.0.10";
+          assert builtins.elem alphaDnsPort
+            hostConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
+          assert builtins.elem alphaDnsPort
+            hostConfiguration.config.networking.firewall.interfaces.seter0.allowedUDPPorts;
           assert nftablesConfig.enable;
           assert nftablesConfig.tables.seter_l2.family == "bridge";
           assert nftablesConfig.tables.seter_l3.family == "inet";
+          assert nftablesConfig.tables.seter_dns.family == "inet";
           assert builtins.any (
             entry: entry.command == "${lifecycleHelper} __start alpha" && builtins.elem "NOPASSWD" entry.options
           ) lifecycleSudoCommands;
@@ -448,13 +466,16 @@
 
             machine.wait_for_unit("seter-bridge.service")
             machine.wait_for_unit("nftables.service")
+            machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
             machine.succeed("nft list table bridge seter_l2")
             machine.succeed("nft list table inet seter_l3")
+            machine.succeed("nft list table inet seter_dns")
             machine.succeed("ip link show dev seter0")
             machine.succeed("ip -4 address show dev seter0 | grep -F '10.100.0.1/24'")
             machine.fail("ip link show dev seter-alpha")
 
             machine.succeed("systemctl start seter-runtime-alpha.target")
+            machine.wait_for_unit("seter-dns-alpha.service")
             machine.wait_for_unit("seter-tap-alpha.service")
             machine.wait_for_unit("seter-virtiofsd-alpha.service")
             machine.succeed("ip link show dev seter-alpha | grep -F 'master seter0'")
@@ -476,6 +497,7 @@
             machine.succeed("systemctl stop seter-runtime-alpha.target")
             machine.wait_until_fails("ip link show dev seter-alpha")
             machine.wait_until_fails("test -e /run/seter/alpha/virtiofs-ro-store.sock")
+            machine.wait_until_fails("systemctl is-active --quiet seter-dns-alpha.service")
             machine.succeed("test $(systemctl show --value --property Result seter-virtiofsd-alpha.service) = success")
             machine.succeed("systemctl is-active --quiet seter-bridge.service")
             machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
@@ -521,6 +543,8 @@
             imports = [ self.nixosModules.host ];
 
             environment.systemPackages = [
+              pkgs.bind
+              pkgs.dnsmasq
               pkgs.iproute2
               pkgs.iputils
               pkgs.jq
@@ -538,7 +562,12 @@
 
             seter.host = {
               enable = true;
-              workspaces = validWorkspaces;
+              dns.upstreamServers = [ "11.0.0.2" ];
+              workspaces = validWorkspaces // {
+                alpha = validWorkspaces.alpha // {
+                  egress.httpHosts = [ "allowed.example" ];
+                };
+              };
             };
 
             virtualisation.memorySize = 1024;
@@ -550,8 +579,12 @@
 
             machine.wait_for_unit("seter-bridge.service")
             machine.wait_for_unit("nftables.service")
+            machine.succeed("systemctl start seter-dns-alpha.service seter-dns-beta.service")
+            machine.wait_for_unit("seter-dns-alpha.service")
+            machine.wait_for_unit("seter-dns-beta.service")
             machine.succeed("nft list table bridge seter_l2")
             machine.succeed("nft list table inet seter_l3")
+            machine.succeed("nft list table inet seter_dns")
 
             # Use network namespaces as lightweight hostile guests. Their host
             # veth names and guest identities match the registered TAPs, so
@@ -573,14 +606,38 @@
             # A routed outside namespace proves that the default deny is not
             # merely an accidental consequence of forwarding being disabled.
             machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
-            machine.succeed("ip address add 192.0.2.1/24 dev outside-host; ip link set outside-host up")
-            machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 192.0.2.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 192.0.2.1")
+            machine.succeed("ip address add 11.0.0.1/24 dev outside-host; ip link set outside-host up")
+            machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 11.0.0.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 11.0.0.1")
+            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2")
+            machine.wait_for_unit("seter-test-upstream.service")
+
+            # Workspaces can query the host resolver over UDP and TCP. Only
+            # configured egress-name suffixes are forwarded, and IPv6 answers
+            # remain hidden while Seter's network boundary is IPv4-only.
+            machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 allowed.example A) = 11.0.0.2")
+            machine.succeed("test $(ip netns exec alpha dig +tcp +short @10.100.0.1 allowed.example A) = 11.0.0.2")
+            machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 child.allowed.example A) = 11.0.0.2")
+            machine.succeed("ip netns exec alpha dig @10.100.0.1 denied.example A | grep -F 'status: NXDOMAIN'")
+            machine.succeed("ip netns exec beta dig @10.100.0.1 allowed.example A | grep -F 'status: NXDOMAIN'")
+            machine.fail("ip netns exec beta dig +time=1 +tries=1 -p ${toString alphaDnsPort} @10.100.0.1 allowed.example A")
+            machine.succeed("alpha_pid=$(systemctl show --value --property MainPID seter-dns-alpha.service); beta_pid=$(systemctl show --value --property MainPID seter-dns-beta.service); test $(awk '/^Uid:/ { print $2 }' /proc/$alpha_pid/status) != $(awk '/^Uid:/ { print $2 }' /proc/$beta_pid/status)")
+            machine.succeed("test -z \"$(ip netns exec alpha dig +short @10.100.0.1 allowed.example AAAA)\"")
+            machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'query[A] allowed.example from 10.100.0.10'")
+            machine.succeed("getent ahostsv4 alpha.vm | grep -F '10.100.0.10'")
+            machine.fail("ip netns exec alpha dig +time=1 +tries=1 @11.0.0.2 allowed.example A")
+
+            # Opening the internal DNS port in the host firewall must not make
+            # an unrelated service on another host-local address reachable.
+            machine.succeed("systemd-run --unit=seter-test-host-port --property=Type=simple -- ${lib.getExe pkgs.socat} TCP4-LISTEN:${toString alphaDnsPort},bind=11.0.0.1,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
+            machine.wait_for_unit("seter-test-host-port.service")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 11.0.0.1 ${toString alphaDnsPort}")
 
             # A host nftables reload, including a complete ruleset flush, must
             # atomically recreate the Seter tables while workspaces are live.
             machine.succeed("systemctl reload nftables.service")
             machine.succeed("nft list table bridge seter_l2")
             machine.succeed("nft list table inet seter_l3")
+            machine.succeed("nft list table inet seter_dns")
 
             # The host may initiate connections to a workspace. A workspace
             # may not initiate connections to the host, its peers, or routed
@@ -601,7 +658,7 @@
             machine.succeed("test $(nft --json list chain bridge seter_l2 forward | jq '[.nftables[].rule | select(.comment == \"seter lateral isolation alpha\") | .expr[].counter.packets?] | add // 0') -gt 0")
 
             machine.succeed("nft reset counters table inet seter_l3")
-            machine.fail("ip netns exec alpha ping -c 1 -W 1 192.0.2.2")
+            machine.fail("ip netns exec alpha ping -c 1 -W 1 11.0.0.2")
             machine.succeed("test $(nft --json list chain inet seter_l3 forward | jq '[.nftables[].rule | select(.comment == \"seter default-deny alpha\") | .expr[].counter.packets?] | add // 0') -gt 0")
 
             # Registered IPv4/ARP packets pass the bridge identity chain and
@@ -644,7 +701,8 @@
             machine.succeed("mkdir -p /run/systemd/system/nftables.service.d; printf '[Service]\\nExecStart=\\nExecStart=${pkgs.coreutils}/bin/false\\n' > /run/systemd/system/nftables.service.d/fail.conf; systemctl daemon-reload")
             machine.fail("systemctl start seter-runtime-alpha.target")
             machine.fail("ip link show dev seter-alpha")
-            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
+            machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
+            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
           '';
         };
       };
