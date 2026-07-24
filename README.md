@@ -1,5 +1,9 @@
 # Seter
 
+<p align="center">
+  <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
+</p>
+
 Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior is implemented as an early vertical slice; network policy enforcement and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
