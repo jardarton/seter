@@ -20,6 +20,8 @@ nix flake check
 - `nixosModules.host`: host-side Seter module
 - `nixosModules.guest`: project guest module
 - `lib.mkWorkspace`: workspace registry constructor
+- `nixosConfigurations.minimal`: buildable reference microVM
+- `apps.x86_64-linux.test-minimal`: KVM-backed minimal guest verification
 
 ## Status
 

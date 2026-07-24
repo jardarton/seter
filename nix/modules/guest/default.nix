@@ -1,7 +1,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }:
 let
@@ -14,6 +13,13 @@ let
     ;
 in
 {
+  imports = [
+    ./filesystem.nix
+    ./microvm.nix
+    ./networking.nix
+    ./ssh.nix
+  ];
+
   options.seter.guest = {
     enable = mkEnableOption "the Seter project guest conventions";
 
@@ -45,6 +51,5 @@ in
       http_proxy = cfg.proxy;
       https_proxy = cfg.proxy;
     };
-    environment.systemPackages = [ pkgs.git ];
   };
 }

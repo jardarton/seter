@@ -10,6 +10,11 @@
     };
 
     systems.url = "github:nix-systems/default-linux";
+
+    microvm = {
+      url = "github:microvm-nix/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -23,6 +28,7 @@
         ./parts/checks.nix
         ./parts/devshells.nix
         ./parts/formatter.nix
+        ./parts/examples.nix
       ];
     };
 }
