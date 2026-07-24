@@ -1,24 +1,33 @@
 {
-  name,
+  runnerInstallable,
   ip,
-  hostname ? "${name}.vm",
-  memory ? "4G",
-  cpuQuota ? "200%",
+  mac,
+  tap,
+  hostname ? null,
+  memoryMiB ? 4096,
+  cpuQuotaPercent ? 200,
+  sshUser ? "seter",
+  knownHostKey ? null,
   allowedHTTPHosts ? [ ],
   passthroughHosts ? [ ],
   allowedTCP ? [ ],
   secrets ? { },
 }:
 {
-  inherit
-    name
-    ip
-    hostname
-    secrets
-    ;
+  runner.installable = runnerInstallable;
+
+  network = {
+    address = ip;
+    inherit mac tap;
+  };
 
   resources = {
-    inherit memory cpuQuota;
+    inherit memoryMiB cpuQuotaPercent;
+  };
+
+  ssh = {
+    user = sshUser;
+    inherit knownHostKey;
   };
 
   egress = {
@@ -26,4 +35,7 @@
     inherit passthroughHosts;
     tcp = allowedTCP;
   };
+
+  inherit secrets;
 }
+// (if hostname == null then { } else { inherit hostname; })

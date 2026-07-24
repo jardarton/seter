@@ -1,4 +1,5 @@
 mod cli;
+mod registry;
 
 use std::io;
 
@@ -12,6 +13,18 @@ fn main() -> Result<()> {
     init_tracing(cli.verbose);
 
     match cli.command {
+        Command::List => {
+            let registry = registry::Registry::load_default()?;
+            for name in registry.workspaces.keys() {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        Command::Ip { workspace } => {
+            let registry = registry::Registry::load_default()?;
+            println!("{}", registry.workspace(&workspace)?.network.address);
+            Ok(())
+        }
         Command::Completions { shell } => {
             let shell: clap_complete::Shell = shell.into();
             clap_complete::generate(shell, &mut cli::command(), "seter", &mut io::stdout());
