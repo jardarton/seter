@@ -10,6 +10,19 @@
   seter.guest.network.enable = lib.mkForce false;
   seter.guest.projectVolume.image = lib.mkForce "test-project.img";
 
+  # The standalone verification runs without the Seter host module and must
+  # keep its VirtioFS socket in the temporary runner working directory.
+  microvm.shares = lib.mkForce [
+    {
+      proto = "virtiofs";
+      tag = "ro-store";
+      socket = "seter-minimal-virtiofs-ro-store.sock";
+      source = "/nix/store";
+      mountPoint = "/nix/.ro-store";
+      readOnly = true;
+    }
+  ];
+
   systemd.services.seter-vertical-slice-check = {
     description = "Verify the Seter minimal guest";
     wantedBy = [ "multi-user.target" ];

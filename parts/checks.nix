@@ -55,6 +55,7 @@
 
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
+      minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
 
       configurationRejected =
         workspaces:
@@ -116,6 +117,49 @@
         };
       };
 
+      gatewayIpRejected = configurationRejected {
+        broken = mkWorkspace {
+          ip = "10.100.0.1";
+          mac = "02:00:00:00:00:12";
+          tap = "seter-broken";
+        };
+      };
+
+      networkIpRejected = configurationRejected {
+        broken = mkWorkspace {
+          ip = "10.100.0.0";
+          mac = "02:00:00:00:00:12";
+          tap = "seter-broken";
+        };
+      };
+
+      bridgeTapRejected = configurationRejected {
+        broken = mkWorkspace {
+          ip = "10.100.0.12";
+          mac = "02:00:00:00:00:12";
+          tap = "seter0";
+        };
+      };
+
+      outOfSubnetGatewayRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.host
+                hostModuleBase
+                {
+                  seter.host = {
+                    gateway = "10.101.0.1";
+                    workspaces = validWorkspaces;
+                  };
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
       blankInstallableRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
           runner.installable = "   ";
@@ -170,6 +214,7 @@
         nixos-host-module = hostConfiguration.config.system.build.toplevel;
 
         workspace-registry =
+          assert minimalStoreSocket == "/run/seter/minimal/virtiofs-ro-store.sock";
           pkgs.runCommand "seter-workspace-registry-check"
             {
               nativeBuildInputs = [
@@ -204,6 +249,10 @@
           assert duplicateHostnameRejected;
           assert invalidIpRejected;
           assert outOfSubnetIpRejected;
+          assert gatewayIpRejected;
+          assert networkIpRejected;
+          assert bridgeTapRejected;
+          assert outOfSubnetGatewayRejected;
           assert blankInstallableRejected;
           assert blankKnownHostKeyRejected;
           assert blankSecretPlaceholderRejected;
@@ -228,6 +277,59 @@
       }
       // lib.optionalAttrs (system == "x86_64-linux") {
         minimal-runner = self.nixosConfigurations.minimal.config.microvm.declaredRunner;
+
+        host-runtime = pkgs.testers.runNixOSTest {
+          name = "seter-host-runtime";
+
+          nodes.machine = {
+            imports = [ self.nixosModules.host ];
+
+            seter.host = {
+              enable = true;
+              workspaces.alpha = validWorkspaces.alpha;
+            };
+
+            virtualisation.memorySize = 1024;
+            system.stateVersion = "24.11";
+          };
+
+          testScript = ''
+            start_all()
+
+            machine.wait_for_unit("seter-bridge.service")
+            machine.succeed("ip link show dev seter0")
+            machine.succeed("ip -4 address show dev seter0 | grep -F '10.100.0.1/24'")
+            machine.fail("ip link show dev seter-alpha")
+
+            machine.succeed("systemctl start seter-runtime-alpha.target")
+            machine.wait_for_unit("seter-tap-alpha.service")
+            machine.wait_for_unit("seter-virtiofsd-alpha.service")
+            machine.succeed("ip link show dev seter-alpha | grep -F 'master seter0'")
+            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); ip tuntap show dev seter-alpha | grep -F \"user $uid\"")
+            machine.succeed("test $(stat -c %a /var/lib/seter/workspaces/alpha) = 700")
+            machine.succeed("ip tuntap show dev seter-alpha | grep -F 'multi_queue'")
+            machine.succeed("test -S /run/seter/alpha/virtiofs-ro-store.sock")
+            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); test $(awk '/^Uid:/ { print $2 }' /proc/$main/status) = $uid")
+            machine.succeed("stat -c %A /run/seter/alpha/virtiofs-ro-store.sock | grep -E '^s[rwx-]{6}---$'")
+            machine.succeed("stat -c %G /run/seter/alpha/virtiofs-ro-store.sock | grep -E '^seter-alpha-[0-9a-f]{8}$'")
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--shared-dir=/nix/store'")
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--readonly'")
+
+            machine.succeed("systemctl stop seter-runtime-alpha.target")
+            machine.wait_until_fails("ip link show dev seter-alpha")
+            machine.wait_until_fails("test -e /run/seter/alpha/virtiofs-ro-store.sock")
+            machine.succeed("test $(systemctl show --value --property Result seter-virtiofsd-alpha.service) = success")
+            machine.succeed("systemctl is-active --quiet seter-bridge.service")
+            machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+
+            machine.succeed("systemctl stop seter-bridge.service")
+            machine.succeed("ip link add name seter0 type bridge")
+            machine.fail("systemctl start seter-bridge.service")
+            machine.succeed("ip link show dev seter0")
+            machine.succeed("ip link delete dev seter0")
+            machine.succeed("systemctl reset-failed seter-bridge.service")
+          '';
+        };
       };
     };
 }

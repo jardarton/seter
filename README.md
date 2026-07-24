@@ -43,6 +43,19 @@ seter.host = {
 
 Every workspace on one host bridge must have a unique IPv4 address, MAC address, tap interface, and hostname. Evaluation fails when entries conflict. The host module writes a versioned, lifecycle-only projection to `/etc/seter/workspaces.json`; `seter list` and `seter ip <workspace>` read this registry.
 
+## Host runtime plumbing
+
+When `seter.host.enable` is set, the host creates the configured bridge at boot and assigns `seter.host.gateway` to it (`10.100.0.1` by default). Workspace TAP interfaces and VirtioFS daemons remain off while idle. Starting `seter-runtime-<workspace>.target` creates the registered TAP, attaches it to the bridge, and starts a host-owned `virtiofsd` that exposes only `/nix/store` read-only:
+
+```console
+sudo systemctl start seter-runtime-project.target
+sudo systemctl stop seter-runtime-project.target
+```
+
+The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
+
+These units provide VM plumbing only. They do not start the VM, configure DNS, enable forwarding or NAT, or enforce the eventual egress policy.
+
 ## Development
 
 ```console
@@ -64,4 +77,4 @@ nix flake check
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice, and the host exposes a validated workspace registry consumed by `seter list` and `seter ip`. VM lifecycle and host policy enforcement are not implemented yet; the project deliberately does not claim to enforce isolation, egress policy, or secret handling.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry consumed by `seter list` and `seter ip`, plus tested bridge, lifecycle-owned TAP, and read-only VirtioFS plumbing. VM lifecycle and host policy enforcement are not implemented yet; the project deliberately does not claim to enforce isolation, egress policy, or secret handling.

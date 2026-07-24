@@ -68,6 +68,9 @@ in
       {
         proto = "virtiofs";
         tag = "ro-store";
+        # Keep the runner and host module on one deterministic socket
+        # contract. The workspace name is validated by the host registry.
+        socket = "/run/seter/${cfg.name}/virtiofs-ro-store.sock";
         source = "/nix/store";
         mountPoint = "/nix/.ro-store";
         readOnly = true;
