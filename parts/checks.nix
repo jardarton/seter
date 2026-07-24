@@ -13,10 +13,16 @@
           ip,
           mac,
           tap,
+          knownHostKey ? null,
         }:
         self.lib.mkWorkspace {
           runnerInstallable = "github:example/project#nixosConfigurations.guest.config.microvm.declaredRunner";
-          inherit ip mac tap;
+          inherit
+            ip
+            knownHostKey
+            mac
+            tap
+            ;
         };
 
       hostModuleBase = {
@@ -45,6 +51,7 @@
           ip = "10.100.0.10";
           mac = "02:00:00:00:00:10";
           tap = "seter-alpha";
+          knownHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test";
         };
         beta = mkWorkspace {
           ip = "10.100.0.11";
@@ -274,6 +281,7 @@
                 (.workspaces.alpha.network.mac == "02:00:00:00:00:10") and
                 (.workspaces.alpha.resources.memoryMiB == 4096) and
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
+                (.workspaces.alpha.ssh.knownHostKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test") and
                 (.workspaces.alpha.storage.image == "alpha-project.img") and
                 (.workspaces.alpha | has("egress") | not) and
                 (.workspaces.alpha | has("secrets") | not)
@@ -396,6 +404,15 @@
       }
       // lib.optionalAttrs (system == "x86_64-linux") {
         minimal-runner = self.nixosConfigurations.minimal.config.microvm.declaredRunner;
+
+        lifecycle-e2e = import ../tests/lifecycle-e2e.nix {
+          inherit
+            inputs
+            self
+            pkgs
+            system
+            ;
+        };
 
         host-runtime = pkgs.testers.runNixOSTest {
           name = "seter-host-runtime";

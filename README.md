@@ -102,6 +102,8 @@ cargo run -- --help
 nix flake check
 ```
 
+On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that boots the minimal guest through the host module and CLI, connects over SSH, and verifies project-volume persistence across a restart. It requires writable `/dev/kvm` and nested virtualization support.
+
 ## Flake outputs
 
 - `packages.<system>.seter`: Rust CLI

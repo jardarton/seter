@@ -310,7 +310,14 @@ pub fn read_host_key(name: &str) -> Result<i32> {
 
 fn build_runner(installable: &str) -> Result<PathBuf> {
     let output = command("SETER_NIX", "nix")
-        .args(["build", "--no-link", "--print-out-paths", "--"])
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "build",
+            "--no-link",
+            "--print-out-paths",
+            "--",
+        ])
         .arg(installable)
         .output()
         .with_context(|| format!("failed to build runner installable {installable:?}"))?;
