@@ -1,0 +1,5 @@
+/target
+/.direnv
+/result
+*.qcow2
+*.img
