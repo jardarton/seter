@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     net::{SocketAddr, TcpStream},
     os::{
         fd::AsRawFd,
@@ -22,6 +22,7 @@ use crate::registry::{Registry, Workspace};
 const STATE_ROOT: &str = "/var/lib/seter/workspaces";
 const GCROOT_ROOT: &str = "/nix/var/nix/gcroots/per-project";
 const LOCK_ROOT: &str = "/run/lock/seter";
+const PROXY_CA_FILE: &str = "/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem";
 const SSH_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +259,50 @@ pub fn ssh_host_key(name: &str) -> Result<i32> {
         run_elevated(&[OsString::from("__read-host-key"), OsString::from(name)])?;
         Ok(0)
     }
+}
+
+pub fn proxy_ca() -> Result<i32> {
+    let path = env::var_os("SETER_PROXY_CA_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(PROXY_CA_FILE));
+    let metadata = fs::symlink_metadata(&path).with_context(|| {
+        format!(
+            "cannot read the proxy CA at {}; ensure seter-proxy.service has started",
+            path.display()
+        )
+    })?;
+    ensure!(
+        metadata.file_type().is_file(),
+        "proxy CA path {} is not a regular file",
+        path.display()
+    );
+
+    let certificate = fs::read(&path)
+        .with_context(|| format!("failed to read proxy CA certificate {}", path.display()))?;
+    ensure!(
+        !certificate
+            .windows(b"PRIVATE KEY".len())
+            .any(|window| window == b"PRIVATE KEY"),
+        "refusing to print proxy CA file containing private key material"
+    );
+
+    let fingerprint = command("SETER_OPENSSL", "openssl")
+        .args(["x509", "-in"])
+        .arg(&path)
+        .args(["-noout", "-fingerprint", "-sha256"])
+        .output()
+        .context("failed to execute openssl while validating the proxy CA")?;
+    ensure!(
+        fingerprint.status.success(),
+        "proxy CA certificate is invalid: {}",
+        String::from_utf8_lossy(&fingerprint.stderr).trim()
+    );
+
+    io::stdout()
+        .write_all(&certificate)
+        .context("failed to print proxy CA certificate")?;
+    eprintln!("{}", String::from_utf8_lossy(&fingerprint.stdout).trim());
+    Ok(0)
 }
 
 pub fn read_host_key(name: &str) -> Result<i32> {

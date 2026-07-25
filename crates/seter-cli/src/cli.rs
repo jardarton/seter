@@ -38,6 +38,8 @@ pub enum Command {
     Update { workspace: String },
     /// Print the guest SSH host key from its offline project image.
     SshHostKey { workspace: String },
+    /// Print the host proxy's public CA certificate for guest enrollment.
+    ProxyCa,
     /// Remove GC roots belonging to retired workspaces.
     Gc,
     /// Generate shell completion code.

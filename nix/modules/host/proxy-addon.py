@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mitmproxy import ctx, http, tls
 from mitmproxy.exceptions import OptionsError
+from mitmproxy.proxy.mode_specs import RegularMode
 from mitmproxy.proxy import server_hooks
 
 
@@ -162,6 +163,69 @@ class SeterPolicy:
     ) -> None:
         self.server_pins.pop(data.server.id, None)
 
+    async def http_connect(self, flow: http.HTTPFlow) -> None:
+        """Authorize the convenience explicit proxy's HTTPS CONNECT request.
+
+        Transparent clients never need CONNECT. Regular proxy clients do, but
+        they may only establish a TLS tunnel to an exact reviewed host on port
+        443. The following ClientHello and HTTP request remain independently
+        checked, so this endpoint is a convenience rather than a weaker policy
+        path.
+        """
+        client_ip = self._client_ip(flow)
+        workspace = self._workspace(client_ip)
+        host = self._normalize(flow.request.host)
+        port = flow.request.port
+        decision = "deny"
+        reason = "source is not a registered Seter workspace"
+
+        if not isinstance(flow.client_conn.proxy_mode, RegularMode):
+            reason = "HTTP CONNECT is only available on the explicit proxy endpoint"
+        elif workspace is not None:
+            allowed_hosts = workspace["httpHosts"] | workspace["passthroughHosts"]
+            if port != 443:
+                reason = "explicit HTTP CONNECT is restricted to port 443"
+            elif host not in allowed_hosts:
+                reason = (
+                    f"host {host or '<missing>'!r} is not in this workspace's "
+                    "HTTP or TLS-passthrough allowlist"
+                )
+            else:
+                address, error = await self._resolve_public_ipv4(host, port)
+                if error is not None:
+                    reason = error
+                else:
+                    assert address is not None
+                    decision = "allow"
+                    reason = "CONNECT host is allowlisted"
+                    self.server_pins[flow.server_conn.id] = (host, port, address)
+                    # Resolve the reviewed authority ourselves rather than
+                    # allowing mitmproxy to trust the client's DNS result.
+                    flow.server_conn.address = (address, port)
+                    flow.server_conn.sni = host
+
+        self._audit(
+            {
+                "workspace": workspace["name"] if workspace is not None else None,
+                "source": client_ip,
+                "decision": decision,
+                "method": "CONNECT",
+                "host": host,
+                "port": port,
+                "reason": reason,
+            }
+        )
+
+        if decision == "deny":
+            flow.response = http.Response.make(
+                403,
+                f"Seter network policy denied this proxy tunnel: {reason}\n",
+                {
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Cache-Control": "no-store",
+                },
+            )
+
     async def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         """Pin authorized TLS connections to their reviewed policy hostname.
 
@@ -240,11 +304,15 @@ class SeterPolicy:
         decision = "deny"
         reason = "source is not a registered Seter workspace"
 
+        # CONNECT is authorized and audited in http_connect before mitmproxy
+        # starts the nested TLS flow. It is never forwarded as an ordinary
+        # request, and a denial already carries its own 403 response.
+        if flow.request.method.upper() == "CONNECT":
+            return
+
         if workspace is not None:
             if scheme not in ("http", "https"):
                 reason = f"unsupported URL scheme {scheme!r}"
-            elif flow.request.method.upper() == "CONNECT":
-                reason = "HTTP CONNECT tunnels are not permitted"
             elif host not in workspace["httpHosts"]:
                 reason = f"host {host or '<missing>'!r} is not in this workspace's HTTP allowlist"
             elif scheme == "https" and self._normalize(flow.client_conn.sni) != host:

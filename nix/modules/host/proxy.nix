@@ -45,9 +45,22 @@ let
         echo "Seter proxy exited before becoming ready" >&2
         exit 1
       fi
-      if ${pkgs.iproute2}/bin/ss --no-header --listening --numeric --tcp \
-        'sport = :${toString proxyCfg.port}' \
-        | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.port}"}; then
+      listeners=$(${pkgs.iproute2}/bin/ss --no-header --listening --numeric --tcp)
+      if printf '%s\n' "$listeners" \
+          | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.port}"} \
+        && printf '%s\n' "$listeners" \
+          | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.explicitPort}"}; then
+        # mitmproxy creates this site CA once and reuses it from its persistent
+        # state directory. Publish only the certificate; the signing key stays
+        # mode 0600 and owned by the unprivileged proxy account.
+        test -s /var/lib/seter-proxy/mitmproxy-ca.pem
+        test "$(${pkgs.coreutils}/bin/stat -c %a /var/lib/seter-proxy/mitmproxy-ca.pem)" = 600
+        test -s /var/lib/seter-proxy/mitmproxy-ca.p12
+        test "$(${pkgs.coreutils}/bin/stat -c %a /var/lib/seter-proxy/mitmproxy-ca.p12)" = 600
+        test -s /var/lib/seter-proxy/mitmproxy-ca-cert.pem
+        ${pkgs.coreutils}/bin/install -m 0644 \
+          /var/lib/seter-proxy/mitmproxy-ca-cert.pem \
+          /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem
         exit 0
       fi
       ${pkgs.coreutils}/bin/sleep 0.1
@@ -76,6 +89,17 @@ in
       '';
     };
 
+    explicitPort = mkOption {
+      type = types.ints.between 1024 49151;
+      default = 18081;
+      description = ''
+        Host port used by the optional explicit HTTP proxy endpoint. The guest
+        module points HTTP_PROXY and HTTPS_PROXY here by default. Transparent
+        interception remains the enforcement boundary for clients that ignore
+        those variables.
+      '';
+    };
+
     logRequests = mkOption {
       type = types.bool;
       default = true;
@@ -101,6 +125,10 @@ in
         assertion = cfg.operatorGroup != proxyAccount;
         message = "seter.host.operatorGroup must not collide with the Seter proxy service account";
       }
+      {
+        assertion = proxyCfg.port != proxyCfg.explicitPort;
+        message = "seter.host.proxy.port and seter.host.proxy.explicitPort must be different";
+      }
     ]
     ++ lib.mapAttrsToList (name: workspace: {
       assertion =
@@ -117,6 +145,12 @@ in
       uid = proxyCfg.uid;
       description = "Seter HTTP policy proxy";
     };
+
+    # Keep the third-party mitmproxy confdir private and publish only the CA
+    # certificate through a separate, intentionally traversable directory.
+    systemd.tmpfiles.rules = [
+      "d /var/lib/seter-proxy-public 0755 ${proxyAccount} ${proxyAccount} -"
+    ];
 
     systemd.services.seter-proxy = {
       description = "Seter transparent HTTP and HTTPS policy proxy";
@@ -139,9 +173,8 @@ in
         Environment = "PYTHONUNBUFFERED=1";
         ExecStart = ''
           ${lib.getExe' mitmproxy "mitmdump"} \
-            --mode transparent \
-            --listen-host ${cfg.gateway} \
-            --listen-port ${toString proxyCfg.port} \
+            --mode transparent@${cfg.gateway}:${toString proxyCfg.port} \
+            --mode regular@${cfg.gateway}:${toString proxyCfg.explicitPort} \
             --scripts ${addon} \
             --set confdir=/var/lib/seter-proxy \
             --set connection_strategy=lazy \
@@ -170,6 +203,7 @@ in
         PrivateTmp = true;
         ProtectControlGroups = true;
         ProtectHome = true;
+        ReadWritePaths = [ "/var/lib/seter-proxy-public" ];
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
         ProtectSystem = "strict";
@@ -207,7 +241,7 @@ in
           type filter hook output priority -5; policy accept;
           meta skuid ${toString proxyCfg.uid} udp dport 53 accept
           meta skuid ${toString proxyCfg.uid} tcp dport 53 accept
-          meta skuid ${toString proxyCfg.uid} ip saddr ${cfg.gateway} tcp sport ${toString proxyCfg.port} ct state established accept
+          meta skuid ${toString proxyCfg.uid} ip saddr ${cfg.gateway} tcp sport { ${toString proxyCfg.port}, ${toString proxyCfg.explicitPort} } ct state established accept
           meta skuid ${toString proxyCfg.uid} fib daddr type { local, broadcast, multicast } counter reject comment "seter proxy local destination"
           meta skuid ${toString proxyCfg.uid} ip daddr {
             0.0.0.0/8,
@@ -233,6 +267,9 @@ in
     # The redirect has translated the destination before host-input filtering.
     # The identity-aware Seter chain further restricts this opening to known
     # workspace source addresses and the bridge gateway.
-    networking.firewall.interfaces.${cfg.bridge}.allowedTCPPorts = [ proxyCfg.port ];
+    networking.firewall.interfaces.${cfg.bridge}.allowedTCPPorts = [
+      proxyCfg.port
+      proxyCfg.explicitPort
+    ];
   };
 }

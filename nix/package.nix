@@ -6,6 +6,7 @@
   coreutils,
   e2fsprogs,
   nix,
+  openssl,
   openssh,
   systemd,
 }:
@@ -37,6 +38,7 @@ rustPlatform.buildRustPackage {
           coreutils
           e2fsprogs
           nix
+          openssl
           openssh
           systemd
         ]

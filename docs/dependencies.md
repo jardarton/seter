@@ -37,6 +37,7 @@ Seter also relies on the following system components, all installed and configur
 - BIND DNS utilities — host-side refresh of direct-TCP destination address sets
 - systemd — transient VM units and resource limits
 - OpenSSH — guest command execution and interactive shells
+- OpenSSL — proxy CA validation and fingerprint reporting during guest enrollment
 - iproute2 — bridge and tap interface management
 - direnv — development environment activation
 

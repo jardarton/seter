@@ -25,4 +25,4 @@ The verification boots a dedicated test variant twice and checks the boundary ma
 
 Cloud Hypervisor requires a separately running `virtiofsd` for command-line runners. Seter's host module manages it and the tap interface for registered workspaces. For manual experimentation outside that module, use the runner's `virtiofsd-run` helper before `microvm-run` and create/configure the `seter-minimal` tap interface.
 
-The example deliberately contains no authorized key, secrets, personal addresses, or host-specific paths. Override `seter.guest.ssh.authorizedKeys` and networking values in a real workspace definition.
+The example deliberately contains no authorized key, proxy CA, secrets, personal addresses, or host-specific paths. Override `seter.guest.ssh.authorizedKeys` and networking values in a real workspace definition. After the host proxy first starts, export its public CA with `seter proxy-ca`, review and commit the certificate in trusted configuration, and set `seter.guest.proxyCaCertificate = builtins.readFile ./seter-proxy-ca-cert.pem`.

@@ -89,6 +89,7 @@
       dnsService = hostConfiguration.config.systemd.services.seter-dns-alpha;
       proxyService = hostConfiguration.config.systemd.services.seter-proxy;
       proxyPort = hostConfiguration.config.seter.host.proxy.port;
+      explicitProxyPort = hostConfiguration.config.seter.host.proxy.explicitPort;
       tcpService = tcpHostConfiguration.config.systemd.services.seter-tcp-egress-alpha;
       tcpTapRequires = tcpHostConfiguration.config.systemd.services.seter-tap-alpha.requires;
       tcpNftablesConfig = tcpHostConfiguration.config.networking.nftables;
@@ -138,6 +139,48 @@
               -addext 'basicConstraints=critical,CA:TRUE' \
               -keyout "$out/key.pem" -out "$out/cert.pem"
           '';
+
+      # Public test PKI. The committed private server key protects no real
+      # system and exists only to exercise guest trust-store integration.
+      proxyTrustCa = ../tests/fixtures/proxy-e2e-ca-cert.pem;
+      proxyTrustServerCertificate = ../tests/fixtures/proxy-e2e-server-cert.pem;
+      proxyTrustServerKey = ../tests/fixtures/proxy-e2e-server-key.pem;
+
+      explicitProxyRelay = pkgs.writeText "seter-explicit-proxy-relay.py" ''
+        import select
+        import socket
+        import threading
+
+        def relay(client):
+            with client:
+                request = b""
+                while b"\r\n\r\n" not in request and len(request) < 16384:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        return
+                    request += chunk
+                if not request.startswith(b"CONNECT proxy-e2e.example:443 HTTP/"):
+                    client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    return
+                with socket.create_connection(("127.0.0.1", 8443)) as upstream:
+                    client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    sockets = [client, upstream]
+                    while True:
+                        readable, _, _ = select.select(sockets, [], [], 10)
+                        if not readable:
+                            return
+                        for source in readable:
+                            data = source.recv(65536)
+                            if not data:
+                                return
+                            destination = upstream if source is client else client
+                            destination.sendall(data)
+
+        with socket.create_server(("0.0.0.0", 18081), reuse_port=True) as listener:
+            while True:
+                client, _ = listener.accept()
+                threading.Thread(target=relay, args=(client,), daemon=True).start()
+      '';
 
       proxyHttpServer = pkgs.writeText "seter-proxy-test-http-server.py" ''
         from functools import partial
@@ -349,6 +392,25 @@
         };
       };
 
+      proxyPortCollisionRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.host
+                hostModuleBase
+                {
+                  seter.host = {
+                    proxy.explicitPort = 18080;
+                    workspaces = validWorkspaces;
+                  };
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
       tcpWithoutFirewallRejected =
         !(builtins.tryEval (
           builtins.deepSeq
@@ -382,6 +444,32 @@
             }).config.system.build.toplevel.drvPath
             true
         )).success;
+
+      guestPrivateProxyKeyRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    proxyCaCertificate = ''
+                      -----BEGIN CERTIFICATE-----
+                      invalid-test-certificate
+                      -----END CERTIFICATE-----
+                      -----BEGIN PRIVATE KEY-----
+                      must-never-enter-the-store
+                      -----END PRIVATE KEY-----
+                    '';
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
     in
     {
       checks = {
@@ -408,6 +496,8 @@
           assert builtins.elem alphaDnsPort
             hostConfiguration.config.networking.firewall.interfaces.seter0.allowedUDPPorts;
           assert builtins.elem proxyPort
+            hostConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
+          assert builtins.elem explicitProxyPort
             hostConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
           assert nftablesConfig.enable;
           assert nftablesConfig.tables.seter_l2.family == "bridge";
@@ -553,23 +643,40 @@
           assert caseInsensitiveSecretHostAccepted;
           assert overlappingProxyHostsRejected;
           assert proxyPortAsDirectTcpRejected;
+          assert proxyPortCollisionRejected;
           assert tcpWithoutFirewallRejected;
           assert tcpWithoutForwardFilterRejected;
+          assert guestPrivateProxyKeyRejected;
           pkgs.runCommand "seter-workspace-uniqueness-check" { } ''
             touch "$out"
           '';
 
         nixos-guest-module =
-          (inputs.nixpkgs.lib.nixosSystem {
-            inherit system;
-            modules = [
-              self.nixosModules.guest
-              {
-                seter.guest.enable = true;
-                system.stateVersion = "24.11";
-              }
-            ];
-          }).config.system.build.toplevel;
+          let
+            # Public, self-signed test CA. The matching private key is
+            # deliberately not retained in the repository.
+            proxyCaCertificate = builtins.readFile proxyTrustCa;
+            guestConfiguration = inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    network.enable = true;
+                    proxyCaCertificate = proxyCaCertificate;
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            };
+            sessionVariables = guestConfiguration.config.environment.sessionVariables;
+          in
+          assert sessionVariables.HTTP_PROXY == "http://10.100.0.1:18081";
+          assert sessionVariables.HTTPS_PROXY == "http://10.100.0.1:18081";
+          assert sessionVariables.NO_PROXY == "127.0.0.1,localhost,::1,10.100.0.10";
+          assert builtins.elem proxyCaCertificate guestConfiguration.config.security.pki.certificates;
+          guestConfiguration.config.system.build.toplevel;
 
       }
       // lib.optionalAttrs (system == "x86_64-linux") {
@@ -582,6 +689,57 @@
             pkgs
             system
             ;
+        };
+
+        proxy-trust-e2e = pkgs.testers.runNixOSTest {
+          name = "seter-proxy-trust-e2e";
+
+          nodes = {
+            guest =
+              { lib, ... }:
+              {
+                imports = [ self.nixosModules.guest ];
+                # The microvm module's package overlay is needed for runners,
+                # but this check boots the guest configuration directly as a
+                # NixOS test node whose package set is intentionally read-only.
+                nixpkgs.overlays = lib.mkForce [ ];
+
+                environment.systemPackages = [ pkgs.curl ];
+                users.users.tester.isNormalUser = true;
+
+                seter.guest = {
+                  enable = true;
+                  network.enable = false;
+                  projectVolume.enable = false;
+                  ssh.enable = false;
+                  proxy = "http://proxy:18081";
+                  proxyCaCertificate = builtins.readFile proxyTrustCa;
+                };
+
+                virtualisation.memorySize = 1024;
+                system.stateVersion = "24.11";
+              };
+
+            proxy = {
+              environment.systemPackages = [ pkgs.python3 ];
+              networking.firewall.allowedTCPPorts = [ 18081 ];
+              virtualisation.memorySize = 768;
+              system.stateVersion = "24.11";
+            };
+          };
+
+          testScript = ''
+            start_all()
+
+            proxy.succeed("mkdir -p /tmp/seter-proxy-trust-upstream; printf 'trusted proxy e2e\\n' > /tmp/seter-proxy-trust-upstream/index.html")
+            proxy.succeed("systemd-run --unit=seter-proxy-trust-upstream --property=Type=simple -- ${pkgs.runtimeShell} -c 'cd /tmp/seter-proxy-trust-upstream && exec ${lib.getExe pkgs.openssl} s_server -quiet -accept 127.0.0.1:8443 -cert ${proxyTrustServerCertificate} -key ${proxyTrustServerKey} -WWW'")
+            proxy.wait_for_unit("seter-proxy-trust-upstream.service")
+            proxy.succeed("systemd-run --unit=seter-proxy-trust-relay --property=Type=simple -- ${pkgs.python3}/bin/python ${explicitProxyRelay}")
+            proxy.wait_for_unit("seter-proxy-trust-relay.service")
+
+            guest.wait_until_succeeds("getent ahostsv4 proxy")
+            guest.succeed("su - tester -c 'test \"$HTTPS_PROXY\" = http://proxy:18081; test \"$NO_PROXY\" = 127.0.0.1,localhost,::1; curl --fail --silent https://proxy-e2e.example/index.html | grep -F \"trusted proxy e2e\"'")
+          '';
         };
 
         host-runtime = pkgs.testers.runNixOSTest {
@@ -613,6 +771,16 @@
             machine.wait_for_unit("seter-bridge.service")
             machine.wait_for_unit("nftables.service")
             machine.wait_for_unit("seter-proxy.service")
+            machine.succeed("seter proxy-ca > /tmp/seter-proxy-ca.pem 2> /tmp/seter-proxy-ca-fingerprint")
+            machine.succeed("cmp /tmp/seter-proxy-ca.pem /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem")
+            machine.succeed("grep -F 'sha256 Fingerprint=' /tmp/seter-proxy-ca-fingerprint")
+            machine.succeed("runuser -u outsider -- seter proxy-ca > /tmp/outsider-proxy-ca.pem 2> /tmp/outsider-proxy-ca-fingerprint")
+            machine.succeed("cmp /tmp/outsider-proxy-ca.pem /tmp/seter-proxy-ca.pem")
+            machine.succeed("test $(stat -c %a /var/lib/seter-proxy) = 700")
+            machine.succeed("test $(stat -c %a /var/lib/seter-proxy-public) = 755")
+            machine.fail("runuser -u outsider -- test -r /var/lib/seter-proxy/mitmproxy-ca.pem")
+            machine.fail("runuser -u outsider -- test -r /var/lib/seter-proxy/mitmproxy-ca.p12")
+            machine.succeed("systemctl restart seter-proxy.service; cmp /tmp/seter-proxy-ca.pem /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem")
             machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
             machine.succeed("nft list table bridge seter_l2")
             machine.succeed("nft list table inet seter_l3")
@@ -868,12 +1036,16 @@
             # returns a useful 403 on denials, and resolves the reviewed host
             # instead of trusting the packet's original destination.
             machine.succeed("ip netns exec alpha curl --noproxy '*' --fail --silent http://allowed.example/ | grep -F 'allowed upstream'")
+            machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --fail --silent http://allowed.example/ | grep -F 'allowed upstream'")
+            machine.succeed("test $(ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --silent --output /tmp/explicit-denied --write-out '%{http_code}' http://denied.example/) = 403; grep -F 'not in this workspace' /tmp/explicit-denied")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --fail --silent http://allowed.example/ http://allowed.example/index.html | grep -c 'allowed upstream') = 2")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --fail --silent -H 'Host: allowed.example' http://11.0.0.1/ | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/denied --write-out '%{http_code}' -H 'Host: denied.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/denied")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/child-denied --write-out '%{http_code}' -H 'Host: child.allowed.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/child-denied")
             machine.succeed("test $(ip netns exec beta curl --noproxy '*' --silent --output /tmp/beta-denied --write-out '%{http_code}' -H 'Host: allowed.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/beta-denied")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
+            machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --cacert /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
+            machine.succeed("printf 'CONNECT allowed.example:22 HTTP/1.1\\r\\nHost: allowed.example:22\\r\\n\\r\\n' | ip netns exec alpha ${lib.getExe pkgs.netcat} -w 2 10.100.0.1 ${toString explicitProxyPort} | grep -F '403'")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --resolve allowed.example:443:11.0.0.1 https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/https-denied --write-out '%{http_code}' --resolve denied.example:443:11.0.0.2 https://denied.example/) = 403; grep -F 'not in this workspace' /tmp/https-denied")
             machine.succeed("ip netns exec alpha ${lib.getExe pkgs.openssl} s_client -connect 11.0.0.2:443 -noservername </dev/null >/dev/null 2>&1 || true; journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"host\":\"\"' | grep -F 'missing'")
@@ -895,6 +1067,7 @@
             # reviewed SNI itself. Passthrough names are HTTPS-only and remain
             # isolated between workspaces.
             machine.succeed("ip netns exec alpha curl --noproxy '*' --cacert ${proxyTestCertificate}/cert.pem --fail --silent https://passthrough.example/index.html | grep -F 'allowed upstream'")
+            machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --cacert ${proxyTestCertificate}/cert.pem --fail --silent https://passthrough.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --cacert ${proxyTestCertificate}/cert.pem --fail --silent --resolve passthrough.example:443:11.0.0.1 https://passthrough.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/passthrough-http-denied --write-out '%{http_code}' -H 'Host: passthrough.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/passthrough-http-denied")
             machine.succeed("test $(ip netns exec beta curl --noproxy '*' --insecure --silent --output /tmp/passthrough-beta-denied --write-out '%{http_code}' --resolve passthrough.example:443:11.0.0.2 https://passthrough.example/) = 403; grep -F 'not in this workspace' /tmp/passthrough-beta-denied")

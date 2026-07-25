@@ -42,6 +42,7 @@ fn run() -> Result<i32> {
         Command::Status { workspace } => lifecycle::status(workspace.as_deref()),
         Command::Shell { workspace } => lifecycle::shell(&workspace),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
+        Command::ProxyCa => lifecycle::proxy_ca(),
         Command::InstallRunner { workspace, runner } => {
             lifecycle::install_runner(&workspace, &runner)
         }
@@ -84,6 +85,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Ip { .. } => "ip",
         Command::Update { .. } => "update",
         Command::SshHostKey { .. } => "ssh-host-key",
+        Command::ProxyCa => "proxy-ca",
         Command::Gc => "gc",
         Command::Completions { .. } => "completions",
         Command::InstallRunner { .. } => "__install-runner",
