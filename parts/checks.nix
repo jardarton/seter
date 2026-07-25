@@ -116,7 +116,7 @@
             mkdir -p "$out"
             openssl req -x509 -newkey rsa:2048 -nodes -days 36500 \
               -subj '/CN=allowed.example' \
-              -addext 'subjectAltName=DNS:allowed.example,DNS:passthrough.example' \
+              -addext 'subjectAltName=DNS:allowed.example,DNS:second-allowed.example,DNS:passthrough.example' \
               -addext 'basicConstraints=critical,CA:TRUE' \
               -keyout "$out/key.pem" -out "$out/cert.pem"
           '';
@@ -320,6 +320,7 @@
           assert nftablesConfig.tables.seter_l3.family == "inet";
           assert nftablesConfig.tables.seter_dns.family == "inet";
           assert nftablesConfig.tables.seter_proxy.family == "inet";
+          assert nftablesConfig.tables.seter_proxy_output.family == "inet";
           assert builtins.any (
             entry: entry.command == "${lifecycleHelper} __start alpha" && builtins.elem "NOPASSWD" entry.options
           ) lifecycleSudoCommands;
@@ -603,12 +604,15 @@
             networking.firewall.enable = false;
             networking.hosts."11.0.0.2" = [
               "allowed.example"
+              "bad-cert.example"
               "passthrough.example"
+              "second-allowed.example"
             ];
             networking.hosts."127.0.0.1" = [
               "private.example"
               "private-passthrough.example"
             ];
+            networking.hosts."224.0.0.1" = [ "multicast.example" ];
             # Exercise the strongest reload mode: Seter's managed tables must
             # be recreated as part of the same transaction after a full flush.
             networking.nftables.flushRuleset = true;
@@ -621,7 +625,10 @@
                 alpha = validWorkspaces.alpha // {
                   egress.httpHosts = [
                     "allowed.example"
+                    "bad-cert.example"
+                    "multicast.example"
                     "private.example"
+                    "second-allowed.example"
                   ];
                   egress.passthroughHosts = [
                     "passthrough.example"
@@ -648,6 +655,7 @@
             machine.succeed("nft list table inet seter_l3")
             machine.succeed("nft list table inet seter_dns")
             machine.succeed("nft list table inet seter_proxy")
+            machine.succeed("nft list table inet seter_proxy_output")
 
             # Use network namespaces as lightweight hostile guests. Their host
             # veth names and guest identities match the registered TAPs, so
@@ -671,7 +679,7 @@
             machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
             machine.succeed("ip address add 11.0.0.1/24 dev outside-host; ip link set outside-host up")
             machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 11.0.0.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 11.0.0.1")
-            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2 --address=/passthrough.example/11.0.0.2")
+            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/passthrough.example/11.0.0.2 --address=/second-allowed.example/11.0.0.2")
             machine.wait_for_unit("seter-test-upstream.service")
             machine.succeed("mkdir -p /tmp/seter-upstream; printf 'allowed upstream\\n' > /tmp/seter-upstream/index.html")
             machine.succeed("systemd-run --unit=seter-test-http --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer}")
@@ -707,7 +715,18 @@
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --resolve allowed.example:443:11.0.0.1 https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/https-denied --write-out '%{http_code}' --resolve denied.example:443:11.0.0.2 https://denied.example/) = 403; grep -F 'not in this workspace' /tmp/https-denied")
+            machine.succeed("ip netns exec alpha ${lib.getExe pkgs.openssl} s_client -connect 11.0.0.2:443 -noservername </dev/null >/dev/null 2>&1 || true; journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"host\":\"\"' | grep -F 'missing'")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/sni-host-mismatch --write-out '%{http_code}' -H 'Host: second-allowed.example' https://allowed.example/) = 403; grep -F 'SNI and HTTP host do not match' /tmp/sni-host-mismatch")
+            machine.fail("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://bad-cert.example/")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/private-denied --write-out '%{http_code}' -H 'Host: private.example' http://11.0.0.2/) = 403; grep -F 'did not resolve to a public IPv4 address' /tmp/private-denied")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/multicast-denied --write-out '%{http_code}' -H 'Host: multicast.example' http://11.0.0.2/) = 403; grep -F 'did not resolve to a public IPv4 address' /tmp/multicast-denied")
+
+            # Private-address denial is also enforced on the proxy account's
+            # output packets, independently of the Python policy addon.
+            machine.succeed("systemd-run --unit=seter-test-private-http --property=Type=simple -- ${lib.getExe pkgs.socat} TCP4-LISTEN:18081,bind=127.0.0.1,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
+            machine.wait_for_unit("seter-test-private-http.service")
+            machine.succeed("${lib.getExe pkgs.netcat} -z -w 1 127.0.0.1 18081")
+            machine.fail("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${lib.getExe pkgs.netcat} -z -w 1 127.0.0.1 18081")
 
             # Passthrough policy is selected solely from the TLS SNI. The
             # upstream certificate reaches the client unchanged, while the
@@ -738,6 +757,7 @@
             machine.succeed("nft list table inet seter_l3")
             machine.succeed("nft list table inet seter_dns")
             machine.succeed("nft list table inet seter_proxy")
+            machine.succeed("nft list table inet seter_proxy_output")
 
             # The host may initiate connections to a workspace. A workspace
             # may not initiate connections to the host, its peers, or routed
@@ -796,6 +816,7 @@
             machine.fail("nft list table bridge seter_l2")
             machine.fail("nft list table inet seter_l3")
             machine.fail("nft list table inet seter_proxy")
+            machine.fail("nft list table inet seter_proxy_output")
 
             # If the nftables policy cannot load, its dependency prevents a
             # registered TAP from being created.
@@ -805,6 +826,12 @@
             machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
             machine.fail("systemctl is-active --quiet seter-proxy.service")
             machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
+
+            # A proxy startup failure must also keep the workspace TAP absent.
+            machine.succeed("systemctl start nftables.service; mkdir -p /run/systemd/system/seter-proxy.service.d; printf '[Service]\\nExecStart=\\nExecStart=${pkgs.coreutils}/bin/false\\n' > /run/systemd/system/seter-proxy.service.d/fail.conf; systemctl daemon-reload")
+            machine.fail("systemctl start seter-runtime-alpha.target")
+            machine.fail("ip link show dev seter-alpha")
+            machine.succeed("rm -rf /run/systemd/system/seter-proxy.service.d; systemctl daemon-reload; systemctl reset-failed seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
           '';
         };
       };

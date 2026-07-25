@@ -32,16 +32,22 @@ let
   policyFile = pkgs.writeText "seter-proxy-policy.json" (builtins.toJSON policy);
   addon = ./proxy-addon.py;
   # The pinned Nixpkgs currently carries msgpack 1.2 with mitmproxy's
-  # conservative <=1.1.2 metadata bound. The package imports and runs with
-  # 1.2, so bypass only that metadata check until Nixpkgs catches up.
-  mitmproxy = pkgs.mitmproxy.overridePythonAttrs (_: {
-    dontCheckRuntimeDeps = true;
+  # conservative <=1.1.2 metadata bound. Relax only that dependency until
+  # Nixpkgs catches up, preserving checks for every other runtime dependency.
+  mitmproxy = pkgs.mitmproxy.overridePythonAttrs (old: {
+    pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "msgpack" ];
   });
   proxyAccount = "seter-proxy";
   waitForProxy = pkgs.writeShellScript "seter-proxy-ready" ''
     set -eu
     for attempt in $(${pkgs.coreutils}/bin/seq 1 300); do
-      if ${lib.getExe pkgs.netcat} -z -w 1 ${lib.escapeShellArg cfg.gateway} ${toString proxyCfg.port}; then
+      if ! kill -0 "$MAINPID" 2>/dev/null; then
+        echo "Seter proxy exited before becoming ready" >&2
+        exit 1
+      fi
+      if ${pkgs.iproute2}/bin/ss --no-header --listening --numeric --tcp \
+        'sport = :${toString proxyCfg.port}' \
+        | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.port}"}; then
         exit 0
       fi
       ${pkgs.coreutils}/bin/sleep 0.1
@@ -52,6 +58,15 @@ let
 in
 {
   options.seter.host.proxy = {
+    uid = mkOption {
+      type = types.ints.between 1 65533;
+      default = 60534;
+      description = ''
+        Fixed host UID for the Seter proxy account. The UID identifies proxy
+        output packets to nftables and must not be used by another account.
+      '';
+    };
+
     port = mkOption {
       type = types.ints.between 1024 49151;
       default = 18080;
@@ -99,6 +114,7 @@ in
     users.users.${proxyAccount} = {
       isSystemUser = true;
       group = proxyAccount;
+      uid = proxyCfg.uid;
       description = "Seter HTTP policy proxy";
     };
 
@@ -143,6 +159,11 @@ in
         ExecStartPost = waitForProxy;
         Restart = "on-failure";
         RestartSec = "1s";
+        MemoryMax = 512 * 1024 * 1024;
+        TasksMax = 256;
+        LimitNOFILE = 8192;
+        LogRateLimitIntervalSec = "1s";
+        LogRateLimitBurst = 1000;
         CapabilityBoundingSet = [ ];
         NoNewPrivileges = true;
         PrivateDevices = true;
@@ -154,6 +175,7 @@ in
         ProtectSystem = "strict";
         RestrictAddressFamilies = [
           "AF_INET"
+          "AF_NETLINK"
           "AF_UNIX"
         ];
         RestrictNamespaces = true;
@@ -170,6 +192,40 @@ in
           ${lib.concatMapStringsSep "\n" (workspace: ''
             iifname "${cfg.bridge}" ip saddr ${workspace.network.address} tcp dport { 80, 443 } meta mark set 0x53455450 redirect to :${toString proxyCfg.port} comment "seter proxy ${workspace.name}"
           '') (lib.mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces)}
+        }
+      '';
+    };
+
+    # Hostname checks in the addon are the primary destination policy. Keep a
+    # second boundary on the proxy account itself so a parser bug cannot turn
+    # the unprivileged service into a path to host or private-network services.
+    # DNS is the only private-address exception required by getaddrinfo.
+    networking.nftables.tables.seter_proxy_output = {
+      family = "inet";
+      content = ''
+        chain proxy_output {
+          type filter hook output priority -5; policy accept;
+          meta skuid ${toString proxyCfg.uid} udp dport 53 accept
+          meta skuid ${toString proxyCfg.uid} tcp dport 53 accept
+          meta skuid ${toString proxyCfg.uid} ip saddr ${cfg.gateway} tcp sport ${toString proxyCfg.port} ct state established accept
+          meta skuid ${toString proxyCfg.uid} fib daddr type { local, broadcast, multicast } counter reject comment "seter proxy local destination"
+          meta skuid ${toString proxyCfg.uid} ip daddr {
+            0.0.0.0/8,
+            10.0.0.0/8,
+            100.64.0.0/10,
+            127.0.0.0/8,
+            169.254.0.0/16,
+            172.16.0.0/12,
+            192.0.0.0/24,
+            192.0.2.0/24,
+            192.168.0.0/16,
+            198.18.0.0/15,
+            198.51.100.0/24,
+            203.0.113.0/24,
+            224.0.0.0/4,
+            240.0.0.0/4
+          } counter reject comment "seter proxy non-public destination"
+          meta skuid ${toString proxyCfg.uid} ip daddr ${cfg.subnet} counter reject comment "seter proxy workspace destination"
         }
       '';
     };

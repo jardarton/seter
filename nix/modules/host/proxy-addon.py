@@ -1,6 +1,8 @@
+import asyncio
 import ipaddress
 import json
 import socket
+import time
 from pathlib import Path
 
 from mitmproxy import ctx, http, tls
@@ -12,6 +14,12 @@ class SeterPolicy:
     def __init__(self) -> None:
         self.workspaces: dict[str, dict[str, object]] = {}
         self.server_pins: dict[str, tuple[str, int, str]] = {}
+        self.resolve_cache: dict[
+            tuple[str, int], tuple[float, tuple[str | None, str | None]]
+        ] = {}
+        self.resolve_inflight: dict[
+            tuple[str, int], asyncio.Task[tuple[str | None, str | None]]
+        ] = {}
 
     def load(self, loader) -> None:
         loader.add_option(
@@ -64,6 +72,7 @@ class SeterPolicy:
                     ),
                 }
             self.workspaces = parsed
+            self.resolve_cache.clear()
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise OptionsError(f"cannot load Seter policy: {error}") from error
 
@@ -77,27 +86,59 @@ class SeterPolicy:
         return self.workspaces.get(client_ip)
 
     @staticmethod
-    def _resolve_public_ipv4(host: str, port: int) -> tuple[str | None, str | None]:
-        """Resolve and pin a hostname without granting access to host networks."""
+    async def _lookup_public_ipv4(
+        host: str, port: int
+    ) -> tuple[str | None, str | None]:
+        """Resolve a public-unicast address without blocking mitmproxy's loop."""
         try:
-            answers = socket.getaddrinfo(
-                host,
-                port,
-                family=socket.AF_INET,
-                type=socket.SOCK_STREAM,
+            answers = await asyncio.get_running_loop().getaddrinfo(
+                host, port, family=socket.AF_INET, type=socket.SOCK_STREAM
             )
-        except socket.gaierror as error:
+        except OSError as error:
             return None, f"host {host!r} could not be resolved: {error}"
 
         addresses = list(dict.fromkeys(answer[4][0] for answer in answers))
         public_addresses = [
             address
             for address in addresses
-            if ipaddress.ip_address(address).is_global
+            if (
+                ipaddress.ip_address(address).is_global
+                and not ipaddress.ip_address(address).is_multicast
+            )
         ]
         if not public_addresses:
             return None, f"host {host!r} did not resolve to a public IPv4 address"
         return public_addresses[0], None
+
+    async def _resolve_public_ipv4(
+        self, host: str, port: int
+    ) -> tuple[str | None, str | None]:
+        """Resolve and briefly cache a hostname while pinning each connection."""
+        key = (host, port)
+        now = time.monotonic()
+        cached = self.resolve_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        task = self.resolve_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(self._lookup_public_ipv4(host, port))
+            self.resolve_inflight[key] = task
+
+        try:
+            # One client disconnect must not cancel a lookup shared by other
+            # connections for the same reviewed host.
+            result = await asyncio.shield(task)
+        finally:
+            if task.done() and self.resolve_inflight.get(key) is task:
+                self.resolve_inflight.pop(key, None)
+
+        # Successful lookups are shared briefly across new connections. Cache
+        # failures only long enough to bound a denial flood without turning a
+        # transient resolver outage into a long-lived policy failure.
+        ttl = 60.0 if result[0] is not None else 5.0
+        self.resolve_cache[key] = (time.monotonic() + ttl, result)
+        return result
 
     @staticmethod
     def _audit(record: dict[str, object]) -> None:
@@ -121,7 +162,7 @@ class SeterPolicy:
     ) -> None:
         self.server_pins.pop(data.server.id, None)
 
-    def tls_clienthello(self, data: tls.ClientHelloData) -> None:
+    async def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         """Pin authorized TLS connections to their reviewed policy hostname.
 
         mitmproxy runs with lazy upstream connections and without upstream
@@ -148,7 +189,7 @@ class SeterPolicy:
             # The original packet destination is attacker-controlled. Resolve
             # the allowlisted SNI once, reject host-private destinations, and
             # relay only to the resulting pinned address.
-            address, error = self._resolve_public_ipv4(sni, 443)
+            address, error = await self._resolve_public_ipv4(sni, 443)
             if error is not None:
                 self._audit(
                     {
@@ -188,7 +229,7 @@ class SeterPolicy:
                 }
             )
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         client_ip = self._client_ip(flow)
         workspace = self._workspace(client_ip)
         # In transparent mode Request.host is the packet's original IP.
@@ -220,7 +261,7 @@ class SeterPolicy:
                         decision = "allow"
                         reason = "host is allowlisted and matches the pinned upstream connection"
                 else:
-                    address, error = self._resolve_public_ipv4(host, port)
+                    address, error = await self._resolve_public_ipv4(host, port)
                     if error is not None:
                         reason = error
                     else:

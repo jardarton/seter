@@ -82,7 +82,7 @@ Starting and stopping host system units requires authorization, but project code
 - One mitmproxy instance per host, as a NixOS systemd service, with a Python addon whose entire configuration is a Nix-rendered `policy.json` (project IPs, allowlists, secret bindings) merged with real secret values from agenix/sops-nix at activation — **secrets never enter the Nix store or the guests**.
 - Guests receive placeholder values (`TOKEN=placeholder-…`); the addon rewrites them to real credentials only when the destination host matches that secret's binding. A leaked placeholder is worthless.
 - Denials return a synthesized 403 with a human-readable reason — failures in guests are self-explanatory, not mysterious timeouts.
-- **SNI passthrough** (no decryption, still allowlisted) for cert-pinned tooling and bulk endpoints such as container registries and `cache.nixos.org`, keeping the Python proxy off the high-throughput path.
+- **SNI passthrough** (no decryption, still allowlisted) for cert-pinned tooling and bulk endpoints such as container registries and `cache.nixos.org`. The initial mitmproxy implementation avoids TLS and HTTP processing but still relays encrypted bytes in userspace; a dedicated stream engine remains an optimization if that path becomes a bottleneck.
 - Every request is logged with project, method, host, and path.
 - The proxy CA certificate is generated once per site, kept host-side, and baked into guest images declaratively (`security.pki.certificates`); tools with private trust stores are fixed case by case or routed via passthrough.
 - The `policy.json` schema is the **stable contract**: the enforcement engine (mitmproxy today) can be replaced later without touching flakes, images, or nftables.
