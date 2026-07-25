@@ -92,7 +92,7 @@ in
             options = {
               host = mkOption {
                 type = hostNameType;
-                description = "Allowed non-HTTP TCP destination host.";
+                description = "Allowed non-HTTP TCP destination hostname or literal IPv4 address. DNS hostnames are restricted to publicly routed answers.";
               };
               port = mkOption {
                 type = types.ints.between 1 65535;

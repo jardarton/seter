@@ -175,13 +175,15 @@ let
         "seter-bridge.service"
         "seter-dns-${name}.service"
         "seter-proxy.service"
-      ];
+      ]
+      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service";
       requires = [
         "nftables.service"
         "seter-bridge.service"
         "seter-dns-${name}.service"
         "seter-proxy.service"
-      ];
+      ]
+      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service";
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
         Type = "oneshot";
@@ -364,6 +366,7 @@ in
     ./dns.nix
     ./network-policy.nix
     ./proxy.nix
+    ./tcp-egress.nix
   ];
 
   options.seter.host = {

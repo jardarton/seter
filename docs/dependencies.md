@@ -34,6 +34,7 @@ Seter also relies on the following system components, all installed and configur
 
 - nftables — default-deny egress enforcement and transparent proxy redirection
 - dnsmasq — workspace hostname resolution
+- BIND DNS utilities — host-side refresh of direct-TCP destination address sets
 - systemd — transient VM units and resource limits
 - OpenSSH — guest command execution and interactive shells
 - iproute2 — bridge and tap interface management

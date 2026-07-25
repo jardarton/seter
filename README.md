@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, and transparent HTTP/HTTPS policy enforcement are implemented as an early vertical slice; proxy CA distribution, direct-TCP egress, and secret handling are not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, transparent HTTP/HTTPS policy enforcement, and allowlisted direct-TCP egress are implemented as an early vertical slice; proxy CA distribution and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -74,7 +74,7 @@ sudo systemctl stop seter-runtime-project.target
 
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
-These units provide VM plumbing only. They do not start the VM or enable forwarding, NAT, or direct application egress. Separate host-owned DNS, proxy, and nftables services keep every workspace fail-closed.
+These units provide VM plumbing only. They do not start the VM. Separate host-owned DNS, proxy, direct-TCP resolver, and nftables services keep every workspace fail-closed while enabling only declared application egress.
 
 ## Network isolation
 
@@ -94,7 +94,9 @@ Names in `passthroughHosts` use the same transparent port but bypass TLS interce
 
 Allow and deny decisions are written as single-line JSON records prefixed with `seter-audit` in the `seter-proxy.service` journal. Allowed passthrough connections are logged with their SNI, but their encrypted requests remain opaque. Set `seter.host.proxy.logRequests = false` to disable this audit logging. Intercepted HTTP logs include the URL path, which may contain sensitive query parameters. `seter.host.proxy.upstreamCaFile` may provide a custom PEM trust bundle for intercepted upstream HTTPS verification. The proxy uses fixed UID 60534 for nftables output isolation; override `seter.host.proxy.uid` if that UID is already allocated locally.
 
-mitmproxy currently generates its interception CA in `/var/lib/seter-proxy`, but Seter does not yet distribute that CA to guests. Ordinary intercepted HTTPS clients therefore do not trust intercepted responses yet; passthrough clients continue to validate the original server certificate. Declarative guest CA installation, direct TCP allowances, and secret injection remain future milestones.
+Direct non-HTTP TCP destinations declared with `allowedTCP` are resolved by a host-owned service into a separate nftables address-and-port set for each workspace. Set replacement is atomic, active sets are immediately repopulated after an nftables reload, and every packet remains conditional on the current set so removing an address also revokes established connections. Routed connections are narrowly forwarded and masqueraded through NixOS's enabled forwarding firewall. Seter defaults `networking.firewall.filterForward` on and rejects direct-TCP policy when either the firewall or forward filtering is disabled, so enabling kernel forwarding cannot expose unrelated host interfaces. DNS-derived destinations must be publicly routed unicast IPv4 addresses, preventing an allowed name from rebinding onto loopback, link-local, multicast, private LAN, or workspace services. To deliberately authorize a non-public destination, configure its literal IPv4 address rather than a hostname. Ports 80 and 443 cannot be declared as direct TCP because they always pass through the HTTP policy proxy. As with any layer-3 allowlist, destinations sharing an IP address and port are indistinguishable.
+
+mitmproxy currently generates its interception CA in `/var/lib/seter-proxy`, but Seter does not yet distribute that CA to guests. Ordinary intercepted HTTPS clients therefore do not trust intercepted responses yet; passthrough clients continue to validate the original server certificate. Declarative guest CA installation and secret injection remain future milestones.
 
 ## VM lifecycle
 
@@ -141,4 +143,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Proxy CA distribution, direct TCP egress, and secret handling are not implemented yet.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Proxy CA distribution and secret handling are not implemented yet.

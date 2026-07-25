@@ -66,6 +66,20 @@
       betaDnsPort = workspaceDnsPorts.beta;
       alphaDnsPortWithEarlierWorkspace = (dnsPortsFor ({ aardvark = { }; } // validWorkspaces)).alpha;
 
+      tcpTestWorkspaces = validWorkspaces // {
+        alpha = validWorkspaces.alpha // {
+          egress.tcp = [
+            {
+              host = "direct.example";
+              port = 2222;
+            }
+          ];
+        };
+      };
+      tcpSetsFor = workspaces: import ../nix/modules/host/tcp-egress-sets.nix { inherit lib workspaces; };
+      alphaTcpSet = (tcpSetsFor tcpTestWorkspaces).alpha;
+      tcpHostConfiguration = mkHost tcpTestWorkspaces;
+
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
       minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
@@ -75,6 +89,10 @@
       dnsService = hostConfiguration.config.systemd.services.seter-dns-alpha;
       proxyService = hostConfiguration.config.systemd.services.seter-proxy;
       proxyPort = hostConfiguration.config.seter.host.proxy.port;
+      tcpService = tcpHostConfiguration.config.systemd.services.seter-tcp-egress-alpha;
+      tcpTapRequires = tcpHostConfiguration.config.systemd.services.seter-tap-alpha.requires;
+      tcpNftablesConfig = tcpHostConfiguration.config.networking.nftables;
+      tcpFirewallForwardRules = tcpHostConfiguration.config.networking.firewall.extraForwardRules;
       nftablesConfig = hostConfiguration.config.networking.nftables;
       lifecycleSudoRules = lib.filter (
         rule: builtins.elem "seter-operators" (rule.groups or [ ])
@@ -130,6 +148,37 @@
 
         handler = partial(Handler, directory="/tmp/seter-upstream")
         ThreadingHTTPServer(("11.0.0.2", 80), handler).serve_forever()
+      '';
+
+      directTcpClient = pkgs.writeText "seter-direct-tcp-client.py" ''
+        import pathlib
+        import socket
+        import time
+
+        ready = pathlib.Path("/tmp/seter-direct-client-ready")
+        send = pathlib.Path("/tmp/seter-direct-client-send")
+        blocked = pathlib.Path("/tmp/seter-direct-client-blocked")
+        allowed = pathlib.Path("/tmp/seter-direct-client-allowed")
+
+        with socket.create_connection(("11.0.0.2", 2222), timeout=5) as connection:
+            ready.touch()
+            for _ in range(200):
+                if send.exists():
+                    break
+                time.sleep(0.05)
+            else:
+                raise SystemExit("timed out waiting for the revocation test")
+
+            connection.settimeout(2)
+            try:
+                connection.sendall(b"after revocation\n")
+                response = connection.recv(1024)
+                if response:
+                    allowed.write_bytes(response)
+                else:
+                    blocked.touch()
+            except (OSError, TimeoutError):
+                blocked.touch()
       '';
 
       configurationRejected =
@@ -288,6 +337,51 @@
           egress.passthroughHosts = [ "api.example.com" ];
         };
       };
+
+      proxyPortAsDirectTcpRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.tcp = [
+            {
+              host = "api.example.com";
+              port = 443;
+            }
+          ];
+        };
+      };
+
+      tcpWithoutFirewallRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.host
+                hostModuleBase
+                {
+                  networking.firewall.enable = false;
+                  seter.host.workspaces = tcpTestWorkspaces;
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      tcpWithoutForwardFilterRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.host
+                hostModuleBase
+                {
+                  networking.firewall.filterForward = false;
+                  seter.host.workspaces = tcpTestWorkspaces;
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
     in
     {
       checks = {
@@ -321,6 +415,13 @@
           assert nftablesConfig.tables.seter_dns.family == "inet";
           assert nftablesConfig.tables.seter_proxy.family == "inet";
           assert nftablesConfig.tables.seter_proxy_output.family == "inet";
+          assert builtins.elem "seter-tcp-egress-alpha.service" tcpTapRequires;
+          assert builtins.elem "nftables.service" tcpService.requires;
+          assert tcpNftablesConfig.tables.seter_tcp_nat.family == "ip";
+          assert tcpHostConfiguration.config.boot.kernel.sysctl."net.ipv4.ip_forward" == 1;
+          assert tcpHostConfiguration.config.networking.firewall.filterForward;
+          assert lib.hasInfix ''iifname "seter0"'' tcpFirewallForwardRules;
+          assert lib.hasInfix "10.100.0.10" tcpFirewallForwardRules;
           assert builtins.any (
             entry: entry.command == "${lifecycleHelper} __start alpha" && builtins.elem "NOPASSWD" entry.options
           ) lifecycleSudoCommands;
@@ -451,6 +552,9 @@
           assert storeSecretSourceRejected;
           assert caseInsensitiveSecretHostAccepted;
           assert overlappingProxyHostsRejected;
+          assert proxyPortAsDirectTcpRejected;
+          assert tcpWithoutFirewallRejected;
+          assert tcpWithoutForwardFilterRejected;
           pkgs.runCommand "seter-workspace-uniqueness-check" { } ''
             touch "$out"
           '';
@@ -597,11 +701,9 @@
               pkgs.openssl
             ];
 
-            # The test deliberately enables forwarding and disables the
-            # ordinary NixOS firewall. The Seter-owned policy must still keep
-            # workspace interfaces fail-closed on a permissive host.
-            boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
-            networking.firewall.enable = false;
+            # Direct TCP enables kernel forwarding, while the NixOS forwarding
+            # firewall must continue to reject traffic unrelated to Seter.
+            networking.firewall.enable = true;
             networking.hosts."11.0.0.2" = [
               "allowed.example"
               "bad-cert.example"
@@ -621,6 +723,7 @@
               enable = true;
               dns.upstreamServers = [ "11.0.0.2" ];
               proxy.upstreamCaFile = "${proxyTestCertificate}/cert.pem";
+              tcpEgress.refreshIntervalSeconds = 300;
               workspaces = validWorkspaces // {
                 alpha = validWorkspaces.alpha // {
                   egress.httpHosts = [
@@ -633,6 +736,20 @@
                   egress.passthroughHosts = [
                     "passthrough.example"
                     "private-passthrough.example"
+                  ];
+                  egress.tcp = [
+                    {
+                      host = "direct.example";
+                      port = 2222;
+                    }
+                    {
+                      host = "rebind.example";
+                      port = 2224;
+                    }
+                    {
+                      host = "multicast.example";
+                      port = 2225;
+                    }
                   ];
                 };
               };
@@ -656,6 +773,8 @@
             machine.succeed("nft list table inet seter_dns")
             machine.succeed("nft list table inet seter_proxy")
             machine.succeed("nft list table inet seter_proxy_output")
+            machine.succeed("nft list table ip seter_tcp_nat")
+            machine.succeed("test $(sysctl -n net.ipv4.ip_forward) = 1")
 
             # Use network namespaces as lightweight hostile guests. Their host
             # veth names and guest identities match the registered TAPs, so
@@ -673,14 +792,32 @@
             machine.succeed("ip netns add bridge-peer; ip link add peer-host type veth peer name eth0 netns bridge-peer")
             machine.succeed("ip link set peer-host master seter0; ip link set peer-host up")
             machine.succeed("ip -n bridge-peer link set lo up; ip -n bridge-peer link set eth0 up; ip -n bridge-peer address add 10.100.0.12/24 dev eth0")
+            machine.fail("ip netns exec bridge-peer ping -c 1 -W 1 10.100.0.1")
+
+            # Enabling kernel forwarding for Seter must not turn the host into
+            # a router between unrelated interfaces.
+            machine.succeed("ip netns add unrelated-a; ip link add u-a-host type veth peer name eth0 netns unrelated-a")
+            machine.succeed("ip address add 172.16.1.1/24 dev u-a-host; ip link set u-a-host up; ip -n unrelated-a link set lo up; ip -n unrelated-a link set eth0 up; ip -n unrelated-a address add 172.16.1.2/24 dev eth0; ip -n unrelated-a route add default via 172.16.1.1")
+            machine.succeed("ip netns add unrelated-b; ip link add u-b-host type veth peer name eth0 netns unrelated-b")
+            machine.succeed("ip address add 172.16.2.1/24 dev u-b-host; ip link set u-b-host up; ip -n unrelated-b link set lo up; ip -n unrelated-b link set eth0 up; ip -n unrelated-b address add 172.16.2.2/24 dev eth0; ip -n unrelated-b route add default via 172.16.2.1")
+            machine.fail("ip netns exec unrelated-a ping -c 1 -W 1 172.16.2.2")
 
             # A routed outside namespace proves that the default deny is not
             # merely an accidental consequence of forwarding being disabled.
             machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
             machine.succeed("ip address add 11.0.0.1/24 dev outside-host; ip link set outside-host up")
             machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 11.0.0.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 11.0.0.1")
-            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/passthrough.example/11.0.0.2 --address=/second-allowed.example/11.0.0.2")
+            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/direct.example/11.0.0.2 --address=/multicast.example/224.0.0.1 --address=/passthrough.example/11.0.0.2 --address=/rebind.example/10.0.0.2 --address=/second-allowed.example/11.0.0.2")
             machine.wait_for_unit("seter-test-upstream.service")
+            machine.succeed("systemd-run --unit=seter-test-direct-tcp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:2222,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/cat")
+            machine.wait_for_unit("seter-test-direct-tcp.service")
+            machine.succeed("systemd-run --unit=seter-test-denied-tcp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:2223,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
+            machine.wait_for_unit("seter-test-denied-tcp.service")
+            machine.succeed("systemctl start seter-tcp-egress-alpha.service")
+            machine.wait_for_unit("seter-tcp-egress-alpha.service")
+            machine.succeed("nft get element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'")
+            machine.fail("nft get element inet seter_l3 ${alphaTcpSet} '{ 10.0.0.2 . 2224 }'")
+            machine.fail("nft get element inet seter_l3 ${alphaTcpSet} '{ 224.0.0.1 . 2225 }'")
             machine.succeed("mkdir -p /tmp/seter-upstream; printf 'allowed upstream\\n' > /tmp/seter-upstream/index.html")
             machine.succeed("systemd-run --unit=seter-test-http --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer}")
             machine.wait_for_unit("seter-test-http.service")
@@ -701,6 +838,30 @@
             machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'query[A] allowed.example from 10.100.0.10'")
             machine.succeed("getent ahostsv4 alpha.vm | grep -F '10.100.0.10'")
             machine.fail("ip netns exec alpha dig +time=1 +tries=1 @11.0.0.2 allowed.example A")
+
+            # Direct TCP policy is keyed by workspace source, the currently
+            # resolved public IPv4 addresses, and destination port. Routed
+            # packets are masqueraded, while another workspace, another port,
+            # and a private DNS-rebinding answer remain denied.
+            machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 direct.example A) = 11.0.0.2")
+            machine.succeed("nft reset counters table ip seter_tcp_nat")
+            machine.succeed("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 2 11.0.0.2 2222")
+            machine.succeed("test $(nft --json list chain ip seter_tcp_nat postrouting | jq '[.nftables[].rule | select(.comment == \"seter direct TCP egress\") | .expr[].counter.packets?] | add // 0') -gt 0")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 11.0.0.2 2223")
+            machine.fail("ip netns exec beta ${lib.getExe pkgs.netcat} -z -w 1 11.0.0.2 2222")
+            machine.succeed("test -z \"$(ip netns exec alpha dig +short @10.100.0.1 rebind.example A)\"")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 2224")
+            machine.fail("nft get element inet seter_l3 ${alphaTcpSet} '{ 224.0.0.1 . 2225 }'")
+
+            # Revoking a set element must also stop an already-established
+            # connection rather than preserving it through conntrack state.
+            machine.succeed("systemd-run --unit=seter-test-direct-client --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec alpha ${pkgs.python3}/bin/python ${directTcpClient}")
+            machine.wait_until_succeeds("test -e /tmp/seter-direct-client-ready")
+            machine.succeed("nft delete element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'; touch /tmp/seter-direct-client-send")
+            machine.wait_until_succeeds("test -e /tmp/seter-direct-client-blocked")
+            machine.fail("test -e /tmp/seter-direct-client-allowed")
+            machine.succeed("systemctl reload seter-tcp-egress-alpha.service")
+            machine.succeed("nft get element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'")
 
             # Ports 80 and 443 are transparently redirected. The proxy uses
             # the registered source address to apply an exact host allowlist,
@@ -758,6 +919,9 @@
             machine.succeed("nft list table inet seter_dns")
             machine.succeed("nft list table inet seter_proxy")
             machine.succeed("nft list table inet seter_proxy_output")
+            machine.succeed("nft list table ip seter_tcp_nat")
+            machine.wait_until_succeeds("nft get element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'")
+            machine.succeed("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 2 11.0.0.2 2222")
 
             # The host may initiate connections to a workspace. A workspace
             # may not initiate connections to the host, its peers, or routed
@@ -805,7 +969,7 @@
             machine.succeed("ip -6 address add fd00::1/64 dev seter0; ip -n alpha -6 address add fd00::10/64 dev eth0")
             machine.fail("ip netns exec alpha ping -6 -c 1 -W 1 fd00::1")
 
-            machine.succeed("ip netns del alpha; ip netns del beta; ip netns del bridge-peer; ip netns del outside; ip link del seter-alpha 2>/dev/null || true; ip link del seter-beta 2>/dev/null || true")
+            machine.succeed("ip netns del alpha; ip netns del beta; ip netns del bridge-peer; ip netns del outside; ip netns del unrelated-a; ip netns del unrelated-b; ip link del seter-alpha 2>/dev/null || true; ip link del seter-beta 2>/dev/null || true")
 
             # Stopping the required nftables backend tears down active
             # workspace plumbing before its policy tables are removed.
@@ -817,6 +981,7 @@
             machine.fail("nft list table inet seter_l3")
             machine.fail("nft list table inet seter_proxy")
             machine.fail("nft list table inet seter_proxy_output")
+            machine.fail("nft list table ip seter_tcp_nat")
 
             # If the nftables policy cannot load, its dependency prevents a
             # registered TAP from being created.
@@ -824,8 +989,9 @@
             machine.fail("systemctl start seter-runtime-alpha.target")
             machine.fail("ip link show dev seter-alpha")
             machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
+            machine.fail("systemctl is-active --quiet seter-tcp-egress-alpha.service")
             machine.fail("systemctl is-active --quiet seter-proxy.service")
-            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
+            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-tcp-egress-alpha.service seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
 
             # A proxy startup failure must also keep the workspace TAP absent.
             machine.succeed("systemctl start nftables.service; mkdir -p /run/systemd/system/seter-proxy.service.d; printf '[Service]\\nExecStart=\\nExecStart=${pkgs.coreutils}/bin/false\\n' > /run/systemd/system/seter-proxy.service.d/fail.conf; systemctl daemon-reload")
