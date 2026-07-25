@@ -174,11 +174,13 @@ let
         "nftables.service"
         "seter-bridge.service"
         "seter-dns-${name}.service"
+        "seter-proxy.service"
       ];
       requires = [
         "nftables.service"
         "seter-bridge.service"
         "seter-dns-${name}.service"
+        "seter-proxy.service"
       ];
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
@@ -361,6 +363,7 @@ in
   imports = [
     ./dns.nix
     ./network-policy.nix
+    ./proxy.nix
   ];
 
   options.seter.host = {
@@ -602,9 +605,9 @@ in
       pkgs.openssh
     ];
 
-    # DNS and policy enforcement remain separate milestones. The plumbing
-    # units expose only the registered TAP and read-only /nix/store share and
-    # never invoke runner-provided setup helpers. Only seter-vm-* executes the
-    # runner, always as the dedicated unprivileged workspace account.
+    # The plumbing units expose only the registered TAP and read-only
+    # /nix/store share and never invoke runner-provided setup helpers. Only
+    # seter-vm-* executes the runner, always as the dedicated unprivileged
+    # workspace account.
   };
 }

@@ -58,6 +58,7 @@ let
     ''
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} udp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
+      iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} meta mark 0x53455450 tcp dport ${toString cfg.proxy.port} accept comment "seter proxy ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ct state established,related accept
       iifname "${cfg.bridge}" ip saddr ${address} counter drop comment "seter host isolation ${workspace.name}"
     ''
@@ -98,6 +99,7 @@ in
             chain input {
               type filter hook input priority -5; policy accept;
               ${hostInputRules}
+              iifname "${cfg.bridge}" tcp dport ${toString cfg.proxy.port} counter drop comment "seter direct proxy-port isolation"
             }
 
             chain forward {

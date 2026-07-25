@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, and restricted guest DNS are implemented as an early vertical slice; permitted application egress, proxying, and secret handling are not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, and transparent HTTP/HTTPS policy enforcement are implemented as an early vertical slice; proxy CA distribution, direct-TCP egress, and secret handling are not implemented yet.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -53,6 +53,7 @@ seter.host = {
     ip = "10.100.0.10";
     mac = "02:00:00:00:00:10";
     tap = "seter-project";
+    allowedHTTPHosts = [ "api.example.com" ];
   };
 };
 
@@ -73,7 +74,7 @@ sudo systemctl stop seter-runtime-project.target
 
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
-These units provide VM plumbing only. They do not start the VM or enable forwarding, NAT, or permitted application egress. Separate host-owned DNS and nftables services keep every workspace fail-closed.
+These units provide VM plumbing only. They do not start the VM or enable forwarding, NAT, or direct application egress. Separate host-owned DNS, proxy, and nftables services keep every workspace fail-closed.
 
 ## Network isolation
 
@@ -87,7 +88,13 @@ A separate unprivileged dnsmasq instance runs on demand for each active workspac
 
 By default DNS queries are logged to each workspace's `seter-dns-<workspace>.service` journal. This provides useful early policy visibility but can be noisy and can reveal project access patterns; set `seter.host.dns.logQueries = false` to disable it. Query logging is an initial audit mechanism and may be replaced with more selective logging later. Set `seter.host.dns.upstreamServers` to explicit IPv4 resolver addresses, or leave it empty to use the host's existing `/etc/resolv.conf` resolvers. Host applications resolve registered workspace hostnames through generated `/etc/hosts` entries; Seter does not replace the host resolver.
 
-There is intentionally no permitted application egress yet. Direct TCP allowances, HTTP proxying, and secret injection remain future milestones.
+A hardened, unprivileged mitmproxy service transparently intercepts registered workspace TCP traffic to ports 80 and 443. The source IP selects the workspace policy, and only exact names in that workspace's `allowedHTTPHosts` are accepted. The proxy requires HTTPS SNI and the HTTP host to agree, then resolves and pins the reviewed hostname instead of trusting the packet's original destination or a later DNS answer. Only publicly routed IPv4 answers are accepted, preventing an allowed name from rebinding the host-side proxy onto loopback, link-local, Seter, or private LAN services. Denials return HTTP 403 with a policy reason; raw TCP and HTTP CONNECT tunnels through the interception ports are disabled.
+
+Names in `passthroughHosts` use the same transparent port but bypass TLS interception. The proxy authorizes the exact ClientHello SNI, resolves that reviewed name itself instead of trusting the packet destination, and relays the encrypted connection unchanged. This supports certificate-pinned clients and keeps bulk HTTPS payloads out of the Python HTTP path. A name cannot be configured for both interception and passthrough, and passthrough does not permit cleartext HTTP.
+
+Allow and deny decisions are written as single-line JSON records prefixed with `seter-audit` in the `seter-proxy.service` journal. Allowed passthrough connections are logged with their SNI, but their encrypted requests remain opaque. Set `seter.host.proxy.logRequests = false` to disable this audit logging. Intercepted HTTP logs include the URL path, which may contain sensitive query parameters. `seter.host.proxy.upstreamCaFile` may provide a custom PEM trust bundle for intercepted upstream HTTPS verification.
+
+mitmproxy currently generates its interception CA in `/var/lib/seter-proxy`, but Seter does not yet distribute that CA to guests. Ordinary intercepted HTTPS clients therefore do not trust intercepted responses yet; passthrough clients continue to validate the original server certificate. Declarative guest CA installation, direct TCP allowances, and secret injection remain future milestones.
 
 ## VM lifecycle
 
@@ -134,4 +141,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Permitted application egress, proxy enforcement, and secret handling are not implemented yet.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Proxy CA distribution, direct TCP egress, and secret handling are not implemented yet.
