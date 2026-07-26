@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, and declarative proxy trust are implemented as an early vertical slice; secret handling is not implemented yet.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -114,13 +114,33 @@ Network-enabled guests default `HTTP_PROXY`, `HTTPS_PROXY`, and their lower-case
 
 Back up `/var/lib/seter-proxy` as site security state. Losing it generates a new CA on the next proxy start and requires re-exporting the certificate and rebuilding every guest; compromise requires rotating the CA and rebuilding every guest. HTTPS fails closed while a guest trusts the wrong generation.
 
-Configured secret source files are staged for the unprivileged proxy with systemd credentials: PID 1 reads the consumer-managed path and exposes a private, read-only snapshot under `$CREDENTIALS_DIRECTORY`. Secret values do not enter the Nix store, process arguments, or environment variables. `LoadCredential` snapshots values when `seter-proxy.service` starts, so the secret manager must restart that service after rotating a source file. With sops-nix, for example:
+Configured secret source files are staged for the unprivileged proxy with systemd credentials: PID 1 reads the consumer-managed path and exposes a private, read-only snapshot under `$CREDENTIALS_DIRECTORY`. Secret values do not enter the Nix store, process arguments, or environment variables. Runtime values must be 8 bytes through 16 KiB of ASCII without control characters; one final LF or CRLF from a text secret file is removed before validation.
+
+For an intercepted HTTPS request, the addon replaces an exact configured placeholder only in configured header values and only when the request host matches that secret's binding. Cleartext HTTP and an otherwise-allowed but unbound host return 403 instead of forwarding a recognized placeholder. Exact credential values reflected in response headers or decoded response bodies are changed back to placeholders before reaching the workspace. Secret names, but never values or header contents, appear in audit records.
+
+```nix
+seter.host.workspaces.project = {
+  egress.httpHosts = [ "api.github.com" ];
+  secrets.githubToken = {
+    placeholder = "seter-placeholder-github-0123456789abcdef";
+    sourceFile = "/run/secrets/github-token";
+    hosts = [ "api.github.com" ];
+    headers = [ "authorization" ];
+  };
+};
+```
+
+The guest or application uses the non-secret placeholder, for example `GITHUB_TOKEN=seter-placeholder-github-0123456789abcdef`; an `Authorization` header containing that exact text is rewritten at the network edge. Query strings and request bodies are deliberately not rewritten.
+
+Response redaction prevents straightforward accidental reflection, but it is not a data-loss-prevention boundary. An authorized service can transform, split, encode, or deliberately disclose a credential or credential-derived information in ways a generic proxy cannot recognize. The guest is therefore not *provisioned* the credential, but the bound service remains inside the credential's trust boundary. Use a separate, least-privilege credential for every workspace and grant only the API capabilities that workspace may exercise.
+
+`LoadCredential` snapshots values when `seter-proxy.service` starts, so the secret manager must restart that service after rotating a source file. With sops-nix, for example:
 
 ```nix
 sops.secrets.github-token.restartUnits = [ "seter-proxy.service" ];
 ```
 
-Other secret managers must arrange the equivalent restart. Runtime request rewriting remains a future milestone.
+Other secret managers must arrange the equivalent restart.
 
 ## VM lifecycle
 
@@ -167,4 +187,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, persistent proxy CA enrollment and declarative guest trust, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment. Destination-bound secret handling is not implemented yet.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.

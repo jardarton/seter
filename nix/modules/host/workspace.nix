@@ -118,7 +118,12 @@ in
             };
             sourceFile = mkOption {
               type = types.strMatching "/.+";
-              description = "Runtime path containing the real secret; string-typed so Nix does not copy it to the store.";
+              description = ''
+                Runtime path containing the real secret; string-typed so Nix
+                does not copy it to the store. The value must contain 8 bytes
+                through 16 KiB of ASCII without control characters. One final
+                LF or CRLF is removed before validation.
+              '';
             };
             hosts = mkOption {
               type = types.nonEmptyListOf httpHostType;

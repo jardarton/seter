@@ -54,6 +54,7 @@ let
     pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "msgpack" ];
   });
   proxyAccount = "seter-proxy";
+  readyFile = "/run/seter-proxy/policy-ready";
   waitForProxy = pkgs.writeShellScript "seter-proxy-ready" ''
     set -eu
     for attempt in $(${pkgs.coreutils}/bin/seq 1 300); do
@@ -62,7 +63,8 @@ let
         exit 1
       fi
       listeners=$(${pkgs.iproute2}/bin/ss --no-header --listening --numeric --tcp)
-      if printf '%s\n' "$listeners" \
+      if test -f ${readyFile} \
+        && printf '%s\n' "$listeners" \
           | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.port}"} \
         && printf '%s\n' "$listeners" \
           | ${pkgs.gnugrep}/bin/grep -Fq ${lib.escapeShellArg "${cfg.gateway}:${toString proxyCfg.explicitPort}"}; then
@@ -186,6 +188,8 @@ in
         Group = proxyAccount;
         StateDirectory = "seter-proxy";
         StateDirectoryMode = "0700";
+        RuntimeDirectory = "seter-proxy";
+        RuntimeDirectoryMode = "0750";
         # PID 1 reads each consumer-managed source file and exposes a private,
         # read-only copy under $CREDENTIALS_DIRECTORY. Only stable credential
         # names and source paths enter the unit; secret values never enter the
@@ -204,6 +208,7 @@ in
             --set flow_detail=0 \
             --set termlog_verbosity=info \
             --set seter_policy=${policyFile} \
+            --set seter_ready_file=${readyFile} \
             --set seter_log_requests=${if proxyCfg.logRequests then "true" else "false"}${
               lib.optionalString (
                 proxyCfg.upstreamCaFile != null

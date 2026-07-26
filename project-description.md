@@ -11,7 +11,7 @@ Modern development runs large amounts of code the developer never reviews: depen
 The goal of this project is to limit the blast radius of a compromised dependency, a malicious repo, or a misbehaving agent to the single project it runs in:
 
 - **Isolation by default.** A project VM can see its own working tree and its own persistent state. Nothing else.
-- **No real secrets in the guest.** Credentials are injected at the network edge by the host, bound to specific destinations. The guest only ever holds placeholders.
+- **No real secrets provisioned to the guest.** Credentials are injected at the network edge by the host, bound to specific destinations. Guests are configured with placeholders, and exact reflected credential values are redacted from responses. The authorized service remains trusted not to transform or deliberately disclose the credential.
 - **Egress is allowlisted, per project.** Code in a VM can reach the hosts its project legitimately needs, and nothing else. All traffic is observable.
 - **Nix everywhere.** Guest images, dev environments, network policy, and secret bindings are all declarative, reproducible, and reviewed in version control. Dependency management inside the VMs is plain Nix flakes with direnv, same as on a bare host.
 - **Cheap enough to actually use.** VMs boot in seconds by sharing the host Nix store, so isolation does not compete with convenience.
@@ -79,8 +79,9 @@ Starting and stopping host system units requires authorization, but project code
 
 ### Proxy and secrets
 
-- One mitmproxy instance per host, as a NixOS systemd service, with a Python addon whose entire configuration is a Nix-rendered `policy.json` (project IPs, allowlists, secret bindings) merged with real secret values from agenix/sops-nix at activation — **secrets never enter the Nix store or the guests**.
+- One mitmproxy instance per host, as a NixOS systemd service, with a Python addon configured by a Nix-rendered `policy.json` (project IPs, allowlists, and secret bindings). Real values are staged privately at service start from consumer-managed agenix/sops-nix paths with systemd credentials — **secrets never enter the Nix store, process arguments, or environment variables**.
 - Guests receive placeholder values (`TOKEN=placeholder-…`); the addon rewrites them to real credentials only when the destination host matches that secret's binding. A leaked placeholder is worthless.
+- Exact credential values reflected in response headers or decoded bodies are changed back to placeholders. This prevents straightforward reflection, not deliberate disclosure through transformed values or credential-derived information; bound services and least-privilege credential scopes remain part of the security boundary.
 - Denials return a synthesized 403 with a human-readable reason — failures in guests are self-explanatory, not mysterious timeouts.
 - **SNI passthrough** (no decryption, still allowlisted) for cert-pinned tooling and bulk endpoints such as container registries and `cache.nixos.org`. The initial mitmproxy implementation avoids TLS and HTTP processing but still relays encrypted bytes in userspace; a dedicated stream engine remains an optimization if that path becomes a bottleneck.
 - Every request is logged with project, method, host, and path.
@@ -123,6 +124,7 @@ For split or dependent repositories that are developed together, one workspace V
 - Nested virtualization taxes I/O-heavy workloads (container builds) more than CPU-bound ones; the outer VM also holds a standing resource reservation.
 - TLS interception produces a recurring trickle of per-tool trust-store fixes; passthrough is the escape hatch.
 - The placeholder mechanism covers HTTP(S) only; non-HTTP credentials need other handling (see below).
+- Response redaction recognizes exact credential values, not encoded, split, transformed, or indirect disclosures by an authorized service. Guests are not provisioned credentials, but bound services remain trusted and credentials must be narrowly scoped.
 - mitmproxy is a userspace Python proxy — adequate for API/package traffic, not for sustained bulk transfers (mitigated by passthrough).
 - Subnet-routing the bridge to the tailnet exposes all VMs to whatever the ACLs permit; `tailscale serve` per service is the tighter alternative.
 - Snapshot/resume of running VMs is not a goal; fast clean boots plus persistent volumes replace it.

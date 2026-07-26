@@ -202,14 +202,42 @@
       '';
 
       proxyHttpServer = pkgs.writeText "seter-proxy-test-http-server.py" ''
+        import gzip
+        import ssl
+        import sys
         from functools import partial
         from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+        from pathlib import Path
 
         class Handler(SimpleHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def do_GET(self):
+                if self.path in ("/secret", "/secret-gzip"):
+                    authorization = self.headers.get("Authorization", "")
+                    api_key = self.headers.get("X-Api-Key", "")
+                    payload = (authorization + "\n" + api_key + "\n").encode()
+                    Path("/tmp/seter-secret-received").write_bytes(payload)
+                    encoded_payload = gzip.compress(payload) if self.path == "/secret-gzip" else payload
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("X-Reflected-Authorization", authorization)
+                    if self.path == "/secret-gzip":
+                        self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Content-Length", str(len(encoded_payload)))
+                    self.end_headers()
+                    self.wfile.write(encoded_payload)
+                    return
+                super().do_GET()
+
         handler = partial(Handler, directory="/tmp/seter-upstream")
-        ThreadingHTTPServer(("11.0.0.2", 80), handler).serve_forever()
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
+        server = ThreadingHTTPServer(("11.0.0.2", port), handler)
+        if port == 443:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(sys.argv[2], sys.argv[3])
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.serve_forever()
       '';
 
       directTcpClient = pkgs.writeText "seter-direct-tcp-client.py" ''
@@ -1113,6 +1141,17 @@
                     hosts = [ "allowed.example" ];
                     headers = [ "authorization" ];
                   };
+                  secrets.otherToken = {
+                    placeholder = "seter-placeholder-fedcba9876543210";
+                    sourceFile = "/run/seter-test/other-token";
+                    hosts = [ "second-allowed.example" ];
+                    headers = [ "x-api-key" ];
+                  };
+                };
+                beta = validWorkspaces.beta // {
+                  # Exercise a workspace that may contact an intercepted host
+                  # but has no credential bound to it.
+                  egress.httpHosts = [ "second-allowed.example" ];
                 };
               };
             };
@@ -1131,7 +1170,27 @@
             # private mount namespace for the unprivileged proxy account.
             machine.fail("systemctl start seter-proxy.service")
             machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
-            machine.succeed("install -d -m 0700 /run/seter-test; printf first-runtime-token > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
+            machine.succeed("install -d -m 0700 /run/seter-test; printf other-runtime-token > /run/seter-test/other-token; chmod 0400 /run/seter-test/other-token")
+
+            # Invalid runtime values fail during addon configuration rather
+            # than entering a request header.
+            machine.succeed(": > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+            machine.succeed("printf short > /run/seter-test/github-token")
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+            machine.succeed("printf w6ljcmVkZW50aWFs | ${pkgs.coreutils}/bin/base64 -d > /run/seter-test/github-token")
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+            machine.succeed("printf dG9rZW4BdmFsdWU= | ${pkgs.coreutils}/bin/base64 -d > /run/seter-test/github-token")
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+            machine.succeed("head -c 16385 /dev/zero | tr '\0' x > /run/seter-test/github-token")
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+
+            machine.succeed("printf first-runtime-token > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
             machine.fail("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat /run/seter-test/github-token")
             machine.succeed("systemctl start seter-proxy.service")
             machine.wait_for_unit("seter-proxy.service")
@@ -1206,7 +1265,7 @@
             machine.succeed("mkdir -p /tmp/seter-upstream; printf 'allowed upstream\\n' > /tmp/seter-upstream/index.html")
             machine.succeed("systemd-run --unit=seter-test-http --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer}")
             machine.wait_for_unit("seter-test-http.service")
-            machine.succeed("systemd-run --unit=seter-test-https --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.runtimeShell} -c 'cd /tmp/seter-upstream && exec ${lib.getExe pkgs.openssl} s_server -quiet -accept 11.0.0.2:443 -cert ${proxyTestCertificate}/cert.pem -key ${proxyTestCertificate}/key.pem -WWW'")
+            machine.succeed("systemd-run --unit=seter-test-https --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer} 443 ${proxyTestCertificate}/cert.pem ${proxyTestCertificate}/key.pem")
             machine.wait_for_unit("seter-test-https.service")
 
             # Workspaces can query the host resolver over UDP and TCP. Only
@@ -1262,6 +1321,34 @@
             machine.succeed("test $(ip netns exec beta curl --noproxy '*' --silent --output /tmp/beta-denied --write-out '%{http_code}' -H 'Host: allowed.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/beta-denied")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --cacert /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
+            # Header placeholders are replaced from the workspace's private
+            # runtime credential only after exact host and HTTPS approval.
+            # Both transparent and explicit proxy paths reach the same request
+            # hook, while cleartext and another otherwise-allowed host fail
+            # closed without exposing the credential.
+            # The upstream records the injected value out of band. Exact
+            # reflections in response headers and compressed or plain bodies
+            # are restored to the harmless placeholder before reaching the
+            # workspace.
+            machine.succeed("rm -f /tmp/seter-secret-received /tmp/secret-body /tmp/secret-headers; ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --dump-header /tmp/secret-headers --output /tmp/secret-body -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://allowed.example/secret")
+            machine.succeed("grep -Fx 'Bearer rotated-runtime-token' /tmp/seter-secret-received; grep -Fx 'Bearer seter-placeholder-0123456789abcdef' /tmp/secret-body; grep -Fi 'X-Reflected-Authorization: Bearer seter-placeholder-0123456789abcdef' /tmp/secret-headers")
+            machine.fail("grep -F rotated-runtime-token /tmp/secret-body /tmp/secret-headers")
+            machine.succeed("rm -f /tmp/seter-secret-received /tmp/secret-body /tmp/secret-headers; ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --cacert /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem --fail --silent --compressed --dump-header /tmp/secret-headers --output /tmp/secret-body -H 'Authorization: token seter-placeholder-0123456789abcdef' https://allowed.example/secret-gzip")
+            machine.succeed("grep -Fx 'token rotated-runtime-token' /tmp/seter-secret-received; grep -Fx 'token seter-placeholder-0123456789abcdef' /tmp/secret-body; grep -Fi 'X-Reflected-Authorization: token seter-placeholder-0123456789abcdef' /tmp/secret-headers")
+            machine.fail("grep -F rotated-runtime-token /tmp/secret-body /tmp/secret-headers")
+
+            # Multiple recognized placeholders are validated atomically. A
+            # wrong-host binding denies the whole request before either value
+            # is sent. A different workspace can use the same public text but
+            # receives no credential it does not own.
+            machine.succeed("rm -f /tmp/seter-secret-received; test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/secret-atomic-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' -H 'X-Api-Key: seter-placeholder-fedcba9876543210' https://allowed.example/secret) = 403; grep -F 'not bound to host' /tmp/secret-atomic-denied; test ! -e /tmp/seter-secret-received")
+            machine.succeed("rm -f /tmp/seter-secret-received; ip netns exec beta curl --noproxy '*' --insecure --fail --silent -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://second-allowed.example/secret | grep -Fx 'Bearer seter-placeholder-0123456789abcdef'; grep -Fx 'Bearer seter-placeholder-0123456789abcdef' /tmp/seter-secret-received")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/secret-http-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' http://allowed.example/secret) = 403; grep -F 'only be injected over HTTPS' /tmp/secret-http-denied")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/secret-host-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://second-allowed.example/secret) = 403; grep -F 'not bound to host' /tmp/secret-host-denied")
+            machine.succeed("test -z \"$(ip netns exec alpha curl --noproxy '*' --insecure --fail --silent -H 'X-Unconfigured: seter-placeholder-0123456789abcdef' https://allowed.example/secret)\"")
+            machine.succeed("journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"injectedSecrets\":[\"githubToken\"]'")
+            machine.succeed("journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"event\":\"response-redaction\"' | grep -F '\"redactedSecrets\":[\"githubToken\"]'")
+            machine.fail("journalctl -u seter-proxy.service | grep -F rotated-runtime-token")
             machine.succeed("printf 'CONNECT allowed.example:22 HTTP/1.1\\r\\nHost: allowed.example:22\\r\\n\\r\\n' | ip netns exec alpha ${lib.getExe pkgs.netcat} -w 2 10.100.0.1 ${toString explicitProxyPort} | grep -F '403'")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --resolve allowed.example:443:11.0.0.1 https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/https-denied --write-out '%{http_code}' --resolve denied.example:443:11.0.0.2 https://denied.example/) = 403; grep -F 'not in this workspace' /tmp/https-denied")

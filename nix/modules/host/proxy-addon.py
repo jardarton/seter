@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -13,6 +14,8 @@ from mitmproxy.proxy import server_hooks
 
 
 class SeterPolicy:
+    _MIN_CREDENTIAL_BYTES = 8
+    _MAX_CREDENTIAL_BYTES = 16 * 1024
     _CREDENTIAL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,254}")
     _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
     _HOST_NAME = re.compile(
@@ -29,6 +32,18 @@ class SeterPolicy:
             "proxy-authenticate",
             "proxy-authorization",
             "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        }
+    )
+    _RESPONSE_FRAMING_HEADERS = frozenset(
+        {
+            "connection",
+            "content-encoding",
+            "content-length",
+            "keep-alive",
             "te",
             "trailer",
             "transfer-encoding",
@@ -59,6 +74,12 @@ class SeterPolicy:
             True,
             "Log HTTP requests and TLS policy decisions",
         )
+        loader.add_option(
+            "seter_ready_file",
+            str,
+            "",
+            "Runtime readiness marker created after policy and credentials load",
+        )
 
     def configure(self, updated: set[str]) -> None:
         if "seter_policy" not in updated:
@@ -67,8 +88,12 @@ class SeterPolicy:
         policy_path = ctx.options.seter_policy
         if not policy_path:
             raise OptionsError("seter_policy must name a policy file")
+        ready_path = ctx.options.seter_ready_file
+        if not ready_path:
+            raise OptionsError("seter_ready_file must name a runtime path")
 
         try:
+            Path(ready_path).unlink(missing_ok=True)
             policy = json.loads(Path(policy_path).read_text())
             if policy.get("version") != 2:
                 raise ValueError("unsupported policy version")
@@ -78,6 +103,7 @@ class SeterPolicy:
 
             parsed: dict[str, dict[str, object]] = {}
             credential_names: set[str] = set()
+            credentials_directory = os.environ.get("CREDENTIALS_DIRECTORY")
             for address, workspace in workspaces.items():
                 name = workspace["name"]
                 http_hosts = workspace["httpHosts"]
@@ -168,23 +194,31 @@ class SeterPolicy:
 
                     credential_names.add(credential)
                     placeholders.append(placeholder)
+                    if not credentials_directory:
+                        raise ValueError(
+                            f"credential directory is unavailable for {secret_name!r}"
+                        )
+                    credential_value = self._read_credential(
+                        Path(credentials_directory), credential
+                    )
                     parsed_secrets[secret_name] = {
                         "credential": credential,
                         "placeholder": placeholder,
                         "hosts": normalized_hosts,
                         "headers": normalized_headers,
+                        "value": credential_value,
                     }
                 parsed[address] = {
                     "name": name,
                     "httpHosts": normalized_http_hosts,
                     "passthroughHosts": normalized_passthrough_hosts,
-                    # Credential values are deliberately absent from this
-                    # Nix-store policy. A later runtime stage resolves these
-                    # stable credential names through systemd credentials.
+                    # Credential values came from systemd's private runtime
+                    # credential directory, never from this Nix-store policy.
                     "secrets": parsed_secrets,
                 }
             self.workspaces = parsed
             self.resolve_cache.clear()
+            Path(ready_path).touch(mode=0o600)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise OptionsError(f"cannot load Seter policy: {error}") from error
 
@@ -196,6 +230,176 @@ class SeterPolicy:
 
     def _workspace(self, client_ip: str) -> dict[str, object] | None:
         return self.workspaces.get(client_ip)
+
+    @classmethod
+    def _read_credential(cls, directory: Path, name: str) -> str:
+        value = (directory / name).read_bytes()
+        # Text secret managers commonly terminate files with one line ending.
+        # Remove only that terminator; other whitespace remains significant.
+        if value.endswith(b"\r\n"):
+            value = value[:-2]
+        elif value.endswith(b"\n"):
+            value = value[:-1]
+        if len(value) < cls._MIN_CREDENTIAL_BYTES:
+            raise ValueError(f"credential {name!r} is shorter than the minimum length")
+        if len(value) > cls._MAX_CREDENTIAL_BYTES:
+            raise ValueError(f"credential {name!r} exceeds the size limit")
+        credential = value.decode("ascii")
+        if any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in credential
+        ):
+            raise ValueError(f"credential {name!r} contains a control character")
+        return credential
+
+    @staticmethod
+    def _inject_request_secrets(
+        flow: http.HTTPFlow,
+        workspace: dict[str, object],
+        host: str,
+        scheme: str,
+    ) -> tuple[list[str], str | None]:
+        """Replace configured header placeholders after destination approval.
+
+        Validation happens before mutation so a request containing multiple
+        placeholders is either rewritten completely or denied unchanged.
+        Each header is rewritten from its original value with one regex pass,
+        preventing one credential value from being interpreted as another
+        placeholder.
+        """
+        matched: list[tuple[str, dict[str, object]]] = []
+        for secret_name, secret in workspace["secrets"].items():
+            placeholder = secret["placeholder"]
+            if any(
+                placeholder in value
+                for header in secret["headers"]
+                for value in flow.request.headers.get_all(header)
+            ):
+                matched.append((secret_name, secret))
+
+        if not matched:
+            return [], None
+
+        for secret_name, secret in matched:
+            if scheme != "https":
+                return [], f"secret {secret_name!r} may only be injected over HTTPS"
+            if host not in secret["hosts"]:
+                return [], f"secret {secret_name!r} is not bound to host {host!r}"
+
+        headers = frozenset(
+            header for _, secret in matched for header in secret["headers"]
+        )
+        for header in headers:
+            replacements = {
+                secret["placeholder"]: secret["value"]
+                for _, secret in matched
+                if header in secret["headers"]
+            }
+            pattern = re.compile(
+                "|".join(
+                    re.escape(placeholder)
+                    for placeholder in sorted(replacements, key=len, reverse=True)
+                )
+            )
+            values = flow.request.headers.get_all(header)
+            if values:
+                flow.request.headers.set_all(
+                    header,
+                    [
+                        pattern.sub(
+                            lambda match: replacements[match.group(0)], value
+                        )
+                        for value in values
+                    ],
+                )
+        return sorted(secret_name for secret_name, _ in matched), None
+
+    @classmethod
+    def _redact_response_secrets(
+        cls,
+        flow: http.HTTPFlow,
+        workspace: dict[str, object],
+        host: str,
+        scheme: str,
+    ) -> list[str]:
+        """Replace exact bound credential values before a response reaches a guest.
+
+        Apply this to every HTTPS response from a secret-bound host, not only
+        the request that injected a placeholder. This prevents straightforward
+        reflection on a later request. It remains a best-effort boundary:
+        upstreams can transform a credential or disclose credential-derived
+        information that no generic byte replacement can recognize.
+        """
+        if scheme != "https":
+            return []
+
+        bound = [
+            (secret_name, secret)
+            for secret_name, secret in workspace["secrets"].items()
+            if host in secret["hosts"]
+        ]
+        if not bound:
+            return []
+
+        # Multiple secret names may intentionally resolve to the same runtime
+        # value. Redact that value once and report every matching policy name.
+        replacements: dict[str, str] = {}
+        names_by_value: dict[str, set[str]] = {}
+        for secret_name, secret in sorted(bound):
+            value = secret["value"]
+            replacements.setdefault(value, secret["placeholder"])
+            names_by_value.setdefault(value, set()).add(secret_name)
+
+        ordered_values = sorted(replacements, key=len, reverse=True)
+        text_pattern = re.compile(
+            "|".join(re.escape(value) for value in ordered_values)
+        )
+        byte_replacements = {
+            value.encode("ascii"): placeholder.encode("ascii")
+            for value, placeholder in replacements.items()
+        }
+        byte_pattern = re.compile(
+            b"|".join(
+                re.escape(value)
+                for value in sorted(byte_replacements, key=len, reverse=True)
+            )
+        )
+        redacted_values: set[str] = set()
+
+        def replace_text(match: re.Match[str]) -> str:
+            value = match.group(0)
+            redacted_values.add(value)
+            return replacements[value]
+
+        for header in frozenset(flow.response.headers.keys()):
+            if header.lower() in cls._RESPONSE_FRAMING_HEADERS:
+                continue
+            values = flow.response.headers.get_all(header)
+            rewritten = [text_pattern.sub(replace_text, value) for value in values]
+            if rewritten != values:
+                flow.response.headers.set_all(header, rewritten)
+
+        content = flow.response.get_content(strict=False)
+        if content is not None:
+            redacted_byte_values: set[bytes] = set()
+
+            def replace_bytes(match: re.Match[bytes]) -> bytes:
+                value = match.group(0)
+                redacted_byte_values.add(value)
+                return byte_replacements[value]
+
+            rewritten_content = byte_pattern.sub(replace_bytes, content)
+            if rewritten_content != content:
+                flow.response.set_content(rewritten_content)
+            redacted_values.update(
+                value.decode("ascii") for value in redacted_byte_values
+            )
+
+        return sorted(
+            secret_name
+            for value in redacted_values
+            for secret_name in names_by_value[value]
+        )
 
     @staticmethod
     async def _lookup_public_ipv4(
@@ -414,6 +618,7 @@ class SeterPolicy:
         scheme = flow.request.scheme.lower()
         decision = "deny"
         reason = "source is not a registered Seter workspace"
+        injected_secrets: list[str] = []
 
         # CONNECT is authorized and audited in http_connect before mitmproxy
         # starts the nested TLS flow. It is never forwarded as an ordinary
@@ -454,23 +659,32 @@ class SeterPolicy:
                         flow.server_conn.sni = host if scheme == "https" else None
 
                 if decision == "allow":
+                    injected_secrets, injection_error = self._inject_request_secrets(
+                        flow, workspace, host, scheme
+                    )
+                    if injection_error is not None:
+                        decision = "deny"
+                        reason = injection_error
+
+                if decision == "allow":
                     # Keep the logical HTTP authority on the reviewed name,
                     # including when a pinned connection is reused.
                     flow.request.host = host
                     flow.request.port = port
 
         workspace_name = workspace["name"] if workspace is not None else None
-        self._audit(
-            {
-                "workspace": workspace_name,
-                "source": client_ip,
-                "decision": decision,
-                "method": flow.request.method,
-                "host": host,
-                "path": flow.request.path,
-                "reason": reason,
-            }
-        )
+        audit_record = {
+            "workspace": workspace_name,
+            "source": client_ip,
+            "decision": decision,
+            "method": flow.request.method,
+            "host": host,
+            "path": flow.request.path,
+            "reason": reason,
+        }
+        if injected_secrets:
+            audit_record["injectedSecrets"] = injected_secrets
+        self._audit(audit_record)
 
         if decision == "deny":
             flow.response = http.Response.make(
@@ -480,6 +694,29 @@ class SeterPolicy:
                     "Content-Type": "text/plain; charset=utf-8",
                     "Cache-Control": "no-store",
                 },
+            )
+
+    def response(self, flow: http.HTTPFlow) -> None:
+        client_ip = self._client_ip(flow)
+        workspace = self._workspace(client_ip)
+        if workspace is None:
+            return
+
+        host = self._normalize(flow.request.pretty_host)
+        scheme = flow.request.scheme.lower()
+        redacted_secrets = self._redact_response_secrets(
+            flow, workspace, host, scheme
+        )
+        if redacted_secrets:
+            self._audit(
+                {
+                    "workspace": workspace["name"],
+                    "source": client_ip,
+                    "event": "response-redaction",
+                    "host": host,
+                    "path": flow.request.path,
+                    "redactedSecrets": redacted_secrets,
+                }
             )
 
 
