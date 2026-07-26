@@ -4,6 +4,7 @@ let
 
   hostNameType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
   httpHostType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
+  httpHeaderType = types.strMatching "[!#$%&'*+.^_`|~0-9a-zA-Z-]+";
 in
 {
   options = {
@@ -111,8 +112,9 @@ in
         types.submodule {
           options = {
             placeholder = mkOption {
-              type = types.strMatching ".+";
-              description = "Non-secret placeholder exposed to the guest.";
+              type = types.str;
+              example = "seter-placeholder-github-0123456789abcdef";
+              description = "Distinctive non-secret placeholder exposed to the guest.";
             };
             sourceFile = mkOption {
               type = types.strMatching "/.+";
@@ -120,7 +122,11 @@ in
             };
             hosts = mkOption {
               type = types.nonEmptyListOf httpHostType;
-              description = "Destination hosts to which the secret may be sent.";
+              description = "Intercepted HTTPS destination hosts to which the secret may be sent.";
+            };
+            headers = mkOption {
+              type = types.nonEmptyListOf httpHeaderType;
+              description = "HTTP request headers whose values may contain the placeholder.";
             };
           };
         }

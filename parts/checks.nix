@@ -348,6 +348,19 @@
             placeholder = "   ";
             sourceFile = "/run/secrets/token";
             hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
+          };
+        };
+      };
+
+      nonDistinctiveSecretPlaceholderRejected = configurationRejected {
+        broken = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "placeholder-token";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
           };
         };
       };
@@ -356,9 +369,10 @@
         broken = validWorkspaces.alpha // {
           egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
-            placeholder = "placeholder-token";
+            placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/nix/store/example-secret";
             hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
           };
         };
       };
@@ -367,9 +381,128 @@
         alpha = validWorkspaces.alpha // {
           egress.httpHosts = [ "API.Example.COM" ];
           secrets.token = {
-            placeholder = "placeholder-token";
+            placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
             hosts = [ "api.example.com" ];
+            headers = [ "Authorization" ];
+          };
+        };
+      };
+
+      duplicateSecretPlaceholderRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets = {
+            first = {
+              placeholder = "seter-placeholder-0123456789abcdef";
+              sourceFile = "/run/secrets/first";
+              hosts = [ "api.example.com" ];
+              headers = [ "authorization" ];
+            };
+            second = {
+              placeholder = "seter-placeholder-0123456789abcdef";
+              sourceFile = "/run/secrets/second";
+              hosts = [ "api.example.com" ];
+              headers = [ "x-api-key" ];
+            };
+          };
+        };
+      };
+
+      overlappingSecretPlaceholderRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets = {
+            first = {
+              placeholder = "seter-placeholder-0123456789abcdef";
+              sourceFile = "/run/secrets/first";
+              hosts = [ "api.example.com" ];
+              headers = [ "authorization" ];
+            };
+            second = {
+              placeholder = "seter-placeholder-0123456789abcdef-extra";
+              sourceFile = "/run/secrets/second";
+              hosts = [ "api.example.com" ];
+              headers = [ "x-api-key" ];
+            };
+          };
+        };
+      };
+
+      invalidSecretNameRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets."bad:name" = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
+          };
+        };
+      };
+
+      passthroughSecretHostRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.passthroughHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
+          };
+        };
+      };
+
+      duplicateSecretHostRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [
+              "api.example.com"
+              "API.EXAMPLE.COM"
+            ];
+            headers = [ "authorization" ];
+          };
+        };
+      };
+
+      duplicateSecretHeaderRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [
+              "authorization"
+              "Authorization"
+            ];
+          };
+        };
+      };
+
+      emptySecretHeadersRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [ ];
+          };
+        };
+      };
+
+      prohibitedSecretHeaderRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "api.example.com" ];
+          secrets.token = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/token";
+            hosts = [ "api.example.com" ];
+            headers = [ "Host" ];
           };
         };
       };
@@ -639,8 +772,17 @@
           assert blankInstallableRejected;
           assert blankKnownHostKeyRejected;
           assert blankSecretPlaceholderRejected;
+          assert nonDistinctiveSecretPlaceholderRejected;
           assert storeSecretSourceRejected;
           assert caseInsensitiveSecretHostAccepted;
+          assert duplicateSecretPlaceholderRejected;
+          assert overlappingSecretPlaceholderRejected;
+          assert invalidSecretNameRejected;
+          assert passthroughSecretHostRejected;
+          assert duplicateSecretHostRejected;
+          assert duplicateSecretHeaderRejected;
+          assert emptySecretHeadersRejected;
+          assert prohibitedSecretHeaderRejected;
           assert overlappingProxyHostsRejected;
           assert proxyPortAsDirectTcpRejected;
           assert proxyPortCollisionRejected;

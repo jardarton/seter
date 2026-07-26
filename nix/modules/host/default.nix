@@ -71,10 +71,32 @@ let
     && parsedAddress != subnetNetwork
     && parsedAddress != subnetBroadcast;
 
+  workspaceSecretNames = workspace: attrNames workspace.secrets;
   workspaceSecrets = workspace: builtins.attrValues workspace.secrets;
   normalizeHosts = map lib.toLower;
-  allowedSecretHosts =
-    workspace: normalizeHosts (workspace.egress.httpHosts ++ workspace.egress.passthroughHosts);
+  normalizeHeaders = map lib.toLower;
+  validSecretName = name: builtins.match "[a-zA-Z][a-zA-Z0-9_-]{0,62}" name != null;
+  validSecretPlaceholder =
+    placeholder: builtins.match "seter-placeholder-[a-zA-Z0-9_-]{16,}" placeholder != null;
+  nonOverlappingPlaceholders =
+    placeholders:
+    lib.all (
+      placeholder: lib.all (other: placeholder == other || !lib.hasInfix placeholder other) placeholders
+    ) placeholders;
+  prohibitedSecretHeaders = [
+    "connection"
+    "content-length"
+    "host"
+    "keep-alive"
+    "proxy-authenticate"
+    "proxy-authorization"
+    "proxy-connection"
+    "te"
+    "trailer"
+    "transfer-encoding"
+    "upgrade"
+  ];
+  allowedSecretHosts = workspace: normalizeHosts workspace.egress.httpHosts;
   secretHosts =
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
@@ -479,8 +501,24 @@ in
         message = "seter.host.workspaces.${workspace.name}.ssh.knownHostKey must not be blank";
       }
       {
-        assertion = lib.all (secret: nonBlank secret.placeholder) (workspaceSecrets workspace);
-        message = "seter.host.workspaces.${workspace.name} secret placeholders must not be blank";
+        assertion = lib.all validSecretName (workspaceSecretNames workspace);
+        message = "seter.host.workspaces.${workspace.name} secret names must start with a letter and contain only letters, digits, underscores, or hyphens, up to 63 characters";
+      }
+      {
+        assertion = lib.all (secret: validSecretPlaceholder secret.placeholder) (
+          workspaceSecrets workspace
+        );
+        message = "seter.host.workspaces.${workspace.name} secret placeholders must start with seter-placeholder- and have a URL-safe suffix of at least 16 characters";
+      }
+      {
+        assertion = hasUniqueValues (map (secret: secret.placeholder) (workspaceSecrets workspace));
+        message = "seter.host.workspaces.${workspace.name} secret placeholders must be unique within the workspace";
+      }
+      {
+        assertion = nonOverlappingPlaceholders (
+          map (secret: secret.placeholder) (workspaceSecrets workspace)
+        );
+        message = "seter.host.workspaces.${workspace.name} secret placeholders must not contain one another";
       }
       {
         assertion = lib.all (
@@ -495,7 +533,25 @@ in
         assertion = lib.all (host: builtins.elem host (allowedSecretHosts workspace)) (
           secretHosts workspace
         );
-        message = "seter.host.workspaces.${workspace.name} secret hosts must also be declared as HTTP or passthrough hosts";
+        message = "seter.host.workspaces.${workspace.name} secret hosts must be declared as intercepted HTTP hosts; TLS passthrough cannot inject secrets";
+      }
+      {
+        assertion = lib.all (secret: hasUniqueValues (normalizeHosts secret.hosts)) (
+          workspaceSecrets workspace
+        );
+        message = "seter.host.workspaces.${workspace.name} secret host lists must not contain case-insensitive duplicates";
+      }
+      {
+        assertion = lib.all (secret: hasUniqueValues (normalizeHeaders secret.headers)) (
+          workspaceSecrets workspace
+        );
+        message = "seter.host.workspaces.${workspace.name} secret header lists must not contain case-insensitive duplicates";
+      }
+      {
+        assertion = lib.all (
+          secret: lib.intersectLists (normalizeHeaders secret.headers) prohibitedSecretHeaders == [ ]
+        ) (workspaceSecrets workspace);
+        message = "seter.host.workspaces.${workspace.name} secret headers must not include routing, framing, hop-by-hop, or proxy authentication headers";
       }
     ]) workspaces;
 
