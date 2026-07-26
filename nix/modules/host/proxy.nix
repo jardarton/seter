@@ -16,8 +16,10 @@ let
     ;
 
   normalizeHosts = hosts: unique (map lib.toLower hosts);
+  normalizeHeaders = headers: unique (map lib.toLower headers);
+  credentialNameFor = workspaceName: secretName: "seter-${workspaceName}.${secretName}";
   policy = {
-    version = 1;
+    version = 2;
     workspaces = builtins.listToAttrs (
       lib.mapAttrsToList (
         name: workspace:
@@ -25,6 +27,12 @@ let
           inherit name;
           httpHosts = normalizeHosts workspace.egress.httpHosts;
           passthroughHosts = normalizeHosts workspace.egress.passthroughHosts;
+          secrets = lib.mapAttrs (secretName: secret: {
+            credential = credentialNameFor name secretName;
+            inherit (secret) placeholder;
+            hosts = normalizeHosts secret.hosts;
+            headers = normalizeHeaders secret.headers;
+          }) workspace.secrets;
         }
       ) cfg.workspaces
     );

@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import json
+import re
 import socket
 import time
 from pathlib import Path
@@ -12,6 +13,29 @@ from mitmproxy.proxy import server_hooks
 
 
 class SeterPolicy:
+    _CREDENTIAL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,254}")
+    _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+    _HOST_NAME = re.compile(
+        r"(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])"
+    )
+    _PLACEHOLDER = re.compile(r"seter-placeholder-[A-Za-z0-9_-]{16,}")
+    _SECRET_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,62}")
+    _PROHIBITED_SECRET_HEADERS = frozenset(
+        {
+            "connection",
+            "content-length",
+            "host",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        }
+    )
+
     def __init__(self) -> None:
         self.workspaces: dict[str, dict[str, object]] = {}
         self.server_pins: dict[str, tuple[str, int, str]] = {}
@@ -46,31 +70,118 @@ class SeterPolicy:
 
         try:
             policy = json.loads(Path(policy_path).read_text())
-            if policy.get("version") != 1:
+            if policy.get("version") != 2:
                 raise ValueError("unsupported policy version")
             workspaces = policy["workspaces"]
             if not isinstance(workspaces, dict):
                 raise ValueError("workspaces must be an object")
 
             parsed: dict[str, dict[str, object]] = {}
+            credential_names: set[str] = set()
             for address, workspace in workspaces.items():
                 name = workspace["name"]
                 http_hosts = workspace["httpHosts"]
                 passthrough_hosts = workspace["passthroughHosts"]
+                secrets = workspace["secrets"]
                 if (
                     not isinstance(name, str)
                     or not isinstance(http_hosts, list)
+                    or not all(
+                        isinstance(host, str)
+                        and self._HOST_NAME.fullmatch(host) is not None
+                        for host in http_hosts
+                    )
                     or not isinstance(passthrough_hosts, list)
+                    or not all(
+                        isinstance(host, str)
+                        and self._HOST_NAME.fullmatch(host) is not None
+                        for host in passthrough_hosts
+                    )
+                    or not isinstance(secrets, dict)
                 ):
                     raise ValueError("invalid workspace policy")
+
+                normalized_http_hosts = frozenset(
+                    self._normalize(host) for host in http_hosts
+                )
+                normalized_passthrough_hosts = frozenset(
+                    self._normalize(host) for host in passthrough_hosts
+                )
+                if (
+                    len(normalized_http_hosts) != len(http_hosts)
+                    or len(normalized_passthrough_hosts) != len(passthrough_hosts)
+                    or normalized_http_hosts & normalized_passthrough_hosts
+                ):
+                    raise ValueError("invalid workspace host policy")
+
+                parsed_secrets: dict[str, dict[str, object]] = {}
+                placeholders: list[str] = []
+                for secret_name, secret in secrets.items():
+                    if not isinstance(secret, dict):
+                        raise ValueError(f"invalid secret policy for {secret_name!r}")
+                    credential = secret.get("credential")
+                    placeholder = secret.get("placeholder")
+                    hosts = secret.get("hosts")
+                    headers = secret.get("headers")
+                    if (
+                        not isinstance(secret_name, str)
+                        or self._SECRET_NAME.fullmatch(secret_name) is None
+                        or not isinstance(credential, str)
+                        or self._CREDENTIAL_NAME.fullmatch(credential) is None
+                        or credential in credential_names
+                        or not isinstance(placeholder, str)
+                        or self._PLACEHOLDER.fullmatch(placeholder) is None
+                        or not isinstance(hosts, list)
+                        or not hosts
+                        or not all(
+                            isinstance(host, str)
+                            and self._HOST_NAME.fullmatch(host) is not None
+                            for host in hosts
+                        )
+                        or not isinstance(headers, list)
+                        or not headers
+                        or not all(
+                            isinstance(header, str)
+                            and self._HEADER_NAME.fullmatch(header) is not None
+                            for header in headers
+                        )
+                    ):
+                        raise ValueError(f"invalid secret policy for {secret_name!r}")
+
+                    normalized_hosts = frozenset(
+                        self._normalize(host) for host in hosts
+                    )
+                    normalized_headers = frozenset(
+                        header.lower() for header in headers
+                    )
+                    if (
+                        len(normalized_hosts) != len(hosts)
+                        or not normalized_hosts <= normalized_http_hosts
+                        or len(normalized_headers) != len(headers)
+                        or normalized_headers & self._PROHIBITED_SECRET_HEADERS
+                        or any(
+                            placeholder in other or other in placeholder
+                            for other in placeholders
+                        )
+                    ):
+                        raise ValueError(f"invalid secret policy for {secret_name!r}")
+
+                    credential_names.add(credential)
+                    placeholders.append(placeholder)
+                    parsed_secrets[secret_name] = {
+                        "credential": credential,
+                        "placeholder": placeholder,
+                        "hosts": normalized_hosts,
+                        "headers": normalized_headers,
+                    }
                 parsed[address] = {
                     "name": name,
-                    "httpHosts": frozenset(
-                        self._normalize(host) for host in http_hosts
-                    ),
-                    "passthroughHosts": frozenset(
-                        self._normalize(host) for host in passthrough_hosts
-                    ),
+                    "httpHosts": normalized_http_hosts,
+                    "passthroughHosts": normalized_passthrough_hosts,
+                    # Credential values are deliberately absent from this
+                    # Nix-store policy. A later runtime stage resolves these
+                    # stable credential names through systemd credentials.
+                    "secrets": parsed_secrets,
                 }
             self.workspaces = parsed
             self.resolve_cache.clear()

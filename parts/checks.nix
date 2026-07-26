@@ -80,6 +80,23 @@
       alphaTcpSet = (tcpSetsFor tcpTestWorkspaces).alpha;
       tcpHostConfiguration = mkHost tcpTestWorkspaces;
 
+      secretPolicyWorkspaces = validWorkspaces // {
+        alpha = validWorkspaces.alpha // {
+          egress.httpHosts = [ "API.Example.COM" ];
+          secrets.githubToken = {
+            placeholder = "seter-placeholder-0123456789abcdef";
+            sourceFile = "/run/secrets/github-token";
+            hosts = [ "Api.Example.Com" ];
+            headers = [
+              "Authorization"
+              "X-Api-Key"
+            ];
+          };
+        };
+      };
+      secretPolicyConfiguration = mkHost secretPolicyWorkspaces;
+      secretPolicyFile = builtins.head secretPolicyConfiguration.config.systemd.services.seter-proxy.restartTriggers;
+
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
       minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
@@ -675,6 +692,23 @@
                 (.workspaces.alpha | has("egress") | not) and
                 (.workspaces.alpha | has("secrets") | not)
               ' ${registryFile}
+
+              jq -e '
+                .version == 2 and
+                (.workspaces["10.100.0.10"].name == "alpha") and
+                (.workspaces["10.100.0.10"].httpHosts == ["api.example.com"]) and
+                (.workspaces["10.100.0.10"].passthroughHosts == []) and
+                (.workspaces["10.100.0.10"].secrets.githubToken == {
+                  credential: "seter-alpha.githubToken",
+                  placeholder: "seter-placeholder-0123456789abcdef",
+                  hosts: ["api.example.com"],
+                  headers: ["authorization", "x-api-key"]
+                }) and
+                (.workspaces["10.100.0.10"].secrets.githubToken | has("sourceFile") | not) and
+                (.workspaces["10.100.0.11"].secrets == {})
+              ' ${secretPolicyFile}
+
+              ! grep -Fq '/run/secrets/github-token' ${secretPolicyFile}
 
               export SETER_REGISTRY=${registryFile}
               test "$(seter list)" = $'alpha\nbeta'
