@@ -208,27 +208,51 @@
         from functools import partial
         from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
         from pathlib import Path
+        from urllib.parse import urlsplit
 
         class Handler(SimpleHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def do_GET(self):
-                if self.path in ("/secret", "/secret-gzip"):
+            def send_secret_response(self):
+                request_path = urlsplit(self.path).path
+                if request_path in ("/secret", "/secret-gzip"):
                     authorization = self.headers.get("Authorization", "")
                     api_key = self.headers.get("X-Api-Key", "")
-                    payload = (authorization + "\n" + api_key + "\n").encode()
+                    unconfigured = self.headers.get("X-Unconfigured", "")
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    request_body = self.rfile.read(content_length) if content_length else b""
+                    payload = (
+                        authorization.encode()
+                        + b"\n"
+                        + api_key.encode()
+                        + b"\n"
+                        + unconfigured.encode()
+                        + b"\n"
+                        + self.path.encode()
+                        + b"\n"
+                        + request_body
+                        + b"\n"
+                    )
                     Path("/tmp/seter-secret-received").write_bytes(payload)
-                    encoded_payload = gzip.compress(payload) if self.path == "/secret-gzip" else payload
+                    encoded_payload = gzip.compress(payload) if request_path == "/secret-gzip" else payload
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain")
                     self.send_header("X-Reflected-Authorization", authorization)
-                    if self.path == "/secret-gzip":
+                    if request_path == "/secret-gzip":
                         self.send_header("Content-Encoding", "gzip")
                     self.send_header("Content-Length", str(len(encoded_payload)))
                     self.end_headers()
                     self.wfile.write(encoded_payload)
-                    return
-                super().do_GET()
+                    return True
+                return False
+
+            def do_GET(self):
+                if not self.send_secret_response():
+                    super().do_GET()
+
+            def do_POST(self):
+                if not self.send_secret_response():
+                    self.send_error(404)
 
         handler = partial(Handler, directory="/tmp/seter-upstream")
         port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
@@ -236,6 +260,12 @@
         if port == 443:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(sys.argv[2], sys.argv[3])
+
+            def record_server_name(_socket, server_name, _context):
+                if server_name == "bad-cert.example":
+                    Path("/tmp/seter-bad-cert-tls-seen").touch()
+
+            context.set_servername_callback(record_server_name)
             server.socket = context.wrap_socket(server.socket, server_side=True)
         server.serve_forever()
       '';
@@ -1230,7 +1260,13 @@
                   secrets.githubToken = {
                     placeholder = "seter-placeholder-0123456789abcdef";
                     sourceFile = "/run/seter-test/github-token";
-                    hosts = [ "allowed.example" ];
+                    hosts = [
+                      "allowed.example"
+                      # Exercise the guarantee that upstream certificate
+                      # verification happens before an injected request can
+                      # reach a destination with the wrong certificate.
+                      "bad-cert.example"
+                    ];
                     headers = [ "authorization" ];
                   };
                   secrets.otherToken = {
@@ -1294,11 +1330,11 @@
 
             # LoadCredential is intentionally a start-time snapshot. Secret
             # managers must restart the service after rotating a source file.
-            machine.succeed("printf rotated-runtime-token > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
+            machine.succeed("printf 'rotated-runtime-token\\r\\n' > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
             machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat \"$credential_dir/seter-alpha.githubToken\")\" = first-runtime-token")
             machine.succeed("systemctl restart seter-proxy.service")
             machine.wait_for_unit("seter-proxy.service")
-            machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat \"$credential_dir/seter-alpha.githubToken\")\" = rotated-runtime-token")
+            machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/base64 -w0 \"$credential_dir/seter-alpha.githubToken\")\" = cm90YXRlZC1ydW50aW1lLXRva2VuDQo=")
             machine.fail("grep -F rotated-runtime-token /etc/systemd/system/seter-proxy.service")
             machine.fail("journalctl -u seter-proxy.service | grep -F rotated-runtime-token")
             machine.succeed("systemctl start seter-dns-alpha.service seter-dns-beta.service")
@@ -1435,9 +1471,22 @@
             # receives no credential it does not own.
             machine.succeed("rm -f /tmp/seter-secret-received; test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/secret-atomic-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' -H 'X-Api-Key: seter-placeholder-fedcba9876543210' https://allowed.example/secret) = 403; grep -F 'not bound to host' /tmp/secret-atomic-denied; test ! -e /tmp/seter-secret-received")
             machine.succeed("rm -f /tmp/seter-secret-received; ip netns exec beta curl --noproxy '*' --insecure --fail --silent -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://second-allowed.example/secret | grep -Fx 'Bearer seter-placeholder-0123456789abcdef'; grep -Fx 'Bearer seter-placeholder-0123456789abcdef' /tmp/seter-secret-received")
-            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/secret-http-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' http://allowed.example/secret) = 403; grep -F 'only be injected over HTTPS' /tmp/secret-http-denied")
-            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/secret-host-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://second-allowed.example/secret) = 403; grep -F 'not bound to host' /tmp/secret-host-denied")
-            machine.succeed("test -z \"$(ip netns exec alpha curl --noproxy '*' --insecure --fail --silent -H 'X-Unconfigured: seter-placeholder-0123456789abcdef' https://allowed.example/secret)\"")
+            machine.succeed("rm -f /tmp/seter-secret-received; test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/secret-http-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' http://allowed.example/secret) = 403; grep -F 'only be injected over HTTPS' /tmp/secret-http-denied; test ! -e /tmp/seter-secret-received")
+            machine.succeed("rm -f /tmp/seter-secret-received; test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/secret-host-denied --write-out '%{http_code}' -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://second-allowed.example/secret) = 403; grep -F 'not bound to host' /tmp/secret-host-denied; test ! -e /tmp/seter-secret-received")
+
+            # Replacement is deliberately header-only. The same placeholder
+            # in a query string and request body remains harmless public text,
+            # even when another occurrence is injected in an approved header.
+            machine.succeed("rm -f /tmp/seter-secret-received /tmp/secret-body; ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --output /tmp/secret-body -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' --data-binary 'body=seter-placeholder-0123456789abcdef' 'https://allowed.example/secret?query=seter-placeholder-0123456789abcdef'")
+            machine.succeed("grep -Fx 'Bearer rotated-runtime-token' /tmp/seter-secret-received; grep -Fx '/secret?query=seter-placeholder-0123456789abcdef' /tmp/seter-secret-received; grep -Fx 'body=seter-placeholder-0123456789abcdef' /tmp/seter-secret-received; grep -Fx 'Bearer seter-placeholder-0123456789abcdef' /tmp/secret-body; grep -Fx '/secret?query=seter-placeholder-0123456789abcdef' /tmp/secret-body; grep -Fx 'body=seter-placeholder-0123456789abcdef' /tmp/secret-body; ! grep -F rotated-runtime-token /tmp/secret-body")
+
+            # Ordinary header values pass through unchanged. Conversely, an
+            # approved binding does not weaken upstream certificate checks:
+            # a hostname/certificate mismatch must fail before the server can
+            # observe the already-rewritten request object.
+            machine.succeed("rm -f /tmp/seter-secret-received; ip netns exec alpha curl --noproxy '*' --insecure --fail --silent -H 'Authorization: Bearer ordinary-public-value' https://allowed.example/secret | grep -Fx 'Bearer ordinary-public-value'; grep -Fx 'Bearer ordinary-public-value' /tmp/seter-secret-received")
+            machine.succeed("rm -f /tmp/seter-secret-received /tmp/seter-bad-cert-tls-seen; ! ip netns exec alpha curl --noproxy '*' --insecure --fail --silent -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://bad-cert.example/secret; test -e /tmp/seter-bad-cert-tls-seen; test ! -e /tmp/seter-secret-received")
+            machine.succeed("rm -f /tmp/seter-secret-received; ip netns exec alpha curl --noproxy '*' --insecure --fail --silent -H 'X-Unconfigured: seter-placeholder-0123456789abcdef' https://allowed.example/secret | grep -Fx 'seter-placeholder-0123456789abcdef'; grep -Fx 'seter-placeholder-0123456789abcdef' /tmp/seter-secret-received")
             machine.succeed("journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"injectedSecrets\":[\"githubToken\"]'")
             machine.succeed("journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"event\":\"response-redaction\"' | grep -F '\"redactedSecrets\":[\"githubToken\"]'")
             machine.fail("journalctl -u seter-proxy.service | grep -F rotated-runtime-token")

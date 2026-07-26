@@ -147,7 +147,7 @@ Response redaction prevents straightforward accidental reflection, but it is not
 sops.secrets.github-token.restartUnits = [ "seter-proxy.service" ];
 ```
 
-Other secret managers must arrange the equivalent restart.
+Other secret managers must arrange the equivalent restart. See [Destination-bound secret injection](./docs/secret-injection.md) for the full policy contract, threat boundary, rotation procedure, and troubleshooting guidance.
 
 ## VM lifecycle
 
