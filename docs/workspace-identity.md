@@ -25,6 +25,8 @@ let
     gateway = "10.100.0.1";
     prefixLength = 24;
     proxyPort = 18081;
+    nixStoreImage = "project-nix-store.img";
+    nixStoreSizeMiB = 16384;
   };
 in {
   nixosModules.projectIdentity = project.guestModule;
@@ -57,9 +59,10 @@ The guest module fixes:
 - network enablement, IPv4 address, MAC address, TAP name, gateway, prefix, and gateway-only DNS;
 - the explicit proxy URL;
 - the SSH user;
-- the project-volume image basename.
+- the project-volume image basename;
+- the private Nix-store image basename and initial capacity.
 
-Assertions also verify the effective microVM TAP, NixOS DNS and networkd wiring, proxy session variables, persistent project volume, SSH lifecycle access, configured placeholders, and proxy CA. This catches lower-level `lib.mkForce` overrides that leave the public `seter.guest` values unchanged.
+Assertions also verify the effective microVM TAP, NixOS DNS and networkd wiring, proxy session variables, persistent project and Nix volumes, writable-store overlay, sandboxed guest Nix settings, SSH lifecycle access, configured placeholders, and proxy CA. This catches lower-level `lib.mkForce` overrides that leave the public `seter.guest` values unchanged.
 
 It writes the public identity to `/etc/seter/workspace.json`. It also wraps `microvm.declaredRunner` with the same JSON at `share/seter/identity.json`. Assertions reject later overrides, including `lib.mkForce` overrides.
 
@@ -76,7 +79,7 @@ An undefined secret name fails evaluation.
 
 ## Runner installation contract
 
-The host writes registry version 3. Workspaces made with `mkWorkspaceDefinition` carry an expected runner identity derived from the host's effective gateway, subnet prefix, explicit proxy port, and workspace configuration.
+The host writes registry version 4 and requires runner identity version 2 for generated definitions. Workspaces made with `mkWorkspaceDefinition` carry an expected runner identity derived from the host's effective gateway, subnet prefix, explicit proxy port, and workspace configuration.
 
 Both the unprivileged and privileged halves of `seter update` parse the runner manifest without executing runner code. `seter up` repeats the comparison against the installed immutable runner before every cold start, catching host identity changes made after installation. Installation or startup fails if the manifest is absent, malformed, or differs from the root-owned registry. The comparison covers:
 
@@ -85,7 +88,8 @@ Both the unprivileged and privileged halves of `seter update` parse the runner m
 - address, MAC, TAP, gateway, and prefix;
 - proxy URL;
 - SSH user;
-- project image basename.
+- project image basename;
+- private Nix-store image basename and initial capacity.
 
 The manifest is runner-controlled consistency metadata, not cryptographic attestation. A deliberately modified workspace runner can write matching JSON while booting different code. Seter uses the comparison to catch stale or accidentally divergent generated configurations; host-side TAP identity checks, nftables policy, privilege separation, and resource controls remain authoritative for untrusted runners.
 
@@ -108,5 +112,5 @@ Placeholders and the proxy CA public certificate are intentionally non-secret an
 1. Replace `seter.lib.mkWorkspace { ... }` with `seter.lib.mkWorkspaceDefinition { name = "…"; ... }`.
 2. Register `.host` under the same workspace name.
 3. Export and import `.guestModule` in the project's guest configuration.
-4. Remove duplicated guest name, address, MAC, TAP, gateway, proxy, SSH-user, and image settings.
+4. Remove duplicated guest name, address, MAC, TAP, gateway, proxy, SSH-user, project-image, and Nix-store settings.
 5. Rebuild the project runner with `seter update`. A pre-migration runner is rejected because it has no identity manifest.

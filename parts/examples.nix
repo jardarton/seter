@@ -10,6 +10,7 @@ let
     ip = "10.100.0.10";
     mac = "02:00:00:00:00:10";
     tap = "seter-minimal";
+    nixStoreSizeMiB = 1024;
   };
 
   mkMinimal =
@@ -111,7 +112,8 @@ in
             ssh-keygen -l -f host-key-second.pub
 
             debugfs -R 'cat /seter-verification' test-project.img > report
-            for expected in marker root-tmpfs project-writable store-read-only ssh-active ssh-host-key-persistent; do
+            test -s minimal-nix-store.img
+            for expected in marker root-tmpfs project-writable store-overlay store-lower-read-only nix-state-persistent ssh-active ssh-host-key-persistent; do
               grep -Fx "$expected" report
             done
 

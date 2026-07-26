@@ -22,7 +22,7 @@ Existing tools cover parts of this (micro-VM runners, agent sandboxes with egres
 
 ### Layers
 
-1. **VM layer** — [microvm.nix](https://github.com/astro/microvm.nix) with cloud-hypervisor (or QEMU) on NixOS hosts. Guests are NixOS configurations exported from each project's flake. The host `/nix/store` is shared read-only into guests via virtiofs, so guests are small and boot fast.
+1. **VM layer** — [microvm.nix](https://github.com/microvm-nix/microvm.nix) with cloud-hypervisor (or QEMU) on NixOS hosts. Guests are NixOS configurations exported from each project's flake. The host `/nix/store` is shared read-only into guests via virtiofs as the lower layer of a workspace-private writable overlay, so common paths are shared while project-controlled builds remain inside the VM.
 2. **Policy layer** — all guest egress is default-denied by nftables on the host bridge and forced through a host-side mitmproxy running a Python policy addon: per-project host allowlists, placeholder→real secret injection for bound destinations, SNI passthrough for cert-pinned or bulk hosts, and full request audit logging.
 3. **Host integration layer** — a small launcher CLI (`vm`) that builds, starts, stops, and executes into VMs; generated host DNS entries; forwarded host-side device daemons (e.g. an adb server) instead of USB passthrough; direnv integration on both sides of the boundary.
 
@@ -43,7 +43,7 @@ Adding a workspace = one registry entry + one flake import.
 
 ### VM lifecycle
 
-- `vm update <name>` — builds the microvm runner from the project flake **on the host** (so outputs land in the shared store and deduplicate across projects) and atomically registers it under `/nix/var/nix/gcroots/per-project/<name>`.
+- `vm update <name>` — builds the microvm runner from the project flake **on the host** (so outputs land in the shared store and deduplicate across projects), atomically registers the current runner under `/nix/var/nix/gcroots/per-project/<name>`, and retains generation roots needed by the persistent guest Nix database.
 - `vm up <name>` — starts the last-built runner through a fixed, host-declared per-workspace systemd unit with `MemoryMax`/`CPUQuota` from the registry. Runner code executes as the dedicated workspace account, never as root.
 - `vm run <name> -- <cmd>` — ephemeral mode: boots with tmpfs-only root, waits for SSH (pinned host key from the registry), runs the command via `direnv exec /project -- <cmd>` so ephemeral and interactive modes see identical environments, propagates the exit code, tears down.
 - `vm down <name>` — asks the matching runner to send an ACPI power-button event, then lets the fixed systemd unit terminate the VMM after a timeout as the hammer.
@@ -56,10 +56,10 @@ Starting and stopping host system units requires authorization, but project code
 ### Filesystem
 
 - **Root:** ephemeral tmpfs. Every boot is clean; VM state cannot rot.
-- **`/nix/store`:** the host store, read-only via virtiofs. Anything present on the host is free in every guest. Guests never build into a private store as normal practice — the launcher pre-builds devShells host-side, and/or guests use the host as remote builder/substituter over the bridge so guest-initiated builds also land in the shared store.
+- **`/nix/store`:** an overlay whose lower layer is the host store shared read-only via virtiofs and whose persistent upper layer is a bounded workspace-private ext4 image. Registered runner closures are shared without duplication; other paths are built or substituted by the guest Nix daemon into its private layer, keeping project-controlled derivations and fetch traffic inside the VM boundary. The same image retains `/nix/var/nix`, so registrations survive the tmpfs-root reboot. Host runner-history roots and matching guest closure roots keep prior generations available for upgrades and rollbacks. Guest store GC is disabled because stock Nix scans the merged lower namespace and would persist whiteouts for unrelated host paths; reclaiming private capacity currently replaces the image as a dependency cache.
 - **`/home` (or `/project`):** one persistent block-device-backed volume per project. Holds the working tree, direnv/nix-direnv cache, language/package caches, and Docker's data-root. This is deliberately a **VM-native disk image**, not a host share: overlayfs and build churn on virtiofs is slow and semantically fragile.
 - **No host home mounts, no broad host shares.** Working trees are cloned into the VM from the git remote. File movement between host and guest is deliberate (scp/git), not ambient.
-- **GC safety:** the per-project GC roots prevent host garbage collection from removing store paths a running or stopped VM depends on.
+- **GC safety:** current and historical per-project runner roots prevent host garbage collection from removing lower-store closures still registered by the persistent guest Nix database; matching guest roots retain prior boot closures, while guest store GC is disabled to avoid whiteouts elsewhere in the merged lower namespace.
 
 ### Networking
 
@@ -112,7 +112,7 @@ For split or dependent repositories that are developed together, one workspace V
 - No ambient sharing of the host home directory, host credentials, or host dotfiles into guests.
 - No real secrets in guest filesystems, env vars, or images — placeholders only.
 - No user-mode/slirp networking and no per-port forward configuration — routable per-VM IPs instead.
-- No writable store share, no guest-local private stores as standard practice.
+- No writable host-store share and no guest build access to the physical host's Nix daemon. Each workspace instead has a private writable overlay above the shared read-only host store.
 - No auto-start of VMs from shell hooks; lifecycle is explicit.
 - No always-on project VMs; the fleet's idle cost is near zero (the outer macOS VM being the accepted exception).
 - No in-guest hardening layers (gVisor, AppArmor profiles, etc.) — the VM boundary is the security boundary; further layers add friction without addressing a realistic residual threat.

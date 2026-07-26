@@ -606,6 +606,15 @@
         };
       };
 
+      reusedStorageImageRejected = configurationRejected {
+        broken = validWorkspaces.alpha // {
+          storage = validWorkspaces.alpha.storage // {
+            image = "reused.img";
+            nixStoreImage = "reused.img";
+          };
+        };
+      };
+
       blankSecretPlaceholderRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
           egress.httpHosts = [ "api.example.com" ];
@@ -1084,8 +1093,60 @@
                 ({ lib, ... }: {
                   seter.guest = {
                     projectVolume.enable = lib.mkForce false;
+                    nixStore.enable = lib.mkForce false;
                     ssh.enable = lib.mkForce false;
                   };
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedNixStoreDisableRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  seter.guest.nixStore.enable = lib.mkForce false;
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedNixSandboxOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  nix.settings.sandbox = lib.mkForce false;
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedNixGcOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  nix.settings.min-free = lib.mkForce 1;
                   system.stateVersion = "24.11";
                 })
               ];
@@ -1195,6 +1256,19 @@
           assert identityGuestConfiguration.config.seter.guest.network.tap == "seter-identity";
           assert identityGuestConfiguration.config.seter.guest.network.gateway == "10.100.0.1";
           assert identityGuestConfiguration.config.seter.guest.proxy == "http://10.100.0.1:18081";
+          assert identityGuestConfiguration.config.seter.guest.nixStore.enable;
+          assert identityGuestConfiguration.config.seter.guest.nixStore.image == "identity-nix-store.img";
+          assert identityGuestConfiguration.config.seter.guest.nixStore.size == 16384;
+          assert identityGuestConfiguration.config.microvm.writableStoreOverlay == "/nix/.rw-store";
+          assert identityGuestConfiguration.config.fileSystems."/nix".neededForBoot;
+          assert identityGuestConfiguration.config.nix.settings.sandbox;
+          assert !identityGuestConfiguration.config.nix.settings.auto-optimise-store;
+          assert !identityGuestConfiguration.config.nix.optimise.automatic;
+          assert !identityGuestConfiguration.config.nix.gc.automatic;
+          assert identityGuestConfiguration.config.nix.settings.min-free == 0;
+          assert identityGuestConfiguration.config.nix.settings.max-free == 0;
+          assert identityGuestConfiguration.config.nix.settings.gc-reserved-space == 0;
+          assert lib.hasInfix "seter-lower-closures" identityGuestConfiguration.config.boot.postBootCommands;
           assert
             identityGuestConfiguration.config.environment.sessionVariables.GITHUB_TOKEN
             == "seter-placeholder-github-0123456789abcdef";
@@ -1215,7 +1289,7 @@
             }
             ''
               jq -e '
-                .version == 3 and
+                .version == 4 and
                 (.workspaces | keys == ["alpha", "beta"]) and
                 (.workspaces.alpha.hostname == "alpha.vm") and
                 (.workspaces.alpha.network.address == "10.100.0.10") and
@@ -1223,15 +1297,19 @@
                 (.workspaces.alpha.resources.memoryMiB == 4096) and
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
                 (.workspaces.alpha.ssh.knownHostKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test") and
-                (.workspaces.alpha.storage.image == "alpha-project.img") and
+                (.workspaces.alpha.storage == {
+                  image: "alpha-project.img",
+                  nixStoreImage: "alpha-nix-store.img",
+                  nixStoreSizeMiB: 16384
+                }) and
                 (.workspaces.alpha | has("egress") | not) and
                 (.workspaces.alpha | has("secrets") | not) and
                 (.workspaces.alpha | has("hostServices") | not)
               ' ${registryFile}
 
               jq -e '
-                .version == 3 and
-                .workspaces.identity.runner.identity.version == 1 and
+                .version == 4 and
+                .workspaces.identity.runner.identity.version == 2 and
                 .workspaces.identity.runner.identity.workspace == "identity" and
                 .workspaces.identity.runner.identity.hostname == "identity.vm" and
                 .workspaces.identity.runner.identity.network == {
@@ -1243,7 +1321,11 @@
                 } and
                 .workspaces.identity.runner.identity.proxy.url == "http://10.100.0.1:18081" and
                 .workspaces.identity.runner.identity.ssh.user == "seter" and
-                .workspaces.identity.runner.identity.storage.image == "identity-project.img"
+                .workspaces.identity.runner.identity.storage == {
+                  image: "identity-project.img",
+                  nixStoreImage: "identity-nix-store.img",
+                  nixStoreSizeMiB: 16384
+                }
               ' ${identityRegistryFile}
 
               test -f ${identityGuestConfiguration.config.microvm.declaredRunner}/share/seter/identity.json
@@ -1318,6 +1400,7 @@
               export SETER_TEST_RUNNER=${identityGuestConfiguration.config.microvm.declaredRunner}
               seter update identity
               test "$(readlink state/identity/current)" = "${identityGuestConfiguration.config.microvm.declaredRunner}"
+              test "$(readlink gcroots/.runner-history/identity/${builtins.baseNameOf identityGuestConfiguration.config.microvm.declaredRunner})" = "${identityGuestConfiguration.config.microvm.declaredRunner}"
 
               jq '
                 .workspaces.identity.network.address = "10.100.0.13" |
@@ -1336,6 +1419,7 @@
               seter update alpha
               test "$(readlink state/alpha/current)" = "${fakeRunner}"
               test "$(readlink gcroots/alpha)" = "${fakeRunner}"
+              test "$(readlink gcroots/.runner-history/alpha/${builtins.baseNameOf fakeRunner})" = "${fakeRunner}"
               test -z "$(find gcroots -maxdepth 1 -name '.alpha.pending-*' -print -quit)"
               set +e
               seter status alpha > status
@@ -1400,6 +1484,7 @@
           assert outOfSubnetGatewayRejected;
           assert blankInstallableRejected;
           assert blankKnownHostKeyRejected;
+          assert reusedStorageImageRejected;
           assert blankSecretPlaceholderRejected;
           assert nonDistinctiveSecretPlaceholderRejected;
           assert storeSecretSourceRejected;
@@ -1435,6 +1520,9 @@
           assert generatedIdentityOverrideRejected;
           assert generatedEffectiveNetworkOverrideRejected;
           assert generatedLifecycleDisableRejected;
+          assert generatedNixStoreDisableRejected;
+          assert generatedNixSandboxOverrideRejected;
+          assert generatedNixGcOverrideRejected;
           assert generatedEffectiveProxyOverrideRejected;
           assert generatedProxyCaOverrideRejected;
           pkgs.runCommand "seter-workspace-uniqueness-check" { } ''

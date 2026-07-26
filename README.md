@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Shared host/guest workspace identity, runner identity verification, guest and host lifecycle behavior, a fail-closed workspace network boundary, exact-name guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Shared host/guest workspace identity, runner identity verification, guest and host lifecycle behavior, persistent private Nix store overlays, a fail-closed workspace network boundary, exact-name guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -38,7 +38,7 @@ seter shell project
 seter down project
 ```
 
-`update` atomically installs the immutable runner under the workspace state directory and registers a GC root under `/nix/var/nix/gcroots/per-project`. `up` never evaluates Nix. The VM runs as its dedicated `seter-*` system account with the registry's memory and CPU limits; runner-provided TAP and VirtioFS helpers are not executed.
+`update` atomically installs the immutable runner under the workspace state directory, updates its current GC root under `/nix/var/nix/gcroots/per-project`, and retains a history root for every runner generation that may back the persistent guest Nix database. `up` never evaluates Nix. The VM runs as its dedicated `seter-*` system account with the registry's memory and CPU limits; runner-provided TAP and VirtioFS helpers are not executed.
 
 ## Shared workspace registry
 
@@ -69,7 +69,7 @@ flake.nixosModules.projectIdentity = project.guestModule;
 users.users.alice.extraGroups = [ "seter-operators" ];
 ```
 
-The guest module fixes the workspace name, IPv4 and MAC addresses, TAP, gateway, prefix, DNS and proxy endpoints, SSH user, and project-image basename. Assertions also check the effective microVM interface, NixOS network wiring, proxy variables, project volume, SSH access, placeholders, and proxy CA so lower-level overrides fail evaluation. The module embeds the non-secret identity in `/etc/seter/workspace.json` and in the runner at `share/seter/identity.json`. `seter update` compares that manifest with the root-owned host registry before installing a runner, and `seter up` rechecks the installed runner before each cold start, so ordinary stale identity fails with a direct error instead of producing a disconnected VM. The runner controls its manifest, so this is consistency checking rather than attestation; host-side network and privilege policy remains authoritative.
+The guest module fixes the workspace name, IPv4 and MAC addresses, TAP, gateway, prefix, DNS and proxy endpoints, SSH user, project-image basename, and private Nix-store image and capacity. Assertions also check the effective microVM interface, NixOS network wiring, proxy variables, persistent volumes, writable-store overlay, sandboxed guest builds, SSH access, placeholders, and proxy CA so lower-level overrides fail evaluation. The module embeds the non-secret identity in `/etc/seter/workspace.json` and in the runner at `share/seter/identity.json`. `seter update` compares that manifest with the root-owned host registry before installing a runner, and `seter up` rechecks the installed runner before each cold start, so ordinary stale identity fails with a direct error instead of producing a disconnected VM. The runner controls its manifest, so this is consistency checking rather than attestation; host-side network and privilege policy remains authoritative.
 
 Every workspace on one host bridge must have a unique IPv4 address, MAC address, TAP interface, and hostname. Evaluation fails when entries conflict. Host-only egress policy and secret source paths are omitted from the generated guest module and runner closure, but a project importing the infra flake can still read that flake's tracked source. Use a separate sanitized identity source if those definitions are confidential. The low-level `lib.mkWorkspace` constructor remains available for compatibility but does not enable runner identity verification. See [Generated workspace identity](./docs/workspace-identity.md) for the complete contract and migration instructions.
 
@@ -83,6 +83,8 @@ sudo systemctl stop seter-runtime-project.target
 ```
 
 The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
+
+Inside the guest, the read-only host store is the lower layer of an overlay mounted at `/nix/store`. A dedicated ext4 image, `<workspace>-nix-store.img` by default, is mounted at `/nix` and retains both the overlay's upper/work directories and `/nix/var/nix`. Consequently `nix build`, `nix develop`, and nix-direnv can realize missing paths without writing to the host store, and their database registrations survive clean-root reboots. Seter roots every booted runner closure on both sides of the overlay for upgrades and rollbacks. Only those registered closures are guaranteed to deduplicate; unrelated paths merely present in the host store may be rebuilt privately. Guest store GC is disabled because stock Nix would scan the merged lower store and create persistent whiteouts; reclaiming space currently means replacing the bounded private image. Guest builds remain sandboxed and their fetches remain inside the workspace network boundary. Configure the initial capacity with `nixStoreSizeMiB` in `mkWorkspaceDefinition`; existing images are not resized automatically. See [Private writable Nix stores](./docs/nix-store.md).
 
 These units provide VM plumbing only. They do not start the VM. Separate host-owned DNS, proxy, direct-TCP resolver, and nftables services keep every workspace fail-closed while enabling only declared application egress.
 
@@ -219,7 +221,7 @@ cargo run -- --help
 nix flake check
 ```
 
-On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that boots the minimal guest through the host module and CLI, connects over SSH, and verifies project-volume persistence across a restart. It requires writable `/dev/kvm` and nested virtualization support.
+On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that boots the minimal guest through the host module and CLI, connects over SSH, builds a derivation into the private store, and verifies project-volume, Nix-store, and Nix-database persistence across a restart. It requires writable `/dev/kvm` and nested virtualization support.
 
 ## Flake outputs
 
@@ -234,4 +236,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. A shared workspace definition generates matching host and sanitized guest projections, embeds a versioned identity in the guest and runner, and prevents installation or cold start of mismatched runners. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, exact-name canonical guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, per-workspace host-daemon gateway relays, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.
+The guest boundary has a tested minimal vertical slice. A shared workspace definition generates matching host and sanitized guest projections, embeds a versioned identity in the guest and runner, and prevents installation or cold start of mismatched runners. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, exact-name canonical guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, per-workspace host-daemon gateway relays, persistent private guest Nix stores above the shared read-only host store, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.

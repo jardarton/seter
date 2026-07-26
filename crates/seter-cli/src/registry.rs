@@ -11,8 +11,8 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 3;
-pub const RUNNER_IDENTITY_VERSION: u32 = 1;
+const REGISTRY_VERSION: u32 = 4;
+pub const RUNNER_IDENTITY_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,9 +97,12 @@ pub struct Ssh {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct Storage {
     pub image: String,
+    pub nix_store_image: String,
+    pub nix_store_size_mi_b: u64,
 }
 
 impl Registry {
@@ -208,6 +211,21 @@ impl Registry {
                     && workspace.storage.image != "..",
                 "workspace {name:?} has an invalid project image name"
             );
+            ensure!(
+                !workspace.storage.nix_store_image.trim().is_empty()
+                    && !workspace.storage.nix_store_image.contains('/')
+                    && workspace.storage.nix_store_image != "."
+                    && workspace.storage.nix_store_image != "..",
+                "workspace {name:?} has an invalid Nix store image name"
+            );
+            ensure!(
+                workspace.storage.image != workspace.storage.nix_store_image,
+                "workspace {name:?} reuses its project image for private Nix state"
+            );
+            ensure!(
+                workspace.storage.nix_store_size_mi_b > 0,
+                "workspace {name:?} has a zero Nix store volume size"
+            );
             if let Some(host_key) = &workspace.ssh.known_host_key {
                 ensure!(
                     !host_key.trim().is_empty(),
@@ -247,7 +265,7 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 3,
+      "version": 4,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
@@ -259,14 +277,18 @@ mod tests {
           },
           "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
           "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": { "image": "minimal-project.img" }
+          "storage": {
+            "image": "minimal-project.img",
+            "nixStoreImage": "minimal-nix-store.img",
+            "nixStoreSizeMiB": 16384
+          }
         }
       }
     }
     "#;
 
     #[test]
-    fn parses_version_three_registry() {
+    fn parses_version_four_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -283,7 +305,7 @@ mod tests {
         let runner = r#""runner": {
             "installable": "github:owner/project#runner",
             "identity": {
-              "version": 1,
+              "version": 2,
               "workspace": "minimal",
               "hostname": "minimal.vm",
               "network": {
@@ -295,7 +317,11 @@ mod tests {
               },
               "proxy": { "url": "http://10.100.0.1:18081" },
               "ssh": { "user": "seter" },
-              "storage": { "image": "minimal-project.img" }
+              "storage": {
+                "image": "minimal-project.img",
+                "nixStoreImage": "minimal-nix-store.img",
+                "nixStoreSizeMiB": 16384
+              }
             }
           }"#;
         let input = VALID.replacen(
@@ -317,11 +343,27 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 3", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 4", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()
             .contains("unsupported workspace registry version"));
+    }
+
+    #[test]
+    fn rejects_reused_storage_image() {
+        let input = VALID.replacen("minimal-nix-store.img", "minimal-project.img", 1);
+        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reuses its project image for private Nix state"));
+    }
+
+    #[test]
+    fn rejects_zero_nix_store_size() {
+        let input = VALID.replacen("\"nixStoreSizeMiB\": 16384", "\"nixStoreSizeMiB\": 0", 1);
+        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("zero Nix store volume size"));
     }
 
     #[test]
@@ -337,7 +379,11 @@ mod tests {
           },
           "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
           "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": { "image": "other-project.img" }
+          "storage": {
+            "image": "other-project.img",
+            "nixStoreImage": "other-nix-store.img",
+            "nixStoreSizeMiB": 8192
+          }
         }
         "#;
         let input = VALID.replacen(
@@ -362,7 +408,11 @@ mod tests {
           },
           "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
           "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": { "image": "other-project.img" }
+          "storage": {
+            "image": "other-project.img",
+            "nixStoreImage": "other-nix-store.img",
+            "nixStoreSizeMiB": 8192
+          }
         }
         "#;
         let input = VALID.replacen(

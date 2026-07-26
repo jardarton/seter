@@ -459,11 +459,32 @@ fn validate_runner(
 fn install_runner_path(name: &str, runner: &Path) -> Result<()> {
     let state_dir = state_root().join(name);
     let gcroot_dir = gcroot_root();
+    let history_dir = gcroot_dir.join(".runner-history").join(name);
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create {}", state_dir.display()))?;
     fs::create_dir_all(&gcroot_dir)
         .with_context(|| format!("failed to create {}", gcroot_dir.display()))?;
+    fs::create_dir_all(&history_dir)
+        .with_context(|| format!("failed to create {}", history_dir.display()))?;
     let _lifecycle_lock = LifecycleLock::acquire(&lifecycle_lock_path(name))?;
+
+    // Persistent guest Nix databases retain registrations for every system
+    // closure they have booted. Keep those immutable runner generations (and
+    // therefore their read-only lower-store closures) available on the host.
+    // Matching guest roots retain booted closure registrations, while normal
+    // guest GC is disabled because it cannot distinguish unrelated lower
+    // paths. History cleanup must be coordinated with resetting the
+    // workspace's private Nix image.
+    let runner_name = runner
+        .file_name()
+        .context("runner path has no store-path name")?;
+    atomic_symlink(runner, &history_dir.join(runner_name)).with_context(|| {
+        format!(
+            "failed to retain runner {} in workspace {:?} history",
+            runner.display(),
+            name
+        )
+    })?;
 
     // Keep both runners rooted throughout the switch. If publishing `current`
     // fails, the old permanent root remains intact. If promoting the pending

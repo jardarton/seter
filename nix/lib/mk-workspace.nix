@@ -9,6 +9,8 @@
   sshUser ? "seter",
   knownHostKey ? null,
   projectImage ? null,
+  nixStoreImage ? null,
+  nixStoreSizeMiB ? null,
   allowedHTTPHosts ? [ ],
   passthroughHosts ? [ ],
   allowedTCP ? [ ],
@@ -32,7 +34,10 @@
     inherit knownHostKey;
   };
 
-  storage = if projectImage == null then { } else { image = projectImage; };
+  storage =
+    (if projectImage == null then { } else { image = projectImage; })
+    // (if nixStoreImage == null then { } else { inherit nixStoreImage; })
+    // (if nixStoreSizeMiB == null then { } else { inherit nixStoreSizeMiB; });
 
   egress = {
     httpHosts = allowedHTTPHosts;

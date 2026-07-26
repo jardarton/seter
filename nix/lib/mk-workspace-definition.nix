@@ -13,6 +13,8 @@
   sshUser ? "seter",
   knownHostKey ? null,
   projectImage ? "${name}-project.img",
+  nixStoreImage ? "${name}-nix-store.img",
+  nixStoreSizeMiB ? 16384,
   allowedHTTPHosts ? [ ],
   passthroughHosts ? [ ],
   allowedTCP ? [ ],
@@ -32,7 +34,7 @@ let
 
   proxyUrl = "http://${gateway}:${toString proxyPort}";
   identity = {
-    version = 1;
+    version = 2;
     workspace = name;
     inherit hostname;
     network = {
@@ -42,7 +44,10 @@ let
     };
     proxy.url = proxyUrl;
     ssh.user = sshUser;
-    storage.image = projectImage;
+    storage = {
+      image = projectImage;
+      inherit nixStoreImage nixStoreSizeMiB;
+    };
   };
   identityJson = builtins.toJSON identity;
 in
@@ -73,7 +78,10 @@ in
       inherit knownHostKey;
     };
 
-    storage.image = projectImage;
+    storage = {
+      image = projectImage;
+      inherit nixStoreImage nixStoreSizeMiB;
+    };
 
     egress = {
       httpHosts = allowedHTTPHosts;
@@ -101,6 +109,7 @@ in
         inherit tap gateway prefixLength;
         proxy = proxyUrl;
         image = projectImage;
+        inherit nixStoreImage nixStoreSizeMiB;
         sshUser = sshUser;
       };
       effectiveInterfaceMatches =
@@ -124,6 +133,14 @@ in
         && (volume.mountPoint or null) == config.seter.guest.projectDirectory
         && (volume.label or null) == "seter-project"
         && (volume.fsType or null) == "ext4"
+      ) config.microvm.volumes;
+      effectiveNixStoreVolumePresent = lib.any (
+        volume:
+        (volume.image or null) == expected.nixStoreImage
+        && (volume.mountPoint or null) == "/nix"
+        && (volume.label or null) == "seter-nix"
+        && (volume.fsType or null) == "ext4"
+        && (volume.size or null) == expected.nixStoreSizeMiB
       ) config.microvm.volumes;
       baseRunner = config.microvm.runner.${config.microvm.hypervisor};
       identityTree = pkgs.writeTextDir "share/seter/identity.json" identityJson;
@@ -152,6 +169,12 @@ in
         secretPlaceholders = guestSecretPlaceholders;
 
         projectVolume.image = projectImage;
+
+        nixStore = {
+          enable = true;
+          image = nixStoreImage;
+          size = nixStoreSizeMiB;
+        };
 
         network = {
           enable = true;
@@ -249,6 +272,39 @@ in
         {
           assertion = effectiveProjectVolumePresent;
           message = "generated Seter workspace identity requires its effective project volume definition";
+        }
+        {
+          assertion = config.seter.guest.nixStore.enable;
+          message = "generated Seter workspace identity requires a private writable Nix store";
+        }
+        {
+          assertion = config.seter.guest.nixStore.image == expected.nixStoreImage;
+          message = "generated Seter workspace identity forbids overriding the private Nix store image";
+        }
+        {
+          assertion = config.seter.guest.nixStore.size == expected.nixStoreSizeMiB;
+          message = "generated Seter workspace identity forbids overriding the private Nix store size";
+        }
+        {
+          assertion = effectiveNixStoreVolumePresent;
+          message = "generated Seter workspace identity requires its effective private Nix store volume";
+        }
+        {
+          assertion =
+            config.microvm.writableStoreOverlay == "/nix/.rw-store"
+            && lib.attrByPath [ "/nix" "neededForBoot" ] false config.fileSystems;
+          message = "generated Seter workspace identity requires the persistent /nix writable-store overlay";
+        }
+        {
+          assertion =
+            config.nix.settings.sandbox
+            && !config.nix.settings.auto-optimise-store
+            && lib.attrByPath [ "min-free" ] null config.nix.settings == 0
+            && lib.attrByPath [ "max-free" ] null config.nix.settings == 0
+            && lib.attrByPath [ "gc-reserved-space" ] null config.nix.settings == 0
+            && !config.nix.optimise.automatic
+            && !config.nix.gc.automatic;
+          message = "generated Seter workspace identity requires sandboxed Nix builds with overlay-safe optimisation and garbage-collection settings";
         }
         {
           assertion = config.seter.guest.ssh.enable && config.services.openssh.enable;

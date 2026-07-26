@@ -101,7 +101,7 @@ let
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
   lifecycleRegistry = {
-    version = 3;
+    version = 4;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace) hostname;
       runner = {
@@ -109,7 +109,7 @@ let
         identity =
           if workspace.runner.requireIdentity then
             {
-              version = 1;
+              version = 2;
               workspace = name;
               inherit (workspace) hostname;
               network = {
@@ -120,7 +120,7 @@ let
               };
               proxy.url = "http://${cfg.gateway}:${toString cfg.proxy.explicitPort}";
               ssh.user = workspace.ssh.user;
-              storage.image = workspace.storage.image;
+              storage = workspace.storage;
             }
           else
             null;
@@ -522,6 +522,10 @@ in
       {
         assertion = workspace.ssh.knownHostKey == null || nonBlank workspace.ssh.knownHostKey;
         message = "seter.host.workspaces.${workspace.name}.ssh.knownHostKey must not be blank";
+      }
+      {
+        assertion = workspace.storage.image != workspace.storage.nixStoreImage;
+        message = "seter.host.workspaces.${workspace.name} project and Nix store images must use different names";
       }
       {
         assertion = hasUniqueValues workspace.hostServices;

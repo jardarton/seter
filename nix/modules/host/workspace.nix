@@ -33,10 +33,24 @@ in
       };
     };
 
-    storage.image = mkOption {
-      type = types.strMatching "[a-zA-Z0-9_.-]+";
-      default = "${name}-project.img";
-      description = "Project volume image name inside the workspace state directory.";
+    storage = {
+      image = mkOption {
+        type = types.strMatching "[a-zA-Z0-9_.-]+";
+        default = "${name}-project.img";
+        description = "Project volume image name inside the workspace state directory.";
+      };
+
+      nixStoreImage = mkOption {
+        type = types.strMatching "[a-zA-Z0-9_.-]+";
+        default = "${name}-nix-store.img";
+        description = "Private persistent Nix store volume image name inside the workspace state directory.";
+      };
+
+      nixStoreSizeMiB = mkOption {
+        type = types.ints.positive;
+        default = 16384;
+        description = "Initial capacity of the workspace-private Nix store volume in MiB.";
+      };
     };
 
     network = {

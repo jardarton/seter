@@ -31,7 +31,12 @@
       "sshd.service"
     ];
     requires = [ "sshd.service" ];
-    serviceConfig.Type = "oneshot";
+    unitConfig.OnFailure = [ "poweroff.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
     path = [
       pkgs.coreutils
       pkgs.util-linux
@@ -50,14 +55,24 @@
       test "$(stat -c %U:%G "$host_key")" = root:root
       runuser -u ${lib.escapeShellArg config.seter.guest.ssh.user} -- test ! -r "$host_key"
       test "$(stat -c %a "$(dirname "$(dirname "$host_key")")")" = 700
-      if touch /nix/store/seter-must-remain-read-only 2>/dev/null; then
-        echo "/nix/store was writable" >&2
+      test "$(findmnt -n -o FSTYPE /nix/store | sort -u)" = overlay
+      test "$(findmnt -n -o FSTYPE /nix | sort -u)" = ext4
+      if touch /nix/.ro-store/seter-must-remain-read-only 2>/dev/null; then
+        echo "host store lower layer was writable" >&2
         exit 1
       fi
+      nix_state_persistent=false
+      if test -e /nix/var/nix/seter-verification-marker; then
+        nix_state_persistent=true
+      fi
+      touch /nix/var/nix/seter-verification-marker
       systemctl is-active --quiet sshd.service
       test -z "$(systemctl --failed --no-legend)"
 
-      printf '%s\n' marker root-tmpfs project-writable store-read-only ssh-active ssh-host-key-persistent > "$report"
+      printf '%s\n' marker root-tmpfs project-writable store-overlay store-lower-read-only ssh-active ssh-host-key-persistent > "$report"
+      if test "$nix_state_persistent" = true; then
+        printf '%s\n' nix-state-persistent >> "$report"
+      fi
       sync
       systemctl poweroff
     '';
