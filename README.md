@@ -112,7 +112,15 @@ Network-enabled guests default `HTTP_PROXY`, `HTTPS_PROXY`, and their lower-case
 
 `security.pki.certificates` makes the CA available through the NixOS system trust bundle, which covers tools using the system OpenSSL trust configuration. Applications with private trust stores—commonly browsers using private NSS profiles, Java applications with bundled JKS files, and language tools that replace rather than inherit system roots—must import the same public certificate into that store. Certificate-pinned software should use `passthroughHosts` instead. Never copy `/var/lib/seter-proxy/mitmproxy-ca.pem`: it contains the private signing key and must not enter a guest, repository, or the Nix store.
 
-Back up `/var/lib/seter-proxy` as site security state. Losing it generates a new CA on the next proxy start and requires re-exporting the certificate and rebuilding every guest; compromise requires rotating the CA and rebuilding every guest. HTTPS fails closed while a guest trusts the wrong generation. Secret injection remains a future milestone.
+Back up `/var/lib/seter-proxy` as site security state. Losing it generates a new CA on the next proxy start and requires re-exporting the certificate and rebuilding every guest; compromise requires rotating the CA and rebuilding every guest. HTTPS fails closed while a guest trusts the wrong generation.
+
+Configured secret source files are staged for the unprivileged proxy with systemd credentials: PID 1 reads the consumer-managed path and exposes a private, read-only snapshot under `$CREDENTIALS_DIRECTORY`. Secret values do not enter the Nix store, process arguments, or environment variables. `LoadCredential` snapshots values when `seter-proxy.service` starts, so the secret manager must restart that service after rotating a source file. With sops-nix, for example:
+
+```nix
+sops.secrets.github-token.restartUnits = [ "seter-proxy.service" ];
+```
+
+Other secret managers must arrange the equivalent restart. Runtime request rewriting remains a future milestone.
 
 ## VM lifecycle
 

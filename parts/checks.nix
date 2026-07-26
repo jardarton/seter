@@ -95,7 +95,9 @@
         };
       };
       secretPolicyConfiguration = mkHost secretPolicyWorkspaces;
-      secretPolicyFile = builtins.head secretPolicyConfiguration.config.systemd.services.seter-proxy.restartTriggers;
+      secretPolicyService = secretPolicyConfiguration.config.systemd.services.seter-proxy;
+      secretPolicyFile = builtins.head secretPolicyService.restartTriggers;
+      secretPolicyCredentials = secretPolicyService.serviceConfig.LoadCredential;
 
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
@@ -670,6 +672,11 @@
           ) lifecycleSudoCommands;
           assert lib.all (rule: rule.runAs == "root") lifecycleSudoRules;
           assert lib.all (entry: !(lib.hasInfix "*" entry.command)) lifecycleSudoCommands;
+          assert proxyService.serviceConfig.LoadCredential == [ ];
+          assert
+            secretPolicyCredentials == [
+              "seter-alpha.githubToken:/run/secrets/github-token"
+            ];
           pkgs.runCommand "seter-workspace-registry-check"
             {
               nativeBuildInputs = [
@@ -1063,6 +1070,11 @@
             # be recreated as part of the same transaction after a full flush.
             networking.nftables.flushRuleset = true;
 
+            # The test creates the credential source at runtime so the proxy
+            # unit can prove both missing-source failure and systemd's private
+            # credential snapshot behavior.
+            systemd.services.seter-proxy.wantedBy = lib.mkForce [ ];
+
             seter.host = {
               enable = true;
               dns.upstreamServers = [ "11.0.0.2" ];
@@ -1095,6 +1107,12 @@
                       port = 2225;
                     }
                   ];
+                  secrets.githubToken = {
+                    placeholder = "seter-placeholder-0123456789abcdef";
+                    sourceFile = "/run/seter-test/github-token";
+                    hosts = [ "allowed.example" ];
+                    headers = [ "authorization" ];
+                  };
                 };
               };
             };
@@ -1108,7 +1126,30 @@
 
             machine.wait_for_unit("seter-bridge.service")
             machine.wait_for_unit("nftables.service")
+            # LoadCredential must fail closed while its root-only source is
+            # absent. Once present, PID 1 snapshots it into the service's
+            # private mount namespace for the unprivileged proxy account.
+            machine.fail("systemctl start seter-proxy.service")
+            machine.succeed("systemctl stop seter-proxy.service; systemctl reset-failed seter-proxy.service")
+            machine.succeed("install -d -m 0700 /run/seter-test; printf first-runtime-token > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
+            machine.fail("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat /run/seter-test/github-token")
+            machine.succeed("systemctl start seter-proxy.service")
             machine.wait_for_unit("seter-proxy.service")
+            machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test -n \"$credential_dir\"; test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat \"$credential_dir/seter-alpha.githubToken\")\" = first-runtime-token")
+            machine.fail("grep -F first-runtime-token /etc/systemd/system/seter-proxy.service")
+            machine.fail("pid=$(systemctl show --value --property MainPID seter-proxy.service); tr '\\0' '\\n' < /proc/$pid/environ | grep -F first-runtime-token")
+            machine.fail("pid=$(systemctl show --value --property MainPID seter-proxy.service); tr '\\0' ' ' < /proc/$pid/cmdline | grep -F first-runtime-token")
+            machine.fail("journalctl -u seter-proxy.service | grep -F first-runtime-token")
+
+            # LoadCredential is intentionally a start-time snapshot. Secret
+            # managers must restart the service after rotating a source file.
+            machine.succeed("printf rotated-runtime-token > /run/seter-test/github-token; chmod 0400 /run/seter-test/github-token")
+            machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat \"$credential_dir/seter-alpha.githubToken\")\" = first-runtime-token")
+            machine.succeed("systemctl restart seter-proxy.service")
+            machine.wait_for_unit("seter-proxy.service")
+            machine.succeed("pid=$(systemctl show --value --property MainPID seter-proxy.service); credential_dir=$(tr '\\0' '\\n' < /proc/$pid/environ | ${pkgs.gnused}/bin/sed -n 's/^CREDENTIALS_DIRECTORY=//p'); test \"$(${pkgs.util-linux}/bin/nsenter --target \"$pid\" --mount -- ${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${pkgs.coreutils}/bin/cat \"$credential_dir/seter-alpha.githubToken\")\" = rotated-runtime-token")
+            machine.fail("grep -F rotated-runtime-token /etc/systemd/system/seter-proxy.service")
+            machine.fail("journalctl -u seter-proxy.service | grep -F rotated-runtime-token")
             machine.succeed("systemctl start seter-dns-alpha.service seter-dns-beta.service")
             machine.wait_for_unit("seter-dns-alpha.service")
             machine.wait_for_unit("seter-dns-beta.service")

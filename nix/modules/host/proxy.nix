@@ -18,6 +18,14 @@ let
   normalizeHosts = hosts: unique (map lib.toLower hosts);
   normalizeHeaders = headers: unique (map lib.toLower headers);
   credentialNameFor = workspaceName: secretName: "seter-${workspaceName}.${secretName}";
+  secretCredentials = lib.concatLists (
+    lib.mapAttrsToList (
+      workspaceName: workspace:
+      lib.mapAttrsToList (
+        secretName: secret: "${credentialNameFor workspaceName secretName}:${secret.sourceFile}"
+      ) workspace.secrets
+    ) cfg.workspaces
+  );
   policy = {
     version = 2;
     workspaces = builtins.listToAttrs (
@@ -173,11 +181,16 @@ in
       ];
       restartTriggers = [ policyFile ];
       serviceConfig = {
-        Type = "simple";
+        Type = "exec";
         User = proxyAccount;
         Group = proxyAccount;
         StateDirectory = "seter-proxy";
         StateDirectoryMode = "0700";
+        # PID 1 reads each consumer-managed source file and exposes a private,
+        # read-only copy under $CREDENTIALS_DIRECTORY. Only stable credential
+        # names and source paths enter the unit; secret values never enter the
+        # Nix store, process arguments, or environment variables.
+        LoadCredential = secretCredentials;
         Environment = "PYTHONUNBUFFERED=1";
         ExecStart = ''
           ${lib.getExe' mitmproxy "mitmdump"} \
