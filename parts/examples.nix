@@ -4,22 +4,43 @@
   ...
 }:
 let
+  minimalWorkspace = self.lib.mkWorkspaceDefinition {
+    name = "minimal";
+    runnerInstallable = ".#nixosConfigurations.minimal.config.microvm.declaredRunner";
+    ip = "10.100.0.10";
+    mac = "02:00:00:00:00:10";
+    tap = "seter-minimal";
+  };
+
   mkMinimal =
-    extraModules:
+    identityModules: extraModules:
     inputs.nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       specialArgs = { inherit inputs; };
       modules = [
         self.nixosModules.guest
-        ../examples/minimal/guest.nix
       ]
+      ++ identityModules
+      ++ [ ../examples/minimal/guest.nix ]
       ++ extraModules;
     };
 in
 {
   flake.nixosConfigurations = {
-    minimal = mkMinimal [ ];
-    minimal-test = mkMinimal [ ../examples/minimal/verification.nix ];
+    minimal = mkMinimal [ minimalWorkspace.guestModule ] [ ];
+    # The standalone boot verification deliberately has no host TAP. Keep it
+    # identity-less so it can disable networking and use a disposable image.
+    minimal-test =
+      mkMinimal
+        [
+          {
+            seter.guest = {
+              enable = true;
+              name = "minimal";
+            };
+          }
+        ]
+        [ ../examples/minimal/verification.nix ];
   };
 
   perSystem =

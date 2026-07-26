@@ -54,4 +54,4 @@ These commands remain unprivileged:
 - `seter status`
 - `seter shell`
 
-`seter update` builds as the invoking user, then separately elevates its narrowly scoped runner-install step. `seter ssh-host-key` separately elevates offline access to the host-owned project image. Those operations are not included in the lifecycle operator group's passwordless start/stop grant.
+`seter update` builds as the invoking user, then separately elevates its narrowly scoped runner-install step. For generated workspace definitions, both halves parse a bounded, regular-file runner identity manifest and compare it with the registry without executing runner code. The privileged start path repeats that comparison before each cold start. The manifest is runner-controlled consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` separately elevates offline access to the host-owned project image. Those operations are not included in the lifecycle operator group's passwordless start/stop grant.

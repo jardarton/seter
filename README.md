@@ -4,13 +4,13 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, exact-name guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Shared host/guest workspace identity, runner identity verification, guest and host lifecycle behavior, a fail-closed workspace network boundary, exact-name guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
 ## Core concepts
 
-A project repository imports `seter.nixosModules.guest` in its flake and exports a NixOS microVM configuration. A NixOS host imports `seter.nixosModules.host` and registers that project as a workspace.
+A trusted workspace registry uses `seter.lib.mkWorkspaceDefinition` to produce a host policy projection and a sanitized guest identity module from one definition. A project imports that generated module alongside `seter.nixosModules.guest` and exports a NixOS microVM configuration; a NixOS host imports `seter.nixosModules.host` and registers the matching host projection.
 
 ```text
 project flake                     NixOS host
@@ -40,28 +40,38 @@ seter down project
 
 `update` atomically installs the immutable runner under the workspace state directory and registers a GC root under `/nix/var/nix/gcroots/per-project`. `up` never evaluates Nix. The VM runs as its dedicated `seter-*` system account with the registry's memory and CPU limits; runner-provided TAP and VirtioFS helpers are not executed.
 
-## Host workspace registry
+## Shared workspace registry
 
-Host workspace entries are typed and validated by `nixosModules.host`:
+Create the workspace once in trusted infra configuration:
 
 ```nix
+project = seter.lib.mkWorkspaceDefinition {
+  name = "project";
+  runnerInstallable =
+    "github:owner/project#nixosConfigurations.guest.config.microvm.declaredRunner";
+  ip = "10.100.0.10";
+  mac = "02:00:00:00:00:10";
+  tap = "seter-project";
+  allowedHTTPHosts = [ "api.example.com" ];
+};
+
 seter.host = {
   enable = true;
-  workspaces.project = seter.lib.mkWorkspace {
-    runnerInstallable =
-      "github:owner/project#nixosConfigurations.guest.config.microvm.declaredRunner";
-    ip = "10.100.0.10";
-    mac = "02:00:00:00:00:10";
-    tap = "seter-project";
-    allowedHTTPHosts = [ "api.example.com" ];
-  };
+  workspaces.project = project.host;
 };
+
+# Export project.guestModule, then import it in the project configuration
+# alongside seter.nixosModules.guest. A direct infra-flake import exposes the
+# infra source; use a separate sanitized identity flake when that is private.
+flake.nixosModules.projectIdentity = project.guestModule;
 
 # Starting and stopping registered workspaces is an explicit host capability.
 users.users.alice.extraGroups = [ "seter-operators" ];
 ```
 
-Every workspace on one host bridge must have a unique IPv4 address, MAC address, tap interface, and hostname. Evaluation fails when entries conflict. If the guest overrides `seter.guest.projectVolume.image`, pass the same basename as `projectImage` to `mkWorkspace` so offline host-key enrollment reads the correct volume. The host module writes a versioned, lifecycle-only projection to `/etc/seter/workspaces.json`; lifecycle commands read this registry.
+The guest module fixes the workspace name, IPv4 and MAC addresses, TAP, gateway, prefix, DNS and proxy endpoints, SSH user, and project-image basename. Assertions also check the effective microVM interface, NixOS network wiring, proxy variables, project volume, SSH access, placeholders, and proxy CA so lower-level overrides fail evaluation. The module embeds the non-secret identity in `/etc/seter/workspace.json` and in the runner at `share/seter/identity.json`. `seter update` compares that manifest with the root-owned host registry before installing a runner, and `seter up` rechecks the installed runner before each cold start, so ordinary stale identity fails with a direct error instead of producing a disconnected VM. The runner controls its manifest, so this is consistency checking rather than attestation; host-side network and privilege policy remains authoritative.
+
+Every workspace on one host bridge must have a unique IPv4 address, MAC address, TAP interface, and hostname. Evaluation fails when entries conflict. Host-only egress policy and secret source paths are omitted from the generated guest module and runner closure, but a project importing the infra flake can still read that flake's tracked source. Use a separate sanitized identity source if those definitions are confidential. The low-level `lib.mkWorkspace` constructor remains available for compatibility but does not enable runner identity verification. See [Generated workspace identity](./docs/workspace-identity.md) for the complete contract and migration instructions.
 
 ## Host runtime plumbing
 
@@ -148,14 +158,25 @@ seter.host.workspaces.project = {
 };
 ```
 
-The guest exports the matching non-secret placeholder to login sessions:
+For a shared workspace definition, map guest environment variables to secret names without repeating the placeholder:
 
 ```nix
-seter.guest.secretPlaceholders.GITHUB_TOKEN =
-  "seter-placeholder-github-0123456789abcdef";
+project = seter.lib.mkWorkspaceDefinition {
+  # identity and runner fields omitted here
+  secrets.githubToken = {
+    placeholder = "seter-placeholder-github-0123456789abcdef";
+    sourceFile = "/run/secrets/github-token";
+    hosts = [ "api.github.com" ];
+    headers = [ "authorization" ];
+  };
+  secretVariables = {
+    GITHUB_TOKEN = "githubToken";
+    GH_TOKEN = "githubToken";
+  };
+};
 ```
 
-An `Authorization` header containing that exact value is rewritten at the network edge. Placeholder variables are intentionally baked into the guest and the Nix store; real values must never be assigned to `secretPlaceholders`. Systemd services do not inherit login-session variables and must be given the same non-secret placeholder explicitly. Query strings and request bodies are deliberately not rewritten.
+The generated guest module exports both matching non-secret placeholders to login sessions. An `Authorization` header containing that exact value is rewritten at the network edge. Placeholder variables are intentionally baked into the guest and the Nix store; real values must never be assigned to `secretPlaceholders`. Systemd services do not inherit login-session variables and must be given the same non-secret placeholder explicitly. Query strings and request bodies are deliberately not rewritten.
 
 Response redaction prevents straightforward accidental reflection, but it is not a data-loss-prevention boundary. An authorized service can transform, split, encode, or deliberately disclose a credential or credential-derived information in ways a generic proxy cannot recognize. The guest is therefore not *provisioned* the credential, but the bound service remains inside the credential's trust boundary. Use a separate, least-privilege credential for every workspace and grant only the API capabilities that workspace may exercise.
 
@@ -206,10 +227,11 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 - `apps.<system>.default`: Seter CLI application
 - `nixosModules.host`: host-side Seter module
 - `nixosModules.guest`: project guest module
-- `lib.mkWorkspace`: workspace registry constructor
+- `lib.mkWorkspaceDefinition`: shared host/guest workspace constructor with runner identity verification
+- `lib.mkWorkspace`: low-level compatibility host-registry constructor
 - `nixosConfigurations.minimal`: buildable reference microVM
 - `apps.x86_64-linux.test-minimal`: KVM-backed minimal guest verification
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, exact-name canonical guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, per-workspace host-daemon gateway relays, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.
+The guest boundary has a tested minimal vertical slice. A shared workspace definition generates matching host and sanitized guest projections, embeds a versioned identity in the guest and runner, and prevents installation or cold start of mismatched runners. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, exact-name canonical guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, per-workspace host-daemon gateway relays, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.

@@ -17,7 +17,10 @@ use std::{
 
 use anyhow::{bail, ensure, Context, Result};
 
-use crate::registry::{Registry, Workspace};
+use crate::registry::{Registry, RunnerIdentity, Workspace};
+
+const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
+const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
 
 const STATE_ROOT: &str = "/var/lib/seter/workspaces";
 const GCROOT_ROOT: &str = "/nix/var/nix/gcroots/per-project";
@@ -61,7 +64,7 @@ pub fn update(name: &str) -> Result<i32> {
 
     ensure_update_allowed(name)?;
     let runner = build_runner(&workspace.runner.installable)?;
-    validate_runner(&runner)?;
+    validate_runner(&runner, name, workspace.runner.identity.as_ref())?;
 
     if uses_test_state() || is_root()? {
         install_runner_path(name, &runner)?;
@@ -80,12 +83,12 @@ pub fn update(name: &str) -> Result<i32> {
 pub fn install_runner(name: &str, runner: &Path) -> Result<i32> {
     enter_privileged_mode()?;
     let registry = Registry::load_default()?;
-    registry.workspace(name)?;
+    let workspace = registry.workspace(name)?;
     ensure_update_allowed(name)?;
     let runner = runner
         .canonicalize()
         .with_context(|| format!("failed to resolve runner {}", runner.display()))?;
-    validate_runner(&runner)?;
+    validate_runner(&runner, name, workspace.runner.identity.as_ref())?;
     install_runner_path(name, &runner)?;
     Ok(0)
 }
@@ -128,6 +131,16 @@ pub fn start_workspace(name: &str) -> Result<i32> {
         }
         State::Stopped => {}
     }
+
+    // Host configuration may have changed since the last update. Recheck the
+    // installed immutable runner before every cold start so stale identity
+    // cannot silently turn into a disconnected or misaddressed guest.
+    let installed = state_root()
+        .join(name)
+        .join("current")
+        .canonicalize()
+        .with_context(|| format!("workspace {name:?} has no valid installed runner"))?;
+    validate_runner(&installed, name, workspace.runner.identity.as_ref())?;
 
     run_systemctl(["start", &vm_unit(name)])?;
     let state = state_for(name)?;
@@ -381,7 +394,11 @@ fn build_runner(installable: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(paths[0]))
 }
 
-fn validate_runner(runner: &Path) -> Result<()> {
+fn validate_runner(
+    runner: &Path,
+    workspace_name: &str,
+    expected_identity: Option<&RunnerIdentity>,
+) -> Result<()> {
     ensure!(runner.is_absolute(), "runner path must be absolute");
     if env::var_os("SETER_ALLOW_NON_STORE_RUNNER").is_none() {
         ensure!(
@@ -397,6 +414,43 @@ fn validate_runner(runner: &Path) -> Result<()> {
             path.metadata()?.permissions().mode() & 0o111 != 0,
             "runner helper {} is not executable",
             path.display()
+        );
+    }
+
+    if let Some(expected) = expected_identity {
+        let identity_path = runner.join(RUNNER_IDENTITY_FILE);
+        let metadata = fs::symlink_metadata(&identity_path).with_context(|| {
+            format!(
+                "runner for workspace {workspace_name:?} is missing required identity manifest {}",
+                identity_path.display()
+            )
+        })?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "runner identity manifest {} must be a regular file",
+            identity_path.display()
+        );
+        ensure!(
+            metadata.len() <= MAX_RUNNER_IDENTITY_BYTES,
+            "runner identity manifest {} exceeds {} bytes",
+            identity_path.display(),
+            MAX_RUNNER_IDENTITY_BYTES
+        );
+        let identity_file = fs::File::open(&identity_path).with_context(|| {
+            format!(
+                "failed to open runner identity manifest {}",
+                identity_path.display()
+            )
+        })?;
+        let actual: RunnerIdentity = serde_json::from_reader(identity_file).with_context(|| {
+            format!(
+                "runner identity manifest {} is invalid",
+                identity_path.display()
+            )
+        })?;
+        ensure!(
+            &actual == expected,
+            "runner identity does not match workspace {workspace_name:?}\nexpected: {expected:#?}\nfound: {actual:#?}"
         );
     }
     Ok(())

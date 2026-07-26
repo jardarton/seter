@@ -62,6 +62,37 @@
         };
       };
 
+      identityWorkspace = self.lib.mkWorkspaceDefinition {
+        name = "identity";
+        runnerInstallable = "github:example/identity#nixosConfigurations.guest.config.microvm.declaredRunner";
+        ip = "10.100.0.12";
+        mac = "02:00:00:00:00:12";
+        tap = "seter-identity";
+        proxyCaCertificate = builtins.readFile proxyTrustCa;
+        secrets.githubToken = {
+          placeholder = "seter-placeholder-github-0123456789abcdef";
+          sourceFile = "/run/secrets/identity-github-token";
+          hosts = [ "api.example.com" ];
+          headers = [ "authorization" ];
+        };
+        secretVariables = {
+          GITHUB_TOKEN = "githubToken";
+          GH_TOKEN = "githubToken";
+        };
+        allowedHTTPHosts = [ "api.example.com" ];
+      };
+      identityHostConfiguration = mkHost { identity = identityWorkspace.host; };
+      identityRegistryFile =
+        identityHostConfiguration.config.environment.etc."seter/workspaces.json".source;
+      identityGuestConfiguration = inputs.nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.guest
+          identityWorkspace.guestModule
+          { system.stateVersion = "24.11"; }
+        ];
+      };
+
       dnsPortsFor = workspaces: import ../nix/modules/host/dns-ports.nix { inherit lib workspaces; };
       workspaceDnsPorts = dnsPortsFor validWorkspaces;
       alphaDnsPort = workspaceDnsPorts.alpha;
@@ -1004,6 +1035,97 @@
             }).config.system.build.toplevel.drvPath
             true
         )).success;
+
+      generatedIdentityOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  seter.guest.network.address = lib.mkForce "10.100.0.99";
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedEffectiveNetworkOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  # Bypass the Seter-facing options and attack the effective
+                  # microvm/NixOS wiring directly.
+                  microvm.interfaces = lib.mkForce [ ];
+                  networking.nameservers = lib.mkForce [ "8.8.8.8" ];
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedLifecycleDisableRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  seter.guest = {
+                    projectVolume.enable = lib.mkForce false;
+                    ssh.enable = lib.mkForce false;
+                  };
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedEffectiveProxyOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  environment.sessionVariables.HTTP_PROXY = lib.mkForce "http://127.0.0.1:9999";
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      generatedProxyCaOverrideRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                identityWorkspace.guestModule
+                ({ lib, ... }: {
+                  seter.guest.proxyCaCertificate = lib.mkForce null;
+                  system.stateVersion = "24.11";
+                })
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
     in
     {
       checks = {
@@ -1066,6 +1188,19 @@
           assert lib.all (rule: rule.runAs == "root") lifecycleSudoRules;
           assert lib.all (entry: !(lib.hasInfix "*" entry.command)) lifecycleSudoCommands;
           assert proxyService.serviceConfig.LoadCredential == [ ];
+          assert identityWorkspace.host.runner.requireIdentity;
+          assert identityGuestConfiguration.config.seter.guest.name == "identity";
+          assert identityGuestConfiguration.config.seter.guest.network.address == "10.100.0.12";
+          assert identityGuestConfiguration.config.seter.guest.network.mac == "02:00:00:00:00:12";
+          assert identityGuestConfiguration.config.seter.guest.network.tap == "seter-identity";
+          assert identityGuestConfiguration.config.seter.guest.network.gateway == "10.100.0.1";
+          assert identityGuestConfiguration.config.seter.guest.proxy == "http://10.100.0.1:18081";
+          assert
+            identityGuestConfiguration.config.environment.sessionVariables.GITHUB_TOKEN
+            == "seter-placeholder-github-0123456789abcdef";
+          assert
+            identityGuestConfiguration.config.environment.sessionVariables.GH_TOKEN
+            == "seter-placeholder-github-0123456789abcdef";
           assert
             secretPolicyCredentials == [
               "seter-alpha.githubToken:/run/secrets/github-token"
@@ -1080,7 +1215,7 @@
             }
             ''
               jq -e '
-                .version == 2 and
+                .version == 3 and
                 (.workspaces | keys == ["alpha", "beta"]) and
                 (.workspaces.alpha.hostname == "alpha.vm") and
                 (.workspaces.alpha.network.address == "10.100.0.10") and
@@ -1093,6 +1228,27 @@
                 (.workspaces.alpha | has("secrets") | not) and
                 (.workspaces.alpha | has("hostServices") | not)
               ' ${registryFile}
+
+              jq -e '
+                .version == 3 and
+                .workspaces.identity.runner.identity.version == 1 and
+                .workspaces.identity.runner.identity.workspace == "identity" and
+                .workspaces.identity.runner.identity.hostname == "identity.vm" and
+                .workspaces.identity.runner.identity.network == {
+                  address: "10.100.0.12",
+                  gateway: "10.100.0.1",
+                  mac: "02:00:00:00:00:12",
+                  prefixLength: 24,
+                  tap: "seter-identity"
+                } and
+                .workspaces.identity.runner.identity.proxy.url == "http://10.100.0.1:18081" and
+                .workspaces.identity.runner.identity.ssh.user == "seter" and
+                .workspaces.identity.runner.identity.storage.image == "identity-project.img"
+              ' ${identityRegistryFile}
+
+              test -f ${identityGuestConfiguration.config.microvm.declaredRunner}/share/seter/identity.json
+              test ! -L ${identityGuestConfiguration.config.microvm.declaredRunner}/share/seter/identity.json
+              ! grep -Fq '/run/secrets/identity-github-token' ${identityGuestConfiguration.config.microvm.declaredRunner}/share/seter/identity.json
 
               jq -e '
                 .version == 1 and
@@ -1133,7 +1289,7 @@
               EOF
               cat > test-bin/nix <<'EOF'
               #!${pkgs.runtimeShell}
-              echo ${fakeRunner}
+              echo "$SETER_TEST_RUNNER"
               EOF
               cat > test-bin/debugfs <<'EOF'
               #!${pkgs.runtimeShell}
@@ -1148,6 +1304,35 @@
               export SETER_NIX=$PWD/test-bin/nix
               export SETER_STATE_DIR=$PWD/state
               export SETER_GCROOT_DIR=$PWD/gcroots
+
+              export SETER_REGISTRY=${identityRegistryFile}
+              export SETER_TEST_RUNNER=${self.nixosConfigurations.minimal.config.microvm.declaredRunner}
+              set +e
+              seter update identity > /dev/null 2> identity-error
+              identity_code=$?
+              set -e
+              test "$identity_code" = 1
+              grep -F 'runner identity does not match workspace "identity"' identity-error
+              test ! -e state/identity/current
+
+              export SETER_TEST_RUNNER=${identityGuestConfiguration.config.microvm.declaredRunner}
+              seter update identity
+              test "$(readlink state/identity/current)" = "${identityGuestConfiguration.config.microvm.declaredRunner}"
+
+              jq '
+                .workspaces.identity.network.address = "10.100.0.13" |
+                .workspaces.identity.runner.identity.network.address = "10.100.0.13"
+              ' ${identityRegistryFile} > changed-identity-registry.json
+              export SETER_REGISTRY=$PWD/changed-identity-registry.json
+              set +e
+              seter up identity > /dev/null 2> stale-identity-error
+              stale_identity_code=$?
+              set -e
+              test "$stale_identity_code" = 1
+              grep -F 'runner identity does not match workspace "identity"' stale-identity-error
+
+              export SETER_REGISTRY=${registryFile}
+              export SETER_TEST_RUNNER=${fakeRunner}
               seter update alpha
               test "$(readlink state/alpha/current)" = "${fakeRunner}"
               test "$(readlink gcroots/alpha)" = "${fakeRunner}"
@@ -1247,6 +1432,11 @@
           assert invalidGuestPlaceholderValueRejected;
           assert proxyGuestPlaceholderNameRejected;
           assert overlappingGuestPlaceholdersRejected;
+          assert generatedIdentityOverrideRejected;
+          assert generatedEffectiveNetworkOverrideRejected;
+          assert generatedLifecycleDisableRejected;
+          assert generatedEffectiveProxyOverrideRejected;
+          assert generatedProxyCaOverrideRejected;
           pkgs.runCommand "seter-workspace-uniqueness-check" { } ''
             touch "$out"
           '';
@@ -1666,8 +1856,10 @@
             # closed; another workspace, the target's loopback port, another
             # host port, and the same port on a routed address remain denied.
             machine.succeed("test -z \"$(printf unavailable | ip netns exec alpha ${lib.getExe pkgs.netcat} -N -w 1 10.100.0.1 5037)\"")
+            machine.wait_until_fails("systemctl is-active --quiet seter-gateway-adb.service")
             machine.succeed("systemd-run --unit=seter-test-host-daemon --property=Type=simple -- ${lib.getExe pkgs.socat} TCP4-LISTEN:15037,bind=127.0.0.1,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/cat")
             machine.wait_for_unit("seter-test-host-daemon.service")
+            machine.wait_until_succeeds("ss -H -ltn 'sport = :15037' | grep -q 127.0.0.1:15037")
             machine.succeed("test \"$(printf gateway-ok | ip netns exec alpha ${lib.getExe pkgs.netcat} -N -w 2 10.100.0.1 5037)\" = gateway-ok")
             machine.fail("ip netns exec beta ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 5037")
             machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 15037")

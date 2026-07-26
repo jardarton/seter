@@ -11,6 +11,9 @@
       };
     };
 
-    lib.mkWorkspace = import ../nix/lib/mk-workspace.nix;
+    lib = {
+      mkWorkspace = import ../nix/lib/mk-workspace.nix;
+      mkWorkspaceDefinition = import ../nix/lib/mk-workspace-definition.nix;
+    };
   };
 }

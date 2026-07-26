@@ -101,11 +101,31 @@ let
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
   lifecycleRegistry = {
-    version = 2;
+    version = 3;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace) hostname;
+      runner = {
+        inherit (workspace.runner) installable;
+        identity =
+          if workspace.runner.requireIdentity then
+            {
+              version = 1;
+              workspace = name;
+              inherit (workspace) hostname;
+              network = {
+                inherit (workspace.network) address tap;
+                inherit (workspace.network) mac;
+                gateway = cfg.gateway;
+                prefixLength = subnetPrefix;
+              };
+              proxy.url = "http://${cfg.gateway}:${toString cfg.proxy.explicitPort}";
+              ssh.user = workspace.ssh.user;
+              storage.image = workspace.storage.image;
+            }
+          else
+            null;
+      };
       inherit (workspace)
-        runner
         network
         resources
         ssh

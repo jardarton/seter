@@ -11,7 +11,8 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 2;
+const REGISTRY_VERSION: u32 = 3;
+pub const RUNNER_IDENTITY_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +36,42 @@ pub struct Workspace {
 #[serde(deny_unknown_fields)]
 pub struct Runner {
     pub installable: String,
+    #[serde(default)]
+    pub identity: Option<RunnerIdentity>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerIdentity {
+    pub version: u32,
+    pub workspace: String,
+    pub hostname: String,
+    pub network: RunnerNetworkIdentity,
+    pub proxy: RunnerProxyIdentity,
+    pub ssh: RunnerSshIdentity,
+    pub storage: Storage,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunnerNetworkIdentity {
+    pub address: Ipv4Addr,
+    pub mac: String,
+    pub tap: String,
+    pub gateway: Ipv4Addr,
+    pub prefix_length: u8,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerProxyIdentity {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSshIdentity {
+    pub user: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +96,7 @@ pub struct Ssh {
     pub known_host_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Storage {
     pub image: String,
@@ -110,6 +147,48 @@ impl Registry {
                 !workspace.runner.installable.trim().is_empty(),
                 "workspace {name:?} has an empty runner installable"
             );
+            if let Some(identity) = &workspace.runner.identity {
+                ensure!(
+                    identity.version == RUNNER_IDENTITY_VERSION,
+                    "workspace {name:?} requires unsupported runner identity version {}",
+                    identity.version
+                );
+                ensure!(
+                    identity.workspace == *name,
+                    "workspace {name:?} has a runner identity for {:?}",
+                    identity.workspace
+                );
+                ensure!(
+                    identity.hostname.eq_ignore_ascii_case(&workspace.hostname),
+                    "workspace {name:?} runner identity hostname does not match the registry"
+                );
+                ensure!(
+                    identity.network.address == workspace.network.address
+                        && identity
+                            .network
+                            .mac
+                            .eq_ignore_ascii_case(&workspace.network.mac)
+                        && identity.network.tap == workspace.network.tap,
+                    "workspace {name:?} runner network identity does not match the registry"
+                );
+                ensure!(
+                    identity.network.prefix_length <= 32,
+                    "workspace {name:?} runner identity has an invalid prefix length"
+                );
+                ensure!(
+                    identity.ssh.user == workspace.ssh.user,
+                    "workspace {name:?} runner SSH identity does not match the registry"
+                );
+                ensure!(
+                    identity.storage == workspace.storage,
+                    "workspace {name:?} runner storage identity does not match the registry"
+                );
+                ensure!(
+                    identity.proxy.url.starts_with("http://")
+                        && !identity.proxy.url["http://".len()..].is_empty(),
+                    "workspace {name:?} runner identity has an invalid proxy URL"
+                );
+            }
             ensure!(
                 workspace.resources.memory_mi_b > 0,
                 "workspace {name:?} has a zero memory limit"
@@ -168,7 +247,7 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 2,
+      "version": 3,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
@@ -187,7 +266,7 @@ mod tests {
     "#;
 
     #[test]
-    fn parses_version_two_registry() {
+    fn parses_version_three_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -200,8 +279,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_required_runner_identity() {
+        let runner = r#""runner": {
+            "installable": "github:owner/project#runner",
+            "identity": {
+              "version": 1,
+              "workspace": "minimal",
+              "hostname": "minimal.vm",
+              "network": {
+                "address": "10.100.0.10",
+                "mac": "02:00:00:00:00:aa",
+                "tap": "seter-minimal",
+                "gateway": "10.100.0.1",
+                "prefixLength": 24
+              },
+              "proxy": { "url": "http://10.100.0.1:18081" },
+              "ssh": { "user": "seter" },
+              "storage": { "image": "minimal-project.img" }
+            }
+          }"#;
+        let input = VALID.replacen(
+            "\"runner\": { \"installable\": \"github:owner/project#runner\" }",
+            runner,
+            1,
+        );
+        let registry = Registry::from_reader(input.as_bytes()).unwrap();
+        let identity = registry
+            .workspace("minimal")
+            .unwrap()
+            .runner
+            .identity
+            .as_ref()
+            .unwrap();
+        assert_eq!(identity.workspace, "minimal");
+        assert_eq!(identity.network.prefix_length, 24);
+    }
+
+    #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 2", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 3", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()

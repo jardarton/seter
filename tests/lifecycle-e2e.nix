@@ -22,31 +22,8 @@ let
   seterPackage = self.packages.${system}.seter;
   seterExecutable = inputs.nixpkgs.lib.getExe seterPackage;
 
-  guest = inputs.nixpkgs.lib.nixosSystem {
-    inherit system;
-    specialArgs = { inherit inputs; };
-    modules = [
-      self.nixosModules.guest
-      ../examples/minimal/guest.nix
-      ({ lib, ... }: {
-        networking.hostName = lib.mkForce "seter-e2e";
-        seter.guest = {
-          name = lib.mkForce "e2e";
-          memory = 768;
-          projectVolume.image = lib.mkForce "e2e-project.img";
-          network = {
-            tap = lib.mkForce "seter-e2e";
-            mac = lib.mkForce "02:00:00:00:00:20";
-            address = lib.mkForce "10.100.0.20";
-          };
-          ssh.authorizedKeys = lib.mkForce [ testSshPublicKey ];
-        };
-      })
-    ];
-  };
-
-  runner = guest.config.microvm.declaredRunner;
-  workspace = self.lib.mkWorkspace {
+  workspaceDefinition = self.lib.mkWorkspaceDefinition {
+    name = "e2e";
     runnerInstallable = "${runner}";
     ip = "10.100.0.20";
     mac = "02:00:00:00:00:20";
@@ -54,6 +31,26 @@ let
     memoryMiB = 1536;
     cpuQuotaPercent = 200;
   };
+
+  guest = inputs.nixpkgs.lib.nixosSystem {
+    inherit system;
+    specialArgs = { inherit inputs; };
+    modules = [
+      self.nixosModules.guest
+      workspaceDefinition.guestModule
+      ../examples/minimal/guest.nix
+      ({ lib, ... }: {
+        networking.hostName = lib.mkForce "seter-e2e";
+        seter.guest = {
+          memory = 768;
+          ssh.authorizedKeys = lib.mkForce [ testSshPublicKey ];
+        };
+      })
+    ];
+  };
+
+  runner = guest.config.microvm.declaredRunner;
+  workspace = workspaceDefinition.host;
 in
 pkgs.testers.runNixOSTest {
   name = "seter-lifecycle-e2e";

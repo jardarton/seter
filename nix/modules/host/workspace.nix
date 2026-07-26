@@ -14,10 +14,23 @@ in
       description = "Host name assigned to the workspace.";
     };
 
-    runner.installable = mkOption {
-      type = types.strMatching ".+";
-      description = "Nix installable that produces the workspace's microVM runner.";
-      example = "github:owner/project#nixosConfigurations.guest.config.microvm.declaredRunner";
+    runner = {
+      installable = mkOption {
+        type = types.strMatching ".+";
+        description = "Nix installable that produces the workspace's microVM runner.";
+        example = "github:owner/project#nixosConfigurations.guest.config.microvm.declaredRunner";
+      };
+
+      requireIdentity = mkOption {
+        type = types.bool;
+        default = false;
+        internal = true;
+        description = ''
+          Require the runner's embedded Seter identity manifest to match the
+          host registry. Set by lib.mkWorkspaceDefinition; the low-level
+          lib.mkWorkspace constructor leaves it disabled for compatibility.
+        '';
+      };
     };
 
     storage.image = mkOption {
