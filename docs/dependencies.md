@@ -20,6 +20,7 @@ These are canonical project repositories, but Seter should generally consume the
 | Project | Repository | Purpose |
 |---|---|---|
 | mitmproxy | [mitmproxy/mitmproxy](https://github.com/mitmproxy/mitmproxy) | HTTP/HTTPS policy enforcement, secret injection, and request auditing |
+| dnspython | [rthalley/dnspython](https://github.com/rthalley/dnspython) | Strict DNS message parsing, canonical query construction, and TCP/UDP forwarding |
 | Cloud Hypervisor | [cloud-hypervisor/cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) | Preferred initial virtual machine monitor |
 | sops-nix | [Mic92/sops-nix](https://github.com/Mic92/sops-nix) | Optional consumer-provided host secret management |
 | agenix | [ryantm/agenix](https://github.com/ryantm/agenix) | Alternative optional consumer-provided host secret management |
@@ -33,7 +34,7 @@ Seter should not require either sops-nix or agenix directly. Its module interfac
 Seter also relies on the following system components, all installed and configured through Nixpkgs:
 
 - nftables — default-deny egress enforcement and transparent proxy redirection
-- dnsmasq — workspace hostname resolution
+- dnsmasq — shared loopback-only DNS caching and recursive forwarding behind the strict policy frontend
 - BIND DNS utilities — host-side refresh of direct-TCP destination address sets
 - systemd — transient VM units and resource limits
 - OpenSSH — guest command execution and interactive shells

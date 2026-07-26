@@ -24,14 +24,27 @@ let
     workspaces = cfg.workspaces;
   };
   rawWorkspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
+
+  parseIpv4 =
+    address:
+    let
+      rawParts = lib.splitString "." address;
+      parsePart =
+        part: if builtins.match "(0|[1-9][0-9]{0,2})" part == null then null else lib.toInt part;
+      parts = map parsePart rawParts;
+    in
+    builtins.length parts == 4 && lib.all (part: part != null && part <= 255) parts;
+
   normalizeHosts = map lib.toLower;
   namesFor =
     workspace:
     unique (
-      normalizeHosts (
-        workspace.egress.httpHosts
-        ++ workspace.egress.passthroughHosts
-        ++ map (destination: destination.host) workspace.egress.tcp
+      lib.filter (name: !parseIpv4 name) (
+        normalizeHosts (
+          workspace.egress.httpHosts
+          ++ workspace.egress.passthroughHosts
+          ++ map (destination: destination.host) workspace.egress.tcp
+        )
       )
     );
   workspaces = map (
@@ -46,42 +59,47 @@ let
     }
   ) rawWorkspaces;
 
-  upstreamFor =
-    name:
-    if dnsCfg.upstreamServers == [ ] then
-      [ "server=/${name}/#" ]
-    else
-      map (server: "server=/${name}/${server}") dnsCfg.upstreamServers;
+  upstreamAccount = "seter-dns-upstream";
+  dnsPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.dnspython ]);
+  dnsPolicyProgram = ./dns-policy.py;
 
-  dnsmasqConfigFor =
+  upstreamConfig = pkgs.writeText "seter-dns-upstream.conf" ''
+    port=${toString dnsCfg.upstreamPort}
+    interface=lo
+    listen-address=127.0.0.1
+    bind-interfaces
+    no-hosts
+    no-dhcp-interface=lo
+    bogus-priv
+    stop-dns-rebind
+    filter-AAAA
+    cache-size=1000
+    dns-forward-max=${toString (lib.max 150 (builtins.length workspaces * dnsCfg.maxConcurrentQueries))}
+    ${optionalString (dnsCfg.upstreamServers != [ ]) ''
+      no-resolv
+      ${concatStringsSep "\n" (map (server: "server=${server}") dnsCfg.upstreamServers)}
+    ''}
+  '';
+
+  policyFileFor =
     workspace:
-    let
-      forwardingLines = concatStringsSep "\n" (concatMap upstreamFor workspace.dnsNames);
-    in
-    pkgs.writeText "seter-dnsmasq-${workspace.name}.conf" ''
-      port=${toString workspace.dnsPort}
-      interface=${cfg.bridge}
-      listen-address=${cfg.gateway}
-      bind-interfaces
-      no-hosts
-      no-dhcp-interface=${cfg.bridge}
-      domain-needed
-      bogus-priv
-      stop-dns-rebind
-      filter-AAAA
-      local=/#/
-      ${optionalString (dnsCfg.upstreamServers != [ ]) "no-resolv"}
-      ${forwardingLines}
-      ${optionalString dnsCfg.logQueries ''
-        log-queries=extra
-        log-facility=-
-        log-async=25
-      ''}
-    '';
-
-  dnsmasqConfigs = builtins.listToAttrs (
-    map (workspace: nameValuePair workspace.name (dnsmasqConfigFor workspace)) workspaces
-  );
+    pkgs.writeText "seter-dns-policy-${workspace.name}.json" (
+      builtins.toJSON {
+        version = 1;
+        workspace = workspace.name;
+        sourceAddress = workspace.network.address;
+        allowedNames = workspace.dnsNames;
+        backendAddress = "127.0.0.1";
+        backendPort = dnsCfg.upstreamPort;
+        inherit (dnsCfg)
+          logQueries
+          maxConcurrentQueries
+          queriesPerSecond
+          queryBurst
+          upstreamTimeoutSeconds
+          ;
+      }
+    );
 
   redirectRules = concatStringsSep "\n" (
     concatMap (
@@ -101,28 +119,39 @@ let
     map (
       workspace:
       let
-        dnsmasqConfig = dnsmasqConfigs.${workspace.name};
+        policyFile = policyFileFor workspace;
       in
       nameValuePair "seter-dns-${workspace.name}" {
-        description = "Seter restricted DNS resolver for workspace ${workspace.name}";
+        description = "Seter strict DNS policy for workspace ${workspace.name}";
         after = [
           "nftables.service"
           "seter-bridge.service"
+          "seter-dns-upstream.service"
         ];
         requires = [
           "nftables.service"
           "seter-bridge.service"
+          "seter-dns-upstream.service"
         ];
         partOf = [ "seter-runtime-${workspace.name}.target" ];
-        restartTriggers = [ dnsmasqConfig ];
+        restartTriggers = [ policyFile ];
         serviceConfig = {
-          Type = "simple";
+          Type = "exec";
           User = workspace.dnsAccount;
           Group = workspace.dnsAccount;
-          ExecStart = "${lib.getExe pkgs.dnsmasq} --keep-in-foreground --conf-file=${dnsmasqConfig}";
-          ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
+          ExecStart = ''
+            ${dnsPython}/bin/python ${dnsPolicyProgram} \
+              --config ${policyFile} \
+              --listen-address ${cfg.gateway} \
+              --listen-port ${toString workspace.dnsPort}
+          '';
           Restart = "on-failure";
           RestartSec = "1s";
+          MemoryMax = 128 * 1024 * 1024;
+          TasksMax = 64;
+          LimitNOFILE = 512;
+          LogRateLimitIntervalSec = "1s";
+          LogRateLimitBurst = 250;
           CapabilityBoundingSet = [ ];
           NoNewPrivileges = true;
           PrivateDevices = true;
@@ -134,25 +163,15 @@ let
           ProtectSystem = "strict";
           RestrictAddressFamilies = [
             "AF_INET"
-            "AF_NETLINK"
             "AF_UNIX"
           ];
           RestrictNamespaces = true;
           RestrictRealtime = true;
+          SystemCallArchitectures = "native";
         };
       }
     ) workspaces
   );
-
-  parseIpv4 =
-    address:
-    let
-      rawParts = lib.splitString "." address;
-      parsePart =
-        part: if builtins.match "(0|[1-9][0-9]{0,2})" part == null then null else lib.toInt part;
-      parts = map parsePart rawParts;
-    in
-    builtins.length parts == 4 && lib.all (part: part != null && part <= 255) parts;
 in
 {
   options.seter.host.dns = {
@@ -163,18 +182,51 @@ in
       description = ''
         Optional IPv4 DNS servers used for configured egress names. An empty
         list uses the host's existing resolvers from /etc/resolv.conf. These
-        servers are contacted by the host-side resolver, never directly by a
-        workspace.
+        servers are contacted by the host-side caching resolver, never
+        directly by a workspace.
       '';
+    };
+
+    upstreamPort = mkOption {
+      type = types.ints.between 1024 49151;
+      default = 15353;
+      description = ''
+        Loopback-only port for Seter's shared caching DNS backend. Workspaces
+        cannot connect to this listener directly.
+      '';
+    };
+
+    upstreamTimeoutSeconds = mkOption {
+      type = types.numbers.between 0.1 60.0;
+      default = 3.0;
+      description = "Timeout for a policy resolver request to the local caching backend.";
+    };
+
+    maxConcurrentQueries = mkOption {
+      type = types.ints.between 1 4096;
+      default = 64;
+      description = "Maximum concurrent DNS requests handled for one workspace.";
+    };
+
+    queriesPerSecond = mkOption {
+      type = types.ints.between 1 1000000;
+      default = 200;
+      description = "Sustained DNS query rate allowed for one workspace.";
+    };
+
+    queryBurst = mkOption {
+      type = types.ints.between 1 1000000;
+      default = 400;
+      description = "Maximum per-workspace DNS query burst before requests are refused.";
     };
 
     logQueries = mkOption {
       type = types.bool;
       default = true;
       description = ''
-        Log workspace DNS queries to its seter-dns-* systemd journal. This is
-        an intentionally observable but potentially noisy early policy
-        mechanism and may be replaced by more selective audit logging later.
+        Log structured allow and deny decisions to each seter-dns-* systemd
+        journal. Names and query types are logged, but raw packets and EDNS
+        data are never included.
       '';
     };
   };
@@ -184,6 +236,10 @@ in
       {
         assertion = lib.all parseIpv4 dnsCfg.upstreamServers;
         message = "seter.host.dns.upstreamServers must contain valid IPv4 addresses";
+      }
+      {
+        assertion = dnsCfg.queryBurst >= dnsCfg.queriesPerSecond;
+        message = "seter.host.dns.queryBurst must be at least seter.host.dns.queriesPerSecond";
       }
       {
         assertion =
@@ -201,18 +257,22 @@ in
         assertion = lib.all (workspace: workspace.dnsAccount != cfg.operatorGroup) workspaces;
         message = "seter.host.operatorGroup must not collide with a workspace DNS service account";
       }
+      {
+        assertion = upstreamAccount != cfg.operatorGroup;
+        message = "seter.host.operatorGroup must not collide with the Seter DNS backend account";
+      }
     ];
 
     # Host applications resolve workspace names without replacing the host's
-    # resolver or exposing dnsmasq on localhost. The guest-facing resolvers do
-    # not publish the complete workspace inventory.
+    # resolver. Guest-facing policy listeners do not publish the workspace
+    # inventory.
     networking.hosts = builtins.listToAttrs (
       map (workspace: lib.nameValuePair workspace.network.address [ workspace.hostname ]) workspaces
     );
 
-    # Each workspace's port-53 traffic is redirected to a separate unprivileged
-    # dnsmasq instance. This preserves per-workspace DNS allowlists without
-    # granting the resolver CAP_NET_ADMIN merely to inspect conntrack marks.
+    # Every port-53 request addressed to the gateway is redirected to that
+    # source workspace's private policy listener. The listener then rebuilds
+    # exact, approved A requests before using the loopback caching backend.
     networking.nftables.tables.seter_dns = {
       family = "inet";
       content = ''
@@ -223,28 +283,73 @@ in
       '';
     };
 
-    # NAT has translated the destination port by the time the input firewall
-    # runs. Open only the generated internal ports on the Seter bridge; Seter's
-    # earlier identity-aware chain also binds each port to its workspace IP.
+    # NAT has translated the destination before host-input filtering. Open
+    # only generated internal ports on the Seter bridge; the earlier
+    # identity-aware chain additionally binds each port to one workspace IP.
     networking.firewall.interfaces.${cfg.bridge} = {
       allowedTCPPorts = map (workspace: workspace.dnsPort) workspaces;
       allowedUDPPorts = map (workspace: workspace.dnsPort) workspaces;
     };
 
-    users.groups = builtins.listToAttrs (
-      map (workspace: nameValuePair workspace.dnsAccount { }) workspaces
-    );
-    users.users = builtins.listToAttrs (
-      map (
-        workspace:
-        nameValuePair workspace.dnsAccount {
+    users.groups =
+      builtins.listToAttrs (map (workspace: nameValuePair workspace.dnsAccount { }) workspaces)
+      // lib.optionalAttrs (workspaces != [ ]) { ${upstreamAccount} = { }; };
+    users.users =
+      builtins.listToAttrs (
+        map (
+          workspace:
+          nameValuePair workspace.dnsAccount {
+            isSystemUser = true;
+            group = workspace.dnsAccount;
+            description = "Seter DNS policy resolver for workspace ${workspace.name}";
+          }
+        ) workspaces
+      )
+      // lib.optionalAttrs (workspaces != [ ]) {
+        ${upstreamAccount} = {
           isSystemUser = true;
-          group = workspace.dnsAccount;
-          description = "Seter DNS resolver for workspace ${workspace.name}";
-        }
-      ) workspaces
-    );
+          group = upstreamAccount;
+          description = "Seter shared caching DNS backend";
+        };
+      };
 
-    systemd.services = dnsServices;
+    systemd.services =
+      dnsServices
+      // lib.optionalAttrs (workspaces != [ ]) {
+        seter-dns-upstream = {
+          description = "Seter loopback caching DNS backend";
+          after = [ "network.target" ];
+          unitConfig.StopWhenUnneeded = true;
+          restartTriggers = [ upstreamConfig ];
+          serviceConfig = {
+            Type = "exec";
+            User = upstreamAccount;
+            Group = upstreamAccount;
+            ExecStart = "${lib.getExe pkgs.dnsmasq} --keep-in-foreground --conf-file=${upstreamConfig}";
+            Restart = "on-failure";
+            RestartSec = "1s";
+            MemoryMax = 128 * 1024 * 1024;
+            TasksMax = 32;
+            LimitNOFILE = 512;
+            CapabilityBoundingSet = [ ];
+            NoNewPrivileges = true;
+            PrivateDevices = true;
+            PrivateTmp = true;
+            ProtectControlGroups = true;
+            ProtectHome = true;
+            ProtectKernelModules = true;
+            ProtectKernelTunables = true;
+            ProtectSystem = "strict";
+            RestrictAddressFamilies = [
+              "AF_INET"
+              "AF_NETLINK"
+              "AF_UNIX"
+            ];
+            RestrictNamespaces = true;
+            RestrictRealtime = true;
+            SystemCallArchitectures = "native";
+          };
+        };
+      };
   };
 }

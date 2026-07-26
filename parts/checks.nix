@@ -127,6 +127,8 @@
         hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.DeviceAllow;
       alphaTapRequires = hostConfiguration.config.systemd.services.seter-tap-alpha.requires;
       dnsService = hostConfiguration.config.systemd.services.seter-dns-alpha;
+      dnsPolicyFile = builtins.head dnsService.restartTriggers;
+      dnsUpstreamService = hostConfiguration.config.systemd.services.seter-dns-upstream;
       proxyService = hostConfiguration.config.systemd.services.seter-proxy;
       proxyPort = hostConfiguration.config.seter.host.proxy.port;
       explicitProxyPort = hostConfiguration.config.seter.host.proxy.explicitPort;
@@ -320,6 +322,135 @@
                     blocked.touch()
             except (OSError, TimeoutError):
                 blocked.touch()
+      '';
+
+      dnsTestPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.dnspython ]);
+      dnsAdversarialClient = pkgs.writeText "seter-dns-adversarial-client.py" ''
+        import socket
+        import struct
+        import sys
+
+        import dns.edns
+        import dns.flags
+        import dns.message
+        import dns.name
+        import dns.opcode
+        import dns.query
+        import dns.rcode
+        import dns.rdataclass
+        import dns.rdatatype
+        import dns.rrset
+
+        server = sys.argv[1]
+
+        def udp(query):
+            return dns.query.udp(query, server, timeout=2)
+
+        def assert_refused(query):
+            response = udp(query)
+            assert response.rcode() == dns.rcode.REFUSED, response
+
+        def udp_unchecked(wire):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2)
+                sock.sendto(wire, (server, 53))
+                response, _ = sock.recvfrom(4096)
+            return dns.message.from_wire(response)
+
+        mixed_case = dns.message.make_query("AlLoWeD.ExAmPlE.", "A")
+        response = udp(mixed_case)
+        assert response.rcode() == dns.rcode.NOERROR
+        assert [item.address for rrset in response.answer for item in rrset if item.rdtype == dns.rdatatype.A] == ["11.0.0.2"]
+        assert response.question[0].name.to_text() == "AlLoWeD.ExAmPlE."
+
+        tcp_response = dns.query.tcp(mixed_case, server, timeout=2)
+        assert tcp_response.rcode() == dns.rcode.NOERROR
+
+        aaaa = udp(dns.message.make_query("allowed.example.", "AAAA"))
+        assert aaaa.rcode() == dns.rcode.NOERROR
+        assert not aaaa.answer
+
+        assert_refused(dns.message.make_query("child.allowed.example.", "A"))
+        assert_refused(dns.message.make_query("allowed.example.", "TXT"))
+        assert_refused(
+            dns.message.make_query(
+                "allowed.example.", "A", rdclass=dns.rdataclass.CH
+            )
+        )
+
+        multiple = dns.message.Message()
+        multiple.flags |= dns.flags.RD
+        multiple.question.append(
+            dns.rrset.RRset(
+                dns.name.from_text("allowed.example."),
+                dns.rdataclass.IN,
+                dns.rdatatype.A,
+            )
+        )
+        multiple.question.append(
+            dns.rrset.RRset(
+                dns.name.from_text("denied.example."),
+                dns.rdataclass.IN,
+                dns.rdatatype.A,
+            )
+        )
+        assert_refused(multiple)
+
+        additional = dns.message.make_query("allowed.example.", "A")
+        additional.additional.append(
+            dns.rrset.from_text(
+                "covert.example.", 60, "IN", "TXT", '"must-not-be-forwarded"'
+            )
+        )
+        assert_refused(additional)
+
+        # EDNS is accepted for client compatibility, but the frontend rebuilds
+        # the upstream request and emits a plain response with no reflected
+        # option or client-controlled payload.
+        edns = dns.message.make_query(
+            "allowed.example.",
+            "A",
+            use_edns=0,
+            payload=4096,
+            options=[dns.edns.GenericOption(65001, b"must-not-be-forwarded")],
+        )
+        edns_response = udp(edns)
+        assert edns_response.rcode() == dns.rcode.NOERROR
+        assert edns_response.edns < 0
+
+        update = dns.message.make_query("allowed.example.", "A")
+        update.set_opcode(dns.opcode.UPDATE)
+        assert udp_unchecked(update.to_wire()).rcode() in (
+            dns.rcode.FORMERR,
+            dns.rcode.REFUSED,
+        )
+
+        response_packet = dns.message.make_query("allowed.example.", "A")
+        response_packet.flags |= dns.flags.QR
+        assert udp_unchecked(response_packet.to_wire()).rcode() == dns.rcode.REFUSED
+
+        # A parseable header claiming one question but omitting it receives
+        # FORMERR and cannot reach the backend.
+        malformed = struct.pack("!HHHHHH", 0x5151, dns.flags.RD, 1, 0, 0, 0)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2)
+            sock.sendto(malformed, (server, 53))
+            wire, _ = sock.recvfrom(512)
+        malformed_response = dns.message.from_wire(wire)
+        assert malformed_response.id == 0x5151
+        assert malformed_response.rcode() == dns.rcode.FORMERR
+      '';
+
+      udpRecorder = pkgs.writeText "seter-udp-recorder.py" ''
+        import pathlib
+        import socket
+        import sys
+
+        address, port, marker = sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind((address, port))
+            payload, peer = listener.recvfrom(65535)
+        marker.write_bytes(payload + b"\n" + repr(peer).encode())
       '';
 
       configurationRejected =
@@ -647,6 +778,24 @@
             true
         )).success;
 
+      dnsBurstRejected = hostConfigurationRejected {
+        dns = {
+          queriesPerSecond = 100;
+          queryBurst = 99;
+        };
+        workspaces = validWorkspaces;
+      };
+
+      excessiveDnsTimeoutRejected = hostConfigurationRejected {
+        dns.upstreamTimeoutSeconds = 61;
+        workspaces = validWorkspaces;
+      };
+
+      insufficientDnsTimeoutRejected = hostConfigurationRejected {
+        dns.upstreamTimeoutSeconds = 0.09;
+        workspaces = validWorkspaces;
+      };
+
       undefinedHostServiceRejected = configurationRejected {
         alpha = validWorkspaces.alpha // {
           hostServices = [ "missing" ];
@@ -871,6 +1020,9 @@
           assert builtins.elem "seter-proxy.service" alphaTapRequires;
           assert builtins.elem "seter-bridge.service" dnsService.requires;
           assert builtins.elem "nftables.service" dnsService.requires;
+          assert builtins.elem "seter-dns-upstream.service" dnsService.requires;
+          assert dnsService.serviceConfig.MemoryMax == 128 * 1024 * 1024;
+          assert dnsUpstreamService.unitConfig.StopWhenUnneeded;
           assert builtins.elem "seter-bridge.service" proxyService.requires;
           assert builtins.elem "nftables.service" proxyService.requires;
           assert alphaDnsPort == alphaDnsPortWithEarlierWorkspace;
@@ -941,6 +1093,15 @@
                 (.workspaces.alpha | has("secrets") | not) and
                 (.workspaces.alpha | has("hostServices") | not)
               ' ${registryFile}
+
+              jq -e '
+                .version == 1 and
+                .workspace == "alpha" and
+                .sourceAddress == "10.100.0.10" and
+                .allowedNames == [] and
+                .backendAddress == "127.0.0.1" and
+                .backendPort == 15353
+              ' ${dnsPolicyFile}
 
               jq -e '
                 .version == 2 and
@@ -1069,6 +1230,9 @@
           assert overlappingProxyHostsRejected;
           assert proxyPortAsDirectTcpRejected;
           assert proxyPortCollisionRejected;
+          assert dnsBurstRejected;
+          assert excessiveDnsTimeoutRejected;
+          assert insufficientDnsTimeoutRejected;
           assert undefinedHostServiceRejected;
           assert duplicateWorkspaceHostServiceRejected;
           assert duplicateGatewayServicePortRejected;
@@ -1307,6 +1471,7 @@
               pkgs.bind
               pkgs.curl
               pkgs.dnsmasq
+              dnsTestPython
               pkgs.iproute2
               pkgs.iputils
               pkgs.jq
@@ -1531,12 +1696,18 @@
             machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
             machine.succeed("ip address add 11.0.0.1/24 dev outside-host; ip link set outside-host up")
             machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 11.0.0.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 11.0.0.1")
-            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/direct.example/11.0.0.2 --address=/multicast.example/224.0.0.1 --address=/passthrough.example/11.0.0.2 --address=/rebind.example/10.0.0.2 --address=/second-allowed.example/11.0.0.2")
+            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --log-queries --log-facility=- --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/direct.example/11.0.0.2 --address=/multicast.example/224.0.0.1 --address=/passthrough.example/11.0.0.2 --address=/rebind.example/10.0.0.2 --address=/second-allowed.example/11.0.0.2")
             machine.wait_for_unit("seter-test-upstream.service")
             machine.succeed("systemd-run --unit=seter-test-direct-tcp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:2222,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/cat")
             machine.wait_for_unit("seter-test-direct-tcp.service")
             machine.succeed("systemd-run --unit=seter-test-denied-tcp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:2223,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
             machine.wait_for_unit("seter-test-denied-tcp.service")
+            machine.succeed("systemd-run --unit=seter-test-quic-udp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${udpRecorder} 11.0.0.2 443 /tmp/seter-quic-udp-received")
+            machine.wait_for_unit("seter-test-quic-udp.service")
+            machine.succeed("systemd-run --unit=seter-test-generic-udp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${udpRecorder} 11.0.0.2 4444 /tmp/seter-generic-udp-received")
+            machine.wait_for_unit("seter-test-generic-udp.service")
+            machine.succeed("systemd-run --unit=seter-test-dot --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:853,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
+            machine.wait_for_unit("seter-test-dot.service")
             machine.succeed("systemctl start seter-tcp-egress-alpha.service")
             machine.wait_for_unit("seter-tcp-egress-alpha.service")
             machine.succeed("nft get element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'")
@@ -1548,20 +1719,34 @@
             machine.succeed("systemd-run --unit=seter-test-https --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer} 443 ${proxyTestCertificate}/cert.pem ${proxyTestCertificate}/key.pem")
             machine.wait_for_unit("seter-test-https.service")
 
-            # Workspaces can query the host resolver over UDP and TCP. Only
-            # configured egress-name suffixes are forwarded, and IPv6 answers
-            # remain hidden while Seter's network boundary is IPv4-only.
+            # Workspaces can query the host resolver over UDP and TCP. The
+            # frontend accepts only exact configured names, rebuilds permitted
+            # A requests before forwarding, and answers AAAA locally while the
+            # network boundary remains IPv4-only.
             machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 allowed.example A) = 11.0.0.2")
             machine.succeed("test $(ip netns exec alpha dig +tcp +short @10.100.0.1 allowed.example A) = 11.0.0.2")
-            machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 child.allowed.example A) = 11.0.0.2")
-            machine.succeed("ip netns exec alpha dig @10.100.0.1 denied.example A | grep -F 'status: NXDOMAIN'")
-            machine.succeed("ip netns exec beta dig @10.100.0.1 allowed.example A | grep -F 'status: NXDOMAIN'")
+            machine.succeed("ip netns exec alpha dig @10.100.0.1 child.allowed.example A | grep -F 'status: REFUSED'")
+            machine.succeed("ip netns exec alpha dig @10.100.0.1 denied.example A | grep -F 'status: REFUSED'")
+            machine.succeed("ip netns exec beta dig @10.100.0.1 allowed.example A | grep -F 'status: REFUSED'")
             machine.fail("ip netns exec beta dig +time=1 +tries=1 -p ${toString alphaDnsPort} @10.100.0.1 allowed.example A")
             machine.succeed("alpha_pid=$(systemctl show --value --property MainPID seter-dns-alpha.service); beta_pid=$(systemctl show --value --property MainPID seter-dns-beta.service); test $(awk '/^Uid:/ { print $2 }' /proc/$alpha_pid/status) != $(awk '/^Uid:/ { print $2 }' /proc/$beta_pid/status)")
             machine.succeed("test -z \"$(ip netns exec alpha dig +short @10.100.0.1 allowed.example AAAA)\"")
-            machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'query[A] allowed.example from 10.100.0.10'")
+            machine.succeed("ip netns exec alpha ${dnsTestPython}/bin/python ${dnsAdversarialClient} 10.100.0.1")
+            machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'seter-dns-audit' | grep -F '\"decision\":\"allow\"' | grep -F '\"name\":\"allowed.example\"' | grep -F '\"type\":\"A\"'")
+            machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'seter-dns-audit' | grep -F '\"decision\":\"deny\"' | grep -F '\"name\":\"child.allowed.example\"' | grep -F 'not exactly allowlisted'")
+            machine.succeed("journalctl -u seter-dns-alpha.service | grep -F 'seter-dns-audit' | grep -F 'exactly one DNS question is required'")
+            machine.fail("journalctl -u seter-test-upstream.service | grep -Fi 'child.allowed.example'")
+            machine.fail("journalctl -u seter-test-upstream.service | grep -Fi 'must-not-be-forwarded'")
             machine.succeed("getent ahostsv4 alpha.vm | grep -F '10.100.0.10'")
             machine.fail("ip netns exec alpha dig +time=1 +tries=1 @11.0.0.2 allowed.example A")
+            machine.fail("ip netns exec alpha dig +tcp +time=1 +tries=1 @11.0.0.2 allowed.example A")
+
+            # DNS is the only permitted UDP protocol. QUIC cannot bypass the
+            # TCP HTTP policy, arbitrary UDP remains closed, and DNS-over-TLS
+            # is unavailable unless its endpoint is separately authorized as
+            # direct TCP.
+            machine.succeed("rm -f /tmp/seter-quic-udp-received /tmp/seter-generic-udp-received; ip netns exec alpha ${pkgs.python3}/bin/python -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b\"quic\", (\"11.0.0.2\", 443)); s.sendto(b\"generic\", (\"11.0.0.2\", 4444))'; sleep 1; test ! -e /tmp/seter-quic-udp-received; test ! -e /tmp/seter-generic-udp-received")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 11.0.0.2 853")
 
             # Direct TCP policy is keyed by workspace source, the currently
             # resolved public IPv4 addresses, and destination port. Routed

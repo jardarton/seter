@@ -35,7 +35,7 @@ macOS hosts do not run micro-VMs directly. Instead, one large, long-lived NixOS 
 The unit of isolation is a **workspace** — usually one repo, but possibly several coupled ones (see "Multi-repo workspaces" below).
 
 - **Workspace flake**: exports the guest NixOS configuration — packages, services, Docker if needed — and imports a shared base module (proxy CA trust, store mount, serial console, guest conventions). For single-repo workspaces it lives in the repo itself; for multi-repo workspaces it lives in the infra repo or a dedicated workspace repo, and declares the list of member repos (URL + branch).
-- **Infra registry** (central infra repo): one attrset mapping workspace name → static IP, hostname, resource limits, allowed egress hosts, and secret bindings. From this single source Nix renders the proxy policy file, dnsmasq zone, nftables rules, and a per-workspace module each flake imports to learn its own identity.
+- **Infra registry** (central infra repo): one attrset mapping workspace name → static IP, hostname, resource limits, allowed egress hosts, and secret bindings. From this single source Nix renders the proxy policy file, exact-name DNS policy, nftables rules, and a per-workspace module each flake imports to learn its own identity.
 
 Adding a workspace = one registry entry + one flake import.
 
@@ -65,7 +65,7 @@ Starting and stopping host system units requires authorization, but project code
 
 - Each host runs a bridge (e.g. `10.100.0.0/24`); every project has a **static IP and hostname from the registry**, rendered into host DNS (`<name>.vm`) so "reachable from host" means "reachable by name."
 - **Inbound (host → guest):** direct to the VM IP — no per-port forwarding. Services, dev web servers, and Docker-published ports inside a VM are simply addressable.
-- **Outbound (guest → world):** default-deny in nftables on the bridge. Allowed: DNS to the host's dnsmasq, and traffic redirected (transparent DNAT of ports 80/443) into mitmproxy. Explicit `HTTP(S)_PROXY` env vars are additionally set in guests as a convenience; **transparent redirection is the enforcement**, so software ignoring proxy variables is still caught.
+- **Outbound (guest → world):** default-deny in nftables on the bridge. Allowed: exact-name IPv4 DNS through a host policy resolver, and traffic redirected (transparent DNAT of TCP ports 80/443) into mitmproxy. Explicit `HTTP(S)_PROXY` env vars are additionally set in guests as a convenience; **transparent redirection is the enforcement**, so software ignoring proxy variables is still caught. Other UDP, including QUIC, remains blocked.
 - **Non-HTTP egress** (ssh to the git remote, databases): explicit per-destination nftables allow rules from the registry. Nothing else passes.
 
 ### Tailscale
