@@ -130,7 +130,14 @@ seter.host.workspaces.project = {
 };
 ```
 
-The guest or application uses the non-secret placeholder, for example `GITHUB_TOKEN=seter-placeholder-github-0123456789abcdef`; an `Authorization` header containing that exact text is rewritten at the network edge. Query strings and request bodies are deliberately not rewritten.
+The guest exports the matching non-secret placeholder to login sessions:
+
+```nix
+seter.guest.secretPlaceholders.GITHUB_TOKEN =
+  "seter-placeholder-github-0123456789abcdef";
+```
+
+An `Authorization` header containing that exact value is rewritten at the network edge. Placeholder variables are intentionally baked into the guest and the Nix store; real values must never be assigned to `secretPlaceholders`. Systemd services do not inherit login-session variables and must be given the same non-secret placeholder explicitly. Query strings and request bodies are deliberately not rewritten.
 
 Response redaction prevents straightforward accidental reflection, but it is not a data-loss-prevention boundary. An authorized service can transform, split, encode, or deliberately disclose a credential or credential-derived information in ways a generic proxy cannot recognize. The guest is therefore not *provisioned* the credential, but the bound service remains inside the credential's trust boundary. Use a separate, least-privilege credential for every workspace and grant only the API capabilities that workspace may exercise.
 

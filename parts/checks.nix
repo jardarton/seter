@@ -650,6 +650,85 @@
             }).config.system.build.toplevel.drvPath
             true
         )).success;
+
+      invalidGuestPlaceholderNameRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    secretPlaceholders."INVALID-NAME" = "seter-placeholder-invalid-0123456789abcdef";
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      invalidGuestPlaceholderValueRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    secretPlaceholders.GITHUB_TOKEN = "this-would-be-a-real-secret";
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      proxyGuestPlaceholderNameRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    secretPlaceholders.HTTPS_PROXY = "seter-placeholder-invalid-0123456789abcdef";
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
+
+      overlappingGuestPlaceholdersRejected =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (inputs.nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.guest
+                {
+                  seter.guest = {
+                    enable = true;
+                    secretPlaceholders = {
+                      FIRST_TOKEN = "seter-placeholder-0123456789abcdef";
+                      SECOND_TOKEN = "seter-placeholder-0123456789abcdef-extra";
+                    };
+                  };
+                  system.stateVersion = "24.11";
+                }
+              ];
+            }).config.system.build.toplevel.drvPath
+            true
+        )).success;
     in
     {
       checks = {
@@ -858,6 +937,10 @@
           assert tcpWithoutFirewallRejected;
           assert tcpWithoutForwardFilterRejected;
           assert guestPrivateProxyKeyRejected;
+          assert invalidGuestPlaceholderNameRejected;
+          assert invalidGuestPlaceholderValueRejected;
+          assert proxyGuestPlaceholderNameRejected;
+          assert overlappingGuestPlaceholdersRejected;
           pkgs.runCommand "seter-workspace-uniqueness-check" { } ''
             touch "$out"
           '';
@@ -876,6 +959,10 @@
                     enable = true;
                     network.enable = true;
                     proxyCaCertificate = proxyCaCertificate;
+                    secretPlaceholders = {
+                      GITHUB_TOKEN = "seter-placeholder-github-0123456789abcdef";
+                      GH_TOKEN = "seter-placeholder-github-0123456789abcdef";
+                    };
                   };
                   system.stateVersion = "24.11";
                 }
@@ -886,6 +973,8 @@
           assert sessionVariables.HTTP_PROXY == "http://10.100.0.1:18081";
           assert sessionVariables.HTTPS_PROXY == "http://10.100.0.1:18081";
           assert sessionVariables.NO_PROXY == "127.0.0.1,localhost,::1,10.100.0.10";
+          assert sessionVariables.GITHUB_TOKEN == "seter-placeholder-github-0123456789abcdef";
+          assert sessionVariables.GH_TOKEN == sessionVariables.GITHUB_TOKEN;
           assert builtins.elem proxyCaCertificate guestConfiguration.config.security.pki.certificates;
           guestConfiguration.config.system.build.toplevel;
 
@@ -925,6 +1014,7 @@
                   ssh.enable = false;
                   proxy = "http://proxy:18081";
                   proxyCaCertificate = builtins.readFile proxyTrustCa;
+                  secretPlaceholders.GITHUB_TOKEN = "seter-placeholder-github-0123456789abcdef";
                 };
 
                 virtualisation.memorySize = 1024;
@@ -949,7 +1039,9 @@
             proxy.wait_for_unit("seter-proxy-trust-relay.service")
 
             guest.wait_until_succeeds("getent ahostsv4 proxy")
-            guest.succeed("su - tester -c 'test \"$HTTPS_PROXY\" = http://proxy:18081; test \"$NO_PROXY\" = 127.0.0.1,localhost,::1; curl --fail --silent https://proxy-e2e.example/index.html | grep -F \"trusted proxy e2e\"'")
+            guest.succeed("su - tester -c 'test \"$HTTPS_PROXY\" = http://proxy:18081; test \"$NO_PROXY\" = 127.0.0.1,localhost,::1'")
+            guest.succeed("su - tester -c 'test \"$GITHUB_TOKEN\" = seter-placeholder-github-0123456789abcdef'")
+            guest.wait_until_succeeds("su - tester -c 'curl --fail --silent https://proxy-e2e.example/index.html | grep -F \"trusted proxy e2e\"'")
           '';
         };
 
