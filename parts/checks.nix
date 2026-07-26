@@ -35,16 +35,18 @@
         boot.loader.grub.devices = [ "nodev" ];
       };
 
-      mkHost =
-        workspaces:
+      mkHostWith =
+        host:
         inputs.nixpkgs.lib.nixosSystem {
           inherit system;
           modules = [
             self.nixosModules.host
             hostModuleBase
-            { seter.host = { inherit workspaces; }; }
+            { seter.host = host; }
           ];
         };
+
+      mkHost = workspaces: mkHostWith { inherit workspaces; };
 
       validWorkspaces = {
         alpha = mkWorkspace {
@@ -79,6 +81,25 @@
       tcpSetsFor = workspaces: import ../nix/modules/host/tcp-egress-sets.nix { inherit lib workspaces; };
       alphaTcpSet = (tcpSetsFor tcpTestWorkspaces).alpha;
       tcpHostConfiguration = mkHost tcpTestWorkspaces;
+
+      gatewayServiceWorkspaces = validWorkspaces // {
+        alpha = validWorkspaces.alpha // {
+          hostServices = [ "adb" ];
+        };
+      };
+      gatewayServiceConfiguration = mkHostWith {
+        workspaces = gatewayServiceWorkspaces;
+        gatewayServices.adb = {
+          listenPort = 5037;
+          targetPort = 15037;
+        };
+      };
+      gatewayServiceSocket = gatewayServiceConfiguration.config.systemd.sockets.seter-gateway-adb;
+      gatewayService = gatewayServiceConfiguration.config.systemd.services.seter-gateway-adb;
+      gatewayServiceTapRequires =
+        gatewayServiceConfiguration.config.systemd.services.seter-tap-alpha.requires;
+      gatewayServiceFirewallPorts =
+        gatewayServiceConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
 
       secretPolicyWorkspaces = validWorkspaces // {
         alpha = validWorkspaces.alpha // {
@@ -309,6 +330,11 @@
       configurationAccepted =
         workspaces:
         (builtins.tryEval (builtins.deepSeq (mkHost workspaces).config.system.build.toplevel.drvPath true))
+        .success;
+
+      hostConfigurationRejected =
+        host:
+        !(builtins.tryEval (builtins.deepSeq (mkHostWith host).config.system.build.toplevel.drvPath true))
         .success;
 
       duplicateIpRejected = configurationRejected {
@@ -621,6 +647,76 @@
             true
         )).success;
 
+      undefinedHostServiceRejected = configurationRejected {
+        alpha = validWorkspaces.alpha // {
+          hostServices = [ "missing" ];
+        };
+      };
+
+      duplicateWorkspaceHostServiceRejected = hostConfigurationRejected {
+        gatewayServices.adb = {
+          listenPort = 5037;
+          targetPort = 15037;
+        };
+        workspaces.alpha = validWorkspaces.alpha // {
+          hostServices = [
+            "adb"
+            "adb"
+          ];
+        };
+      };
+
+      duplicateGatewayServicePortRejected = hostConfigurationRejected {
+        gatewayServices = {
+          adb = {
+            listenPort = 5037;
+            targetPort = 15037;
+          };
+          builder = {
+            listenPort = 5037;
+            targetPort = 15038;
+          };
+        };
+        workspaces = validWorkspaces;
+      };
+
+      gatewayServiceProxyPortRejected = hostConfigurationRejected {
+        gatewayServices.bad = {
+          listenPort = 18080;
+          targetPort = 15037;
+        };
+        workspaces = validWorkspaces;
+      };
+
+      gatewayServiceDnsPortRejected = hostConfigurationRejected {
+        gatewayServices.bad = {
+          listenPort = alphaDnsPort;
+          targetPort = 15037;
+        };
+        workspaces = validWorkspaces;
+      };
+
+      invalidGatewayServiceNameRejected = hostConfigurationRejected {
+        gatewayServices."Bad_Name" = {
+          listenPort = 5037;
+          targetPort = 15037;
+        };
+        workspaces = validWorkspaces;
+      };
+
+      nonLoopbackGatewayTargetRejected = hostConfigurationRejected {
+        gatewayServices.bad = {
+          listenPort = 5037;
+          targetAddress = "192.0.2.10";
+          targetPort = 15037;
+        };
+        workspaces = validWorkspaces // {
+          alpha = validWorkspaces.alpha // {
+            hostServices = [ "bad" ];
+          };
+        };
+      };
+
       tcpWithoutFirewallRejected =
         !(builtins.tryEval (
           builtins.deepSeq
@@ -788,6 +884,14 @@
             hostConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
           assert builtins.elem explicitProxyPort
             hostConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
+          assert builtins.elem 5037 gatewayServiceFirewallPorts;
+          assert builtins.elem "seter-gateway-adb.socket" gatewayServiceTapRequires;
+          assert builtins.elem "seter-bridge.service" gatewayServiceSocket.requires;
+          assert builtins.elem "nftables.service" gatewayServiceSocket.requires;
+          assert gatewayServiceSocket.unitConfig.StopWhenUnneeded;
+          assert gatewayService.serviceConfig.DynamicUser;
+          assert lib.hasInfix "systemd-socket-proxyd --exit-idle-time=5s 127.0.0.1:15037"
+            gatewayService.serviceConfig.ExecStart;
           assert nftablesConfig.enable;
           assert nftablesConfig.tables.seter_l2.family == "bridge";
           assert nftablesConfig.tables.seter_l3.family == "inet";
@@ -834,7 +938,8 @@
                 (.workspaces.alpha.ssh.knownHostKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test") and
                 (.workspaces.alpha.storage.image == "alpha-project.img") and
                 (.workspaces.alpha | has("egress") | not) and
-                (.workspaces.alpha | has("secrets") | not)
+                (.workspaces.alpha | has("secrets") | not) and
+                (.workspaces.alpha | has("hostServices") | not)
               ' ${registryFile}
 
               jq -e '
@@ -964,6 +1069,13 @@
           assert overlappingProxyHostsRejected;
           assert proxyPortAsDirectTcpRejected;
           assert proxyPortCollisionRejected;
+          assert undefinedHostServiceRejected;
+          assert duplicateWorkspaceHostServiceRejected;
+          assert duplicateGatewayServicePortRejected;
+          assert gatewayServiceProxyPortRejected;
+          assert gatewayServiceDnsPortRejected;
+          assert invalidGatewayServiceNameRejected;
+          assert nonLoopbackGatewayTargetRejected;
           assert tcpWithoutFirewallRejected;
           assert tcpWithoutForwardFilterRejected;
           assert guestPrivateProxyKeyRejected;
@@ -1224,14 +1336,27 @@
             # unit can prove both missing-source failure and systemd's private
             # credential snapshot behavior.
             systemd.services.seter-proxy.wantedBy = lib.mkForce [ ];
+            # Keep the shared gateway socket needed while network namespaces
+            # stand in for generated TAP units. This remains available across
+            # the specialisation switch used by the revocation test.
+            systemd.services.seter-test-gateway-consumer = {
+              requires = [ "seter-gateway-adb.socket" ];
+              after = [ "seter-gateway-adb.socket" ];
+              serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+            };
 
             seter.host = {
               enable = true;
               dns.upstreamServers = [ "11.0.0.2" ];
               proxy.upstreamCaFile = "${proxyTestCertificate}/cert.pem";
               tcpEgress.refreshIntervalSeconds = 300;
+              gatewayServices.adb = {
+                listenPort = 5037;
+                targetPort = 15037;
+              };
               workspaces = validWorkspaces // {
                 alpha = validWorkspaces.alpha // {
+                  hostServices = [ "adb" ];
                   egress.httpHosts = [
                     "allowed.example"
                     "bad-cert.example"
@@ -1284,6 +1409,14 @@
               };
             };
 
+            # Exercise runtime authorization revocation without removing the
+            # shared relay: hand the same service from alpha to beta so the
+            # authorization restart trigger must terminate alpha's live flow.
+            specialisation.gateway-revoked.configuration = {
+              seter.host.workspaces.alpha.hostServices = lib.mkForce [ ];
+              seter.host.workspaces.beta.hostServices = lib.mkForce [ "adb" ];
+            };
+
             virtualisation.memorySize = 1024;
             system.stateVersion = "24.11";
           };
@@ -1293,6 +1426,10 @@
 
             machine.wait_for_unit("seter-bridge.service")
             machine.wait_for_unit("nftables.service")
+            # Model the TAP's Requires= edge while this test uses lightweight
+            # network namespaces in place of the generated TAP service.
+            machine.succeed("systemctl start seter-test-gateway-consumer.service")
+            machine.wait_for_unit("seter-gateway-adb.socket")
             # LoadCredential must fail closed while its root-only source is
             # absent. Once present, PID 1 snapshots it into the service's
             # private mount namespace for the unprivileged proxy account.
@@ -1358,6 +1495,21 @@
             machine.succeed("ip netns add beta; ip link add seter-beta type veth peer name eth0 netns beta")
             machine.succeed("ip link set seter-beta master seter0; bridge link set dev seter-beta isolated on; ip link set seter-beta up")
             machine.succeed("ip -n beta link set lo up; ip -n beta link set eth0 address 02:00:00:00:00:11; ip -n beta link set eth0 up; ip -n beta address add 10.100.0.11/24 dev eth0; ip -n beta route add default via 10.100.0.1")
+
+            # Named gateway services expose a fixed loopback daemon only to
+            # explicitly authorized workspaces. An unavailable target fails
+            # closed; another workspace, the target's loopback port, another
+            # host port, and the same port on a routed address remain denied.
+            machine.succeed("test -z \"$(printf unavailable | ip netns exec alpha ${lib.getExe pkgs.netcat} -N -w 1 10.100.0.1 5037)\"")
+            machine.succeed("systemd-run --unit=seter-test-host-daemon --property=Type=simple -- ${lib.getExe pkgs.socat} TCP4-LISTEN:15037,bind=127.0.0.1,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/cat")
+            machine.wait_for_unit("seter-test-host-daemon.service")
+            machine.succeed("test \"$(printf gateway-ok | ip netns exec alpha ${lib.getExe pkgs.netcat} -N -w 2 10.100.0.1 5037)\" = gateway-ok")
+            machine.fail("ip netns exec beta ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 5037")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 15037")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 5038")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 11.0.0.2 5037")
+            machine.succeed("test $(nft --json list chain inet seter_l3 input | jq '[.nftables[].rule | select(.comment == \"seter host service alpha adb\") | .expr[].counter.packets?] | add // 0') -gt 0")
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-gateway-adb.service); test \"$main\" -gt 1; test $(awk '/^Uid:/ { print $2 }' /proc/$main/status) != 0")
 
             # An unregistered, non-isolated bridge port must not create a
             # layer-2 escape path from a registered workspace.
@@ -1540,6 +1692,28 @@
             machine.succeed("nft list table ip seter_tcp_nat")
             machine.wait_until_succeeds("nft get element inet seter_l3 ${alphaTcpSet} '{ 11.0.0.2 . 2222 }'")
             machine.succeed("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 2 11.0.0.2 2222")
+            machine.succeed("test \"$(printf after-reload | ip netns exec alpha ${lib.getExe pkgs.netcat} -N -w 2 10.100.0.1 5037)\" = after-reload")
+
+            # Keep a relay flow established while switching authorization to
+            # beta. The authorization restart trigger must close alpha's old
+            # flow as well as reject new ones; beta must retain service.
+            machine.succeed("systemd-run --unit=seter-test-alpha-gateway-connection --property=Type=simple -- ip netns exec alpha ${lib.getExe pkgs.socat} TCP4:10.100.0.1:5037 EXEC:${pkgs.coreutils}/bin/cat")
+            machine.wait_until_succeeds("ip netns exec alpha ${pkgs.iproute2}/bin/ss -Htn state established | grep -Fq '10.100.0.1:5037'")
+            machine.succeed("/run/current-system/specialisation/gateway-revoked/bin/switch-to-configuration test")
+            machine.wait_until_fails("ip netns exec alpha ${pkgs.iproute2}/bin/ss -Htn state established | grep -Fq '10.100.0.1:5037'")
+            machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.100.0.1 5037")
+            machine.succeed("systemctl start seter-test-gateway-consumer.service")
+            machine.wait_for_unit("seter-gateway-adb.socket")
+            machine.succeed("test \"$(printf beta-authorized | ip netns exec beta ${lib.getExe pkgs.netcat} -N -w 2 10.100.0.1 5037)\" = beta-authorized")
+
+            # Releasing the final consumer lets the idle proxyd exit and the
+            # shared socket stop. Restart it afterwards so the nftables-stop
+            # dependency test below still exercises an active listener.
+            machine.succeed("systemctl stop seter-test-gateway-consumer.service")
+            machine.wait_until_fails("systemctl is-active --quiet seter-gateway-adb.service")
+            machine.wait_until_fails("systemctl is-active --quiet seter-gateway-adb.socket")
+            machine.succeed("systemctl start seter-test-gateway-consumer.service")
+            machine.wait_for_unit("seter-gateway-adb.socket")
 
             # The host may initiate connections to a workspace. A workspace
             # may not initiate connections to the host, its peers, or routed
@@ -1595,6 +1769,7 @@
             machine.succeed("ip link show dev seter-alpha")
             machine.succeed("systemctl stop nftables.service")
             machine.wait_until_fails("ip link show dev seter-alpha")
+            machine.wait_until_fails("systemctl is-active --quiet seter-gateway-adb.socket")
             machine.fail("nft list table bridge seter_l2")
             machine.fail("nft list table inet seter_l3")
             machine.fail("nft list table inet seter_proxy")

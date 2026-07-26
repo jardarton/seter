@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
+Seter runs development projects in isolated, Nix-managed micro-VMs. Guest and host lifecycle behavior, a fail-closed workspace network boundary, restricted guest DNS, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
@@ -78,7 +78,7 @@ These units provide VM plumbing only. They do not start the VM. Separate host-ow
 
 ## Network isolation
 
-Every workspace TAP is an isolated bridge port. Host-owned nftables rules bind each TAP to its registered IPv4 and MAC addresses, reject forged ARP and IPv4 identities, block IPv6 until it has an explicit policy, and deny workspace-initiated traffic to the host, other workspaces, and routed networks. Host-initiated connections such as `seter shell` remain available.
+Every workspace TAP is an isolated bridge port. Host-owned nftables rules bind each TAP to its registered IPv4 and MAC addresses, reject forged ARP and IPv4 identities, block IPv6 until it has an explicit policy, and deny workspace-initiated traffic to the host, other workspaces, and routed networks except for explicitly selected gateway services. Host-initiated connections such as `seter shell` remain available.
 
 Seter requires and enables NixOS's native `networking.nftables` backend so its tables participate in the host's complete atomic firewall transaction. **This switches the host firewall backend from legacy iptables and may require changes for Docker, libvirt, or other software that manages iptables rules. Review those services before enabling the host module.**
 
@@ -95,6 +95,20 @@ Names in `passthroughHosts` use the same transparent port but bypass TLS interce
 Allow and deny decisions are written as single-line JSON records prefixed with `seter-audit` in the `seter-proxy.service` journal. Allowed passthrough connections are logged with their SNI, but their encrypted requests remain opaque. Set `seter.host.proxy.logRequests = false` to disable this audit logging. Intercepted HTTP logs include the URL path, which may contain sensitive query parameters. `seter.host.proxy.upstreamCaFile` may provide a custom PEM trust bundle for intercepted upstream HTTPS verification. The proxy uses fixed UID 60534 for nftables output isolation; override `seter.host.proxy.uid` if that UID is already allocated locally.
 
 Direct non-HTTP TCP destinations declared with `allowedTCP` are resolved by a host-owned service into a separate nftables address-and-port set for each workspace. Set replacement is atomic, active sets are immediately repopulated after an nftables reload, and every packet remains conditional on the current set so removing an address also revokes established connections. Routed connections are narrowly forwarded and masqueraded through NixOS's enabled forwarding firewall. Seter defaults `networking.firewall.filterForward` on and rejects direct-TCP policy when either the firewall or forward filtering is disabled, so enabling kernel forwarding cannot expose unrelated host interfaces. DNS-derived destinations must be publicly routed unicast IPv4 addresses, preventing an allowed name from rebinding onto loopback, link-local, multicast, private LAN, or workspace services. To deliberately authorize a non-public destination, configure its literal IPv4 address rather than a hostname. Ports 80 and 443 cannot be declared as direct TCP because they always pass through the HTTP policy proxy. As with any layer-3 allowlist, destinations sharing an IP address and port are indistinguishable.
+
+Named host daemons can be exposed through fixed TCP relays on the Seter gateway. A relay can target only IPv4 loopback, binds only the bridge gateway, runs as a hardened dynamic user, starts on demand with an authorized workspace's TAP, and stops after becoming idle once no authorized TAP needs it. The earlier Seter nftables chain admits only the exact registered workspace source address, gateway address, protocol, and listener port; defining a relay does not authorize any workspace by itself. Listener ports must be unique and cannot collide with proxy or generated DNS ports.
+
+```nix
+seter.host.gatewayServices.adb = {
+  listenPort = 5037;
+  targetAddress = "127.0.0.1"; # the only permitted target address
+  targetPort = 5037;
+};
+
+seter.host.workspaces.android.hostServices = [ "adb" ];
+```
+
+Keep the real daemon loopback-only; never make ADB listen on `0.0.0.0`. In the guest, set `ADB_SERVER_SOCKET=tcp:10.100.0.1:5037` (using that guest's configured gateway). Authorization grants the daemon's full protocol capability: workspaces sharing one ADB server can see and control the same device inventory. These relays are transport policy, not authentication; exposing SSH, the Nix daemon, Docker, or another privileged control plane still requires a separately restricted application-level service. Only TCP loopback targets are supported initially.
 
 mitmproxy generates its site interception CA once in persistent `/var/lib/seter-proxy` state. That directory and both private-key formats remain readable only by the unprivileged proxy account; Seter publishes only the public certificate under `/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem`. Export and review it, commit only that public certificate to the trusted workspace or infra configuration, and install it declaratively in each guest:
 
@@ -194,4 +208,4 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.
+The guest boundary has a tested minimal vertical slice. The host exposes a validated workspace registry, lifecycle-owned bridge/TAP/VirtioFS plumbing, fixed per-workspace VM services, fail-closed TAP identity and network isolation, restricted guest DNS, transparent HTTP/HTTPS host enforcement with SNI passthrough, allowlisted direct TCP egress, per-workspace host-daemon gateway relays, persistent proxy CA enrollment and declarative guest trust, destination-bound HTTPS-header secret injection from private runtime credentials, and CLI operations for runner updates, start, status, shutdown, strict SSH shell access, and offline SSH host-key enrollment.

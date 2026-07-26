@@ -12,6 +12,7 @@
   allowedHTTPHosts ? [ ],
   passthroughHosts ? [ ],
   allowedTCP ? [ ],
+  hostServices ? [ ],
   secrets ? { },
 }:
 {
@@ -39,6 +40,6 @@
     tcp = allowedTCP;
   };
 
-  inherit secrets;
+  inherit hostServices secrets;
 }
 // (if hostname == null then { } else { inherit hostname; })

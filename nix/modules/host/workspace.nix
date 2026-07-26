@@ -74,6 +74,12 @@ in
       };
     };
 
+    hostServices = mkOption {
+      type = types.listOf (types.strMatching "[a-z0-9][a-z0-9-]{0,62}");
+      default = [ ];
+      description = "Named host gateway services this workspace may access.";
+    };
+
     egress = {
       httpHosts = mkOption {
         type = types.listOf httpHostType;

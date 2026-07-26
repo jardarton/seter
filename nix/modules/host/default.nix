@@ -198,14 +198,16 @@ let
         "seter-dns-${name}.service"
         "seter-proxy.service"
       ]
-      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service";
+      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
+      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
       requires = [
         "nftables.service"
         "seter-bridge.service"
         "seter-dns-${name}.service"
         "seter-proxy.service"
       ]
-      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service";
+      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
+      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
         Type = "oneshot";
@@ -386,6 +388,7 @@ in
 {
   imports = [
     ./dns.nix
+    ./host-services.nix
     ./network-policy.nix
     ./proxy.nix
     ./tcp-egress.nix
@@ -499,6 +502,10 @@ in
       {
         assertion = workspace.ssh.knownHostKey == null || nonBlank workspace.ssh.knownHostKey;
         message = "seter.host.workspaces.${workspace.name}.ssh.knownHostKey must not be blank";
+      }
+      {
+        assertion = hasUniqueValues workspace.hostServices;
+        message = "seter.host.workspaces.${workspace.name}.hostServices must not contain duplicates";
       }
       {
         assertion = lib.all validSecretName (workspaceSecretNames workspace);

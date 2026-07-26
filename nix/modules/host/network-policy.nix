@@ -68,12 +68,20 @@ let
     workspace:
     let
       address = workspace.network.address;
+      hostServiceRules = concatMapStringsSep "\n" (
+        serviceName:
+        let
+          service = cfg.gatewayServices.${serviceName};
+        in
+        ''iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString service.listenPort} counter accept comment "seter host service ${workspace.name} ${serviceName}"''
+      ) workspace.hostServices;
     in
     ''
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} udp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} meta mark 0x53455450 tcp dport ${toString cfg.proxy.port} accept comment "seter proxy ${workspace.name}"
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString cfg.proxy.explicitPort} accept comment "seter explicit proxy ${workspace.name}"
+      ${hostServiceRules}
       iifname "${cfg.bridge}" ip saddr ${address} ct state established,related accept
       iifname "${cfg.bridge}" ip saddr ${address} counter drop comment "seter host isolation ${workspace.name}"
     ''
