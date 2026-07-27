@@ -13,7 +13,17 @@
 rustPlatform.buildRustPackage {
   pname = "seter";
   version = "0.1.0";
-  src = lib.cleanSource ../.;
+  # Only the crate sources. A repo-wide source would make every documentation
+  # or Nix module edit rebuild the binary, and with it every check that embeds
+  # this package in a VM image.
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../Cargo.toml
+      ../Cargo.lock
+      ../crates
+    ];
+  };
   cargoLock.lockFile = ../Cargo.lock;
 
   meta.mainProgram = "seter";

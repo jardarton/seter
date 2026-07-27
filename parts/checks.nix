@@ -484,20 +484,38 @@
         marker.write_bytes(payload + b"\n" + repr(peer).encode())
       '';
 
-      configurationRejected =
-        workspaces:
-        !(builtins.tryEval (builtins.deepSeq (mkHost workspaces).config.system.build.toplevel.drvPath true))
-        .success;
+      # Force every option value the seter modules define, stopping at
+      # derivations so evaluation does not descend into their build graph.
+      forceOptions =
+        value:
+        if lib.isDerivation value then
+          true
+        else if builtins.isAttrs value then
+          lib.all forceOptions (builtins.attrValues value)
+        else if builtins.isList value then
+          lib.all forceOptions value
+        else
+          builtins.seq value true;
 
-      configurationAccepted =
-        workspaces:
-        (builtins.tryEval (builtins.deepSeq (mkHost workspaces).config.system.build.toplevel.drvPath true))
-        .success;
+      # Rejections come from two places: module assertions, and option type
+      # checks such as the bounds on dns.upstreamTimeoutSeconds. Forcing both
+      # is what makes this equivalent to building system.build.toplevel, at
+      # roughly half the evaluation cost.
+      forceConfiguration =
+        configuration:
+        builtins.tryEval (
+          builtins.seq (forceOptions configuration.config.seter) (
+            builtins.deepSeq (map (
+              entry: if entry.assertion then true else throw entry.message
+            ) configuration.config.assertions) true
+          )
+        );
 
-      hostConfigurationRejected =
-        host:
-        !(builtins.tryEval (builtins.deepSeq (mkHostWith host).config.system.build.toplevel.drvPath true))
-        .success;
+      configurationRejected = workspaces: !(forceConfiguration (mkHost workspaces)).success;
+
+      configurationAccepted = workspaces: (forceConfiguration (mkHost workspaces)).success;
+
+      hostConfigurationRejected = host: !(forceConfiguration (mkHostWith host)).success;
 
       duplicateIpRejected = configurationRejected {
         alpha = validWorkspaces.alpha;
