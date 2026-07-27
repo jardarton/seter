@@ -1,6 +1,8 @@
 # Private writable Nix stores
 
-Seter guests combine two storage layers at `/nix/store`:
+> **Current implementation warning:** the vertical slice exports the host's entire `/nix/store`, so guests can read unrelated host-store source and configuration artifacts. The accepted product design replaces this with a closure-filtered workspace [Store View](./store-visibility.md); it is not yet implemented.
+
+Seter guests currently combine two storage layers at `/nix/store`:
 
 - the host `/nix/store`, exported by host-owned virtiofsd and mounted read-only at `/nix/.ro-store`;
 - a workspace-private ext4 image mounted at `/nix`, with microvm.nix using `/nix/.rw-store` as the overlay upper and work directory.

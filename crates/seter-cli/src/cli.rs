@@ -20,7 +20,7 @@ pub enum Command {
     Up { workspace: String },
     /// Gracefully stop a workspace.
     Down { workspace: String },
-    /// Run a command in an ephemeral workspace.
+    /// Run a command in a workspace, starting it when needed.
     Run {
         workspace: String,
         #[arg(last = true, required = true)]

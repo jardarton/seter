@@ -2,7 +2,7 @@
 
 ## Intention
 
-Run every development project inside its own on-demand Linux micro-VM, defined and managed entirely with Nix, on both NixOS hosts and macOS. Each VM is a hard isolation boundary with controlled network egress, no direct access to secrets, and explicit, minimal bridges back to the host. The same project definition serves two modes: ephemeral ("boot, run a command, discard") and long-lived interactive development.
+Run every development project inside its own on-demand Linux micro-VM, defined and managed entirely with Nix, on both NixOS hosts and macOS. Each VM is a hard isolation boundary with controlled network egress, no direct access to secrets, and explicit, minimal bridges back to the host. The same workspace serves command execution and interactive development. Both modes use the workspace's persistent working tree and caches, start the VM when needed, and leave it running until an explicit shutdown.
 
 ## Motivation
 
@@ -22,50 +22,56 @@ Existing tools cover parts of this (micro-VM runners, agent sandboxes with egres
 
 ### Layers
 
-1. **VM layer** — [microvm.nix](https://github.com/microvm-nix/microvm.nix) with cloud-hypervisor (or QEMU) on NixOS hosts. Guests are NixOS configurations exported from each project's flake. The host `/nix/store` is shared read-only into guests via virtiofs as the lower layer of a workspace-private writable overlay, so common paths are shared while project-controlled builds remain inside the VM.
-2. **Policy layer** — all guest egress is default-denied by nftables on the host bridge and forced through a host-side mitmproxy running a Python policy addon: per-project host allowlists, placeholder→real secret injection for bound destinations, SNI passthrough for cert-pinned or bulk hosts, and full request audit logging.
-3. **Host integration layer** — a small launcher CLI (`vm`) that builds, starts, stops, and executes into VMs; generated host DNS entries; forwarded host-side device daemons (e.g. an adb server) instead of USB passthrough; direnv integration on both sides of the boundary.
+1. **VM layer** — [microvm.nix](https://github.com/microvm-nix/microvm.nix) with cloud-hypervisor (or QEMU) on NixOS hosts. Trusted Guest Profiles produce NixOS workspace Runners. A workspace-specific read-only Store View containing only its deployed and retained Runner closures is exported through VirtioFS as the lower layer of a private writable overlay, so boot paths are shared while unrelated host-store contents remain hidden and project-controlled builds stay inside the VM.
+2. **Policy layer** — all guest egress is default-denied by nftables on the host bridge and forced through a host-side mitmproxy running a Python policy addon: per-workspace exact or single-label-wildcard Host Patterns, exact-host and exact-path placeholder→real secret injection for bound destinations, SNI passthrough for cert-pinned or bulk hosts, and full request audit logging.
+3. **Host integration layer** — trusted NixOS deployment builds and installs workspace Runners, while the `seter` CLI bootstraps, starts, stops, and executes into VMs; generated host DNS entries; forwarded host-side device daemons (e.g. an adb server) instead of USB passthrough; direnv integration inside the workspace boundary.
 
 ### macOS support via nested virtualization
 
 macOS hosts do not run micro-VMs directly. Instead, one large, long-lived NixOS VM runs under Lima using the `vz` backend with `nestedVirtualization: true` (requires Apple Silicon M3 or newer and macOS 15+). Inside it, the exact same stack runs as on native NixOS hosts: same launcher, same microvm.nix definitions, same proxy, same policy. The outer VM is pure infrastructure — projects run in inner micro-VMs, working trees live on the outer VM's disk (never on macOS-shared paths), and the outer VM joins the tailnet as a first-class node. This trades a modest nested-virtualization performance cost for having exactly one boot path and one policy implementation across all machines.
 
-### Definitions live in two places
+### Configuration ownership
 
-The unit of isolation is a **workspace** — usually one repo, but possibly several coupled ones (see "Multi-repo workspaces" below).
+The initial unit of isolation is a **workspace** containing one repository checkout. Configuration is separated by authority rather than described collectively as a “workspace flake”:
 
-- **Workspace flake**: exports the guest NixOS configuration — packages, services, Docker if needed — and imports a shared base module (proxy CA trust, store mount, serial console, guest conventions). For single-repo workspaces it lives in the repo itself; for multi-repo workspaces it lives in the infra repo or a dedicated workspace repo, and declares the list of member repos (URL + branch).
-- **Infra registry** (central infra repo): one attrset mapping workspace name → static IP, hostname, resource limits, allowed egress hosts, and secret bindings. From this single source Nix renders the proxy policy file, exact-name DNS policy, nftables rules, and a per-workspace module each flake imports to learn its own identity.
+- The trusted **Workspace Registry** approves the repository source and defines identity, resources, credential bindings, selected Guest Profile, and effective Policy Grants. Consumer-owned grants live in a dedicated TOML Policy File that trusted Nix configuration merges into the registry.
+- A trusted **Guest Profile** supplies reusable guest operating-system capabilities and Seter's mandatory bootstrap baseline. The first usable milestone provides only a minimal `default` profile.
+- The repository's ordinary development flake defines its development shell and dependencies; it executes only after checkout and explicit direnv approval.
 
-Adding a workspace = one registry entry + one flake import.
+Ordinary repositories need no Seter-specific NixOS configuration. Specialized guest composition is deferred: arbitrary repository-owned NixOS modules cannot truthfully be constrained to “extension only,” so future work must choose between restricted capability requests, trusted custom profiles, and an explicitly untrusted advanced runner path. See [Configuration ownership](./docs/configuration-ownership.md) for the trust boundaries and current implementation status.
 
 ## How the Finished Project Works
 
 ### VM lifecycle
 
-- `vm update <name>` — builds the microvm runner from the project flake **on the host** (so outputs land in the shared store and deduplicate across projects), atomically registers the current runner under `/nix/var/nix/gcroots/per-project/<name>`, and retains generation roots needed by the persistent guest Nix database.
-- `vm up <name>` — starts the last-built runner through a fixed, host-declared per-workspace systemd unit with `MemoryMax`/`CPUQuota` from the registry. Runner code executes as the dedicated workspace account, never as root.
-- `vm run <name> -- <cmd>` — ephemeral mode: boots with tmpfs-only root, waits for SSH (pinned host key from the registry), runs the command via `direnv exec /project -- <cmd>` so ephemeral and interactive modes see identical environments, propagates the exit code, tears down.
-- `vm down <name>` — asks the matching runner to send an ACPI power-button event, then lets the fixed systemd unit terminate the VMM after a timeout as the hammer.
-- `vm ls`, `vm status`, `vm ip`, `vm shell`, `vm update` (explicit rebuild), `vm gc` (remove GC roots for retired projects).
-- `vm up` boots the **last-built** runner; rebuilding is deliberate via `vm update`. Starts stay instant and GC roots stay meaningful.
+- Trusted NixOS host deployment builds, installs, and roots each workspace Runner from its selected Guest Profile and registered identity. Project code is not part of the Runner.
+- `seter init <name>` — requires the deployed Runner, creates the host-owned Workspace SSH Identity, starts the VM, and safely bootstraps the approved HTTPS repository into `/project/<repository>`. It never evaluates `.envrc` and leaves the VM running.
+- `seter up <name>` — starts the deployed Runner through a fixed, host-declared per-workspace systemd unit with `MemoryMax`/`CPUQuota` from the registry. Runner code executes as the dedicated workspace account, never as root.
+- `seter run <name> -- <cmd>` — starts the deployed Runner when needed, waits for strictly verified SSH, runs the command from the registered repository checkout through direnv, and propagates its exit code. It preserves working-tree and cache changes and leaves the VM running until an explicit `seter down`.
+- `seter down <name>` — asks the matching Runner to send an ACPI power-button event, then lets the fixed systemd unit terminate the VMM after a timeout as the hammer.
+- `seter shell <name>` and `seter run <name> -- <cmd>` start the workspace when needed and leave it running until explicit shutdown.
+- `seter ls`, `seter status`, `seter ip`, and `seter gc` provide inspection and non-working-tree cleanup.
+- Cold starts never evaluate Nix. Guest Profile and identity changes arrive through trusted host deployment; repository environment changes are built inside the guest.
 - On macOS, the launcher transparently starts the outer Lima VM if needed and proxies commands into it.
 
-Starting and stopping host system units requires authorization, but project code must not run as root. On NixOS, an explicit Seter operator group receives passwordless sudo permission only for exact hidden start/stop commands generated for registered workspaces. The privileged half reloads the host-owned registry and constructs the fixed systemd unit name; it does not accept arbitrary units or commands. Read-only status and SSH shell operations remain unprivileged.
+Starting and stopping host system units requires authorization, but project code must not run as host root. On NixOS, an explicit Seter operator group receives passwordless sudo permission only for exact hidden lifecycle and workspace-scoped observation commands generated for registered workspaces. The privileged half reloads host-owned state and constructs fixed unit names itself; it does not accept arbitrary units or commands. Runner installation belongs to trusted NixOS deployment rather than a privileged CLI operation.
 
 ### Filesystem
 
 - **Root:** ephemeral tmpfs. Every boot is clean; VM state cannot rot.
-- **`/nix/store`:** an overlay whose lower layer is the host store shared read-only via virtiofs and whose persistent upper layer is a bounded workspace-private ext4 image. Registered runner closures are shared without duplication; other paths are built or substituted by the guest Nix daemon into its private layer, keeping project-controlled derivations and fetch traffic inside the VM boundary. The same image retains `/nix/var/nix`, so registrations survive the tmpfs-root reboot. Host runner-history roots and matching guest closure roots keep prior generations available for upgrades and rollbacks. Guest store GC is disabled because stock Nix scans the merged lower namespace and would persist whiteouts for unrelated host paths; reclaiming private capacity currently replaces the image as a dependency cache.
-- **`/home` (or `/project`):** one persistent block-device-backed volume per project. Holds the working tree, direnv/nix-direnv cache, language/package caches, and Docker's data-root. This is deliberately a **VM-native disk image**, not a host share: overlayfs and build churn on virtiofs is slow and semantically fragile.
-- **No host home mounts, no broad host shares.** Working trees are cloned into the VM from the git remote. File movement between host and guest is deliberate (scp/git), not ambient.
+- **`/nix/store`:** an overlay whose lower layer is a workspace-specific, read-only Store View of its deployed and retained Runner closures and whose persistent upper layer is a bounded workspace-private ext4 image. Runner closures are shared without duplication; unrelated host-store paths are absent, while project paths are built or substituted by the guest Nix daemon into its private layer, keeping project-controlled derivations and fetch traffic inside the VM boundary. See [Host-store visibility](./docs/store-visibility.md). The same image retains `/nix/var/nix`, so registrations survive the tmpfs-root reboot. Host runner-history roots and matching guest closure roots keep prior generations available for upgrades and rollbacks. Guest store GC is disabled because stock Nix scans the merged lower namespace and would persist whiteouts for unrelated host paths; reclaiming private capacity currently replaces the image as a dependency cache.
+- **Project Volume:** a persistent block-device-backed volume containing the single approved checkout under `/project/<repository>`. Reset and garbage collection never remove it.
+- **Home Volume:** a separate persistent workspace-private user home containing shell history, editor state, direnv approvals, configuration, and non-Nix caches. It is resettable and never shares the host home.
+- **Private Nix-store volume:** the persistent writable store overlay and guest Nix database described above. Replacing it is the supported reclamation mechanism.
+- `seter reset` can replace Home, private Nix-store state, or both while the workspace is stopped; even `--all-state` excludes the Project Volume. See [Workspace storage lifecycle](./docs/storage-lifecycle.md).
+- **No host home mounts, no broad host shares.** Working trees are cloned into the VM from the approved HTTPS remote. File movement between host and guest is deliberate (scp/git), not ambient.
 - **GC safety:** current and historical per-project runner roots prevent host garbage collection from removing lower-store closures still registered by the persistent guest Nix database; matching guest roots retain prior boot closures, while guest store GC is disabled to avoid whiteouts elsewhere in the merged lower namespace.
 
 ### Networking
 
 - Each host runs a bridge (e.g. `10.100.0.0/24`); every project has a **static IP and hostname from the registry**, rendered into host DNS (`<name>.vm`) so "reachable from host" means "reachable by name."
 - **Inbound (host → guest):** direct to the VM IP — no per-port forwarding. Services, dev web servers, and Docker-published ports inside a VM are simply addressable.
-- **Outbound (guest → world):** default-deny in nftables on the bridge. Allowed: exact-name IPv4 DNS through a host policy resolver, and traffic redirected (transparent DNAT of TCP ports 80/443) into mitmproxy. Explicit `HTTP(S)_PROXY` env vars are additionally set in guests as a convenience; **transparent redirection is the enforcement**, so software ignoring proxy variables is still caught. Other UDP, including QUIC, remains blocked.
+- **Outbound (guest → world):** default-deny in nftables on the bridge. Allowed: policy-matched IPv4 DNS through a host resolver, and traffic redirected (transparent DNAT of TCP ports 80/443) into mitmproxy. Exact names and explicit leading wildcards are supported for intercepted HTTP and TLS passthrough; a wildcard matches one subordinate label only, excludes its apex, and is rejected at public or shared-hosting suffix boundaries. Explicit `HTTP(S)_PROXY` env vars are additionally set in guests as a convenience; **transparent redirection is the enforcement**, so software ignoring proxy variables is still caught. Other UDP, including QUIC, remains blocked.
 - **Non-HTTP egress** (ssh to the git remote, databases): explicit per-destination nftables allow rules from the registry. Nothing else passes.
 
 ### Tailscale
@@ -84,7 +90,7 @@ Starting and stopping host system units requires authorization, but project code
 - Exact credential values reflected in response headers or decoded bodies are changed back to placeholders. This prevents straightforward reflection, not deliberate disclosure through transformed values or credential-derived information; bound services and least-privilege credential scopes remain part of the security boundary.
 - Denials return a synthesized 403 with a human-readable reason — failures in guests are self-explanatory, not mysterious timeouts.
 - **SNI passthrough** (no decryption, still allowlisted) for cert-pinned tooling and bulk endpoints such as container registries and `cache.nixos.org`. The initial mitmproxy implementation avoids TLS and HTTP processing but still relays encrypted bytes in userspace; a dedicated stream engine remains an optimization if that path becomes a bottleneck.
-- Every request is logged with project, method, host, and path.
+- Every request is logged with workspace, method, host, and path. `seter audit` will summarize workspace-scoped observations, while `seter policy review` will turn only explicitly approved observations into edits to a consumer-owned declarative Policy File; deployment remains a separate trusted NixOS operation. See [Policy observation and review](./docs/policy-workflow.md).
 - The proxy CA certificate is generated once per site, kept host-side, and baked into guest images declaratively (`security.pki.certificates`); tools with private trust stores are fixed case by case or routed via passthrough.
 - The `policy.json` schema is the **stable contract**: the enforcement engine (mitmproxy today) can be replaced later without touching flakes, images, or nftables.
 
@@ -94,7 +100,7 @@ Starting and stopping host system units requires authorization, but project code
 
 ### direnv
 
-- **Inside the guest:** standard `use flake`. Persistent `/home` keeps allow-state and the nix-direnv cache; activation is instant because the devShell was pre-built into the shared store.
+- **Inside the guest:** standard `use flake`. Persistent workspace state keeps direnv approval and nix-direnv caches. The first activation builds or substitutes project dependencies into the workspace-private store; later activation reuses that persistent cache.
 - **On the host:** the same `.envrc` detects the side of the boundary (marker file `/etc/vm-guest` baked into images) and, on the host, exports control-plane variables instead: `VM_IP`, `DOCKER_HOST=ssh://dev@<vm-ip>` (host Docker CLI drives the daemon **inside** the VM), service URLs. It prints VM status but **never** starts VMs as a side effect of `cd`.
 
 ### Multi-repo workspaces

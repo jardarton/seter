@@ -1,0 +1,3 @@
+# Single-label host wildcards
+
+Policy Grants may use a leading wildcard Host Pattern when exact-host review would make dynamic service ecosystems impractical, but `*.example.com` matches only one label and excludes both `example.com` and deeper descendants. Wildcards are rejected at public or shared-hosting suffix boundaries, are never inferred automatically from observations, and can never authorize credential injection; they apply to intercepted HTTP and TLS passthrough, while direct-TCP grants remain exact-host only. This accepts bounded egress breadth without turning one convenient grant into recursive, credential-bearing, or dynamically firewall-populating authority.

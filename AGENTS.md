@@ -1,5 +1,10 @@
 # Agent instructions
 
+## Project context
+
+`CONTEXT.md` contains project domain terminology,
+constraints, and accumulated design context.
+
 ## Working on the Rust CLI
 
 The crate's unit tests are wired into the Nix build (`doCheck = 1` in
