@@ -24,18 +24,16 @@ Interactive development must be able to realize paths after a flake or lock-file
 
 Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The registered closure of every runner the workspace has booted remains shared without duplication. Other paths that merely happen to exist in the host store are not automatically valid in the guest's separate Nix database and may be rebuilt or substituted into the private layer.
 
-The host store is still part of the trusted boot/runtime supply chain. Seter retains a host GC root for every installed runner generation under `/nix/var/nix/gcroots/per-project/.runner-history/<workspace>/`. On each boot the guest creates a matching permanent root for its system closure under `/nix/var/nix/gcroots/seter-lower-closures/`. Together these roots keep previously registered runner closures present across upgrades and rollbacks. The roots consume negligible private-image space, while their referenced closures remain deduplicated in the host store.
+The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their Runner closures for rollback. On each boot the guest creates a matching permanent root for its system closure under `/nix/var/nix/gcroots/seter-lower-closures/`.
 
 ## Configuration
 
-`mkWorkspaceDefinition` owns the image identity and initial capacity so the host registry and generated guest module cannot drift:
+The trusted registry owns image identity and initial capacity so the host and Runner cannot drift:
 
 ```nix
-project = seter.lib.mkWorkspaceDefinition {
-  name = "project";
-  # ...network and runner identity...
-  nixStoreImage = "project-nix-store.img"; # default
-  nixStoreSizeMiB = 16384;                 # default
+seter.host.workspaces.project.storage.nixStore = {
+  image = "project-nix-store.img"; # default
+  sizeMiB = 16384;                 # default
 };
 ```
 
@@ -49,7 +47,7 @@ The generated module requires:
 - store optimisation disabled, as required by microvm.nix for overlay stores;
 - automatic and normal command-line guest store garbage collection disabled.
 
-The low-level guest options are `seter.guest.nixStore.image` and `seter.guest.nixStore.size`. Security-sensitive workspaces should use `mkWorkspaceDefinition` rather than configuring those independently.
+The low-level guest options are `seter.guest.nixStore.image` and `seter.guest.nixStore.size`; normal workspaces configure only the trusted host registry.
 
 `size` is the capacity used when microvm.nix first creates the sparse image. Changing it does not resize an existing filesystem. Stop the workspace and use an explicit, reviewed ext4 image-resize procedure before changing an existing deployment; Seter does not automate shrinking or expansion yet.
 
@@ -61,7 +59,7 @@ The image lives beside the project image under:
 /var/lib/seter/workspaces/<workspace>/
 ```
 
-It survives `seter down`, runner updates, and clean-root reboots. `seter update` changes the current immutable runner and adds its history root; it does not replace either persistent image.
+It survives `seter down`, trusted host deployments, and clean-root reboots. Deploying a new Runner does not replace either persistent image.
 
 Normal guest Nix commands work against the overlay:
 
@@ -76,7 +74,7 @@ Seter sets Nix's automatic free-space collection thresholds to zero, disables th
 
 To reclaim a full private store safely, stop the workspace and replace the whole Nix image. Seter does not yet compact only the private upper layer because stock Nix GC cannot distinguish it from the shared lower namespace.
 
-Runner-history roots must remain for as long as the private Nix image is retained. Removing one independently can make a lower path disappear beneath a still-valid guest registration. A future `seter gc` implementation must therefore remove history only together with resetting or inspecting the workspace's private Nix state; deleting arbitrary history roots by hand is unsafe.
+Runner-containing NixOS generations must remain available for as long as their closures are registered in the private Nix image. Removing an old system generation independently can make a lower path disappear beneath a still-valid guest registration. Safe retirement and reset handling remain roadmap work.
 
 If the private Nix image is lost or corrupted, stop the workspace, preserve the old image for diagnosis, and move it out of the workspace state directory. The next boot creates an empty image, reloads the current guest system closure registration, and leaves the separate project volume untouched. Development dependencies then need to be realized again.
 

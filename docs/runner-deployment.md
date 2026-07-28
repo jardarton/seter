@@ -1,6 +1,6 @@
 # Runner deployment
 
-**Status:** accepted product design for the default-profile milestone; not yet implemented. The current vertical slice builds project-owned runners through `seter update` and checks their generated identity manifests.
+**Status:** implemented for the trusted `default` Guest Profile. Workspace Bootstrap and later storage/identity phases remain incomplete.
 
 A Runner is trusted host infrastructure. It contains a workspace's selected Guest Profile and registered non-secret identity, but no project working tree or project development flake. Project code enters later through Workspace Bootstrap and builds inside the guest's private writable Nix store.
 

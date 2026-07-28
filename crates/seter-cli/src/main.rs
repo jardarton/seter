@@ -36,16 +36,12 @@ fn run() -> Result<i32> {
             println!("{}", registry.workspace(&workspace)?.network.address);
             Ok(0)
         }
-        Command::Update { workspace } => lifecycle::update(&workspace),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
         Command::Status { workspace } => lifecycle::status(workspace.as_deref()),
         Command::Shell { workspace } => lifecycle::shell(&workspace),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
         Command::ProxyCa => lifecycle::proxy_ca(),
-        Command::InstallRunner { workspace, runner } => {
-            lifecycle::install_runner(&workspace, &runner)
-        }
         Command::ReadHostKey { workspace } => lifecycle::read_host_key(&workspace),
         Command::StartWorkspace { workspace } => lifecycle::start_workspace(&workspace),
         Command::StopWorkspace { workspace } => lifecycle::stop_workspace(&workspace),
@@ -83,12 +79,10 @@ fn command_name(command: &Command) -> &'static str {
         Command::Status { .. } => "status",
         Command::List => "list",
         Command::Ip { .. } => "ip",
-        Command::Update { .. } => "update",
         Command::SshHostKey { .. } => "ssh-host-key",
         Command::ProxyCa => "proxy-ca",
         Command::Gc => "gc",
         Command::Completions { .. } => "completions",
-        Command::InstallRunner { .. } => "__install-runner",
         Command::ReadHostKey { .. } => "__read-host-key",
         Command::StartWorkspace { .. } => "__start",
         Command::StopWorkspace { .. } => "__stop",

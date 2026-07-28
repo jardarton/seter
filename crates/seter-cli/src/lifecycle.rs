@@ -7,7 +7,7 @@ use std::{
     os::{
         fd::AsRawFd,
         raw::c_int,
-        unix::fs::{symlink, OpenOptionsExt, PermissionsExt},
+        unix::fs::{OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -23,7 +23,6 @@ const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
 const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
 
 const STATE_ROOT: &str = "/var/lib/seter/workspaces";
-const GCROOT_ROOT: &str = "/nix/var/nix/gcroots/per-project";
 const LOCK_ROOT: &str = "/run/lock/seter";
 const PROXY_CA_FILE: &str = "/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem";
 const SSH_WAIT: Duration = Duration::from_secs(30);
@@ -41,7 +40,7 @@ enum State {
 impl State {
     fn label(self) -> &'static str {
         match self {
-            Self::NotBuilt => "not-built",
+            Self::NotBuilt => "not-deployed",
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -56,41 +55,6 @@ struct UnitState {
     active: String,
     sub: String,
     main_pid: u32,
-}
-
-pub fn update(name: &str) -> Result<i32> {
-    let registry = Registry::load_default()?;
-    let workspace = registry.workspace(name)?;
-
-    ensure_update_allowed(name)?;
-    let runner = build_runner(&workspace.runner.installable)?;
-    validate_runner(&runner, name, workspace.runner.identity.as_ref())?;
-
-    if uses_test_state() || is_root()? {
-        install_runner_path(name, &runner)?;
-    } else {
-        run_elevated(&[
-            OsString::from("__install-runner"),
-            OsString::from(name),
-            runner.as_os_str().to_owned(),
-        ])?;
-    }
-
-    println!("Updated {name} to {}", runner.display());
-    Ok(0)
-}
-
-pub fn install_runner(name: &str, runner: &Path) -> Result<i32> {
-    enter_privileged_mode()?;
-    let registry = Registry::load_default()?;
-    let workspace = registry.workspace(name)?;
-    ensure_update_allowed(name)?;
-    let runner = runner
-        .canonicalize()
-        .with_context(|| format!("failed to resolve runner {}", runner.display()))?;
-    validate_runner(&runner, name, workspace.runner.identity.as_ref())?;
-    install_runner_path(name, &runner)?;
-    Ok(0)
 }
 
 pub fn up(name: &str) -> Result<i32> {
@@ -110,7 +74,7 @@ pub fn start_workspace(name: &str) -> Result<i32> {
     enter_privileged_mode()?;
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
-    let state = state_for(name)?;
+    let state = state_for(name, workspace)?;
 
     match state {
         State::Running | State::Starting => {
@@ -127,23 +91,18 @@ pub fn start_workspace(name: &str) -> Result<i32> {
             run_systemctl(["reset-failed", &vm_unit(name)])?;
         }
         State::NotBuilt => {
-            bail!("workspace {name:?} has no installed runner; run `seter update {name}` first")
+            bail!("workspace {name:?} has no host-deployed Runner; deploy the NixOS host configuration first")
         }
         State::Stopped => {}
     }
 
-    // Host configuration may have changed since the last update. Recheck the
-    // installed immutable runner before every cold start so stale identity
-    // cannot silently turn into a disconnected or misaddressed guest.
-    let installed = state_root()
-        .join(name)
-        .join("current")
-        .canonicalize()
-        .with_context(|| format!("workspace {name:?} has no valid installed runner"))?;
-    validate_runner(&installed, name, workspace.runner.identity.as_ref())?;
+    // The Runner and registry are projections of one trusted NixOS
+    // generation. Validate the immutable manifest before every cold start;
+    // this performs no Nix evaluation or build.
+    validate_runner(&workspace.runner.path, name, &workspace.runner.identity)?;
 
     run_systemctl(["start", &vm_unit(name)])?;
-    let state = state_for(name)?;
+    let state = state_for(name, workspace)?;
     ensure!(
         matches!(state, State::Running | State::Starting),
         "workspace {name:?} did not start (state: {})",
@@ -166,9 +125,12 @@ pub fn down(name: &str) -> Result<i32> {
 pub fn stop_workspace(name: &str) -> Result<i32> {
     enter_privileged_mode()?;
     let registry = Registry::load_default()?;
-    registry.workspace(name)?;
+    let workspace = registry.workspace(name)?;
 
-    if matches!(state_for(name)?, State::NotBuilt | State::Stopped) {
+    if matches!(
+        state_for(name, workspace)?,
+        State::NotBuilt | State::Stopped
+    ) {
         // Stopping the runtime target also cleans up plumbing left behind by a
         // previous failed launch.
         run_systemctl(["stop", &runtime_unit(name)])?;
@@ -178,7 +140,7 @@ pub fn stop_workspace(name: &str) -> Result<i32> {
 
     run_systemctl(["stop", &vm_unit(name)])?;
     run_systemctl(["stop", &runtime_unit(name)])?;
-    let state = state_for(name)?;
+    let state = state_for(name, workspace)?;
     ensure!(
         matches!(state, State::Stopped | State::NotBuilt),
         "workspace {name:?} did not stop (state: {})",
@@ -193,14 +155,14 @@ pub fn status(name: Option<&str>) -> Result<i32> {
 
     if let Some(name) = name {
         let workspace = registry.workspace(name)?;
-        let state = state_for(name)?;
+        let state = state_for(name, workspace)?;
         print_status(name, workspace, state, true)?;
         return Ok(if state == State::Running { 0 } else { 3 });
     }
 
     println!("{:<20} {:<11} {:<15} PID", "NAME", "STATE", "IP");
     for (name, workspace) in &registry.workspaces {
-        print_status(name, workspace, state_for(name)?, false)?;
+        print_status(name, workspace, state_for(name, workspace)?, false)?;
     }
     Ok(0)
 }
@@ -208,7 +170,7 @@ pub fn status(name: Option<&str>) -> Result<i32> {
 pub fn shell(name: &str) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
-    let state = state_for(name)?;
+    let state = state_for(name, workspace)?;
     ensure!(
         matches!(state, State::Running | State::Starting),
         "workspace {name:?} is {}; run `seter up {name}` first",
@@ -257,10 +219,10 @@ pub fn shell(name: &str) -> Result<i32> {
 
 pub fn ssh_host_key(name: &str) -> Result<i32> {
     let registry = Registry::load_default()?;
-    registry.workspace(name)?;
+    let workspace = registry.workspace(name)?;
     ensure!(
         !matches!(
-            state_for(name)?,
+            state_for(name, workspace)?,
             State::Running | State::Starting | State::Stopping
         ),
         "workspace {name:?} must be stopped before reading its project image"
@@ -326,13 +288,13 @@ pub fn read_host_key(name: &str) -> Result<i32> {
     let _lifecycle_lock = LifecycleLock::acquire(&lifecycle_lock_path(name))?;
     ensure!(
         !matches!(
-            state_for(name)?,
+            state_for(name, workspace)?,
             State::Running | State::Starting | State::Stopping
         ),
         "workspace {name:?} must be stopped before reading its project image"
     );
 
-    let image = state_dir.join(&workspace.storage.image);
+    let image = state_dir.join(&workspace.storage.project.image);
     ensure!(
         image.is_file(),
         "project image {} does not exist; boot the workspace once, then shut it down",
@@ -366,38 +328,10 @@ pub fn read_host_key(name: &str) -> Result<i32> {
     Ok(0)
 }
 
-fn build_runner(installable: &str) -> Result<PathBuf> {
-    let output = command("SETER_NIX", "nix")
-        .args([
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "build",
-            "--no-link",
-            "--print-out-paths",
-            "--",
-        ])
-        .arg(installable)
-        .output()
-        .with_context(|| format!("failed to build runner installable {installable:?}"))?;
-    ensure_success("nix build", &output)?;
-
-    let stdout = String::from_utf8(output.stdout).context("nix build output was not UTF-8")?;
-    let paths: Vec<_> = stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    ensure!(
-        paths.len() == 1,
-        "runner installable produced {} outputs; expected exactly one",
-        paths.len()
-    );
-    Ok(PathBuf::from(paths[0]))
-}
-
 fn validate_runner(
     runner: &Path,
     workspace_name: &str,
-    expected_identity: Option<&RunnerIdentity>,
+    expected_identity: &RunnerIdentity,
 ) -> Result<()> {
     ensure!(runner.is_absolute(), "runner path must be absolute");
     if env::var_os("SETER_ALLOW_NON_STORE_RUNNER").is_none() {
@@ -417,102 +351,40 @@ fn validate_runner(
         );
     }
 
-    if let Some(expected) = expected_identity {
-        let identity_path = runner.join(RUNNER_IDENTITY_FILE);
-        let metadata = fs::symlink_metadata(&identity_path).with_context(|| {
-            format!(
-                "runner for workspace {workspace_name:?} is missing required identity manifest {}",
-                identity_path.display()
-            )
-        })?;
-        ensure!(
-            metadata.file_type().is_file(),
-            "runner identity manifest {} must be a regular file",
+    let identity_path = runner.join(RUNNER_IDENTITY_FILE);
+    let metadata = fs::symlink_metadata(&identity_path).with_context(|| {
+        format!(
+            "runner for workspace {workspace_name:?} is missing required identity manifest {}",
             identity_path.display()
-        );
-        ensure!(
-            metadata.len() <= MAX_RUNNER_IDENTITY_BYTES,
-            "runner identity manifest {} exceeds {} bytes",
-            identity_path.display(),
-            MAX_RUNNER_IDENTITY_BYTES
-        );
-        let identity_file = fs::File::open(&identity_path).with_context(|| {
-            format!(
-                "failed to open runner identity manifest {}",
-                identity_path.display()
-            )
-        })?;
-        let actual: RunnerIdentity = serde_json::from_reader(identity_file).with_context(|| {
-            format!(
-                "runner identity manifest {} is invalid",
-                identity_path.display()
-            )
-        })?;
-        ensure!(
-            &actual == expected,
-            "runner identity does not match workspace {workspace_name:?}\nexpected: {expected:#?}\nfound: {actual:#?}"
-        );
-    }
-    Ok(())
-}
-
-fn install_runner_path(name: &str, runner: &Path) -> Result<()> {
-    let state_dir = state_root().join(name);
-    let gcroot_dir = gcroot_root();
-    let history_dir = gcroot_dir.join(".runner-history").join(name);
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("failed to create {}", state_dir.display()))?;
-    fs::create_dir_all(&gcroot_dir)
-        .with_context(|| format!("failed to create {}", gcroot_dir.display()))?;
-    fs::create_dir_all(&history_dir)
-        .with_context(|| format!("failed to create {}", history_dir.display()))?;
-    let _lifecycle_lock = LifecycleLock::acquire(&lifecycle_lock_path(name))?;
-
-    // Persistent guest Nix databases retain registrations for every system
-    // closure they have booted. Keep those immutable runner generations (and
-    // therefore their read-only lower-store closures) available on the host.
-    // Matching guest roots retain booted closure registrations, while normal
-    // guest GC is disabled because it cannot distinguish unrelated lower
-    // paths. History cleanup must be coordinated with resetting the
-    // workspace's private Nix image.
-    let runner_name = runner
-        .file_name()
-        .context("runner path has no store-path name")?;
-    atomic_symlink(runner, &history_dir.join(runner_name)).with_context(|| {
-        format!(
-            "failed to retain runner {} in workspace {:?} history",
-            runner.display(),
-            name
         )
     })?;
-
-    // Keep both runners rooted throughout the switch. If publishing `current`
-    // fails, the old permanent root remains intact. If promoting the pending
-    // root fails, leave it behind so the newly published runner stays rooted.
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pending_gcroot = gcroot_dir.join(format!(".{name}.pending-{}-{nonce}", std::process::id()));
-    symlink(runner, &pending_gcroot).with_context(|| {
+    ensure!(
+        metadata.file_type().is_file(),
+        "runner identity manifest {} must be a regular file",
+        identity_path.display()
+    );
+    ensure!(
+        metadata.len() <= MAX_RUNNER_IDENTITY_BYTES,
+        "runner identity manifest {} exceeds {} bytes",
+        identity_path.display(),
+        MAX_RUNNER_IDENTITY_BYTES
+    );
+    let identity_file = fs::File::open(&identity_path).with_context(|| {
         format!(
-            "failed to create pending GC root {} -> {}",
-            pending_gcroot.display(),
-            runner.display()
+            "failed to open runner identity manifest {}",
+            identity_path.display()
         )
     })?;
-
-    if let Err(error) = atomic_symlink(runner, &state_dir.join("current")) {
-        let _ = fs::remove_file(&pending_gcroot);
-        return Err(error);
-    }
-
-    fs::rename(&pending_gcroot, gcroot_dir.join(name)).with_context(|| {
+    let actual: RunnerIdentity = serde_json::from_reader(identity_file).with_context(|| {
         format!(
-            "failed to promote pending GC root {}; it was retained to protect the installed runner",
-            pending_gcroot.display()
+            "runner identity manifest {} is invalid",
+            identity_path.display()
         )
     })?;
+    ensure!(
+        &actual == expected_identity,
+        "runner identity does not match workspace {workspace_name:?}\nexpected: {expected_identity:#?}\nfound: {actual:#?}"
+    );
     Ok(())
 }
 
@@ -564,49 +436,12 @@ unsafe extern "C" {
     fn flock(fd: c_int, operation: c_int) -> c_int;
 }
 
-fn atomic_symlink(target: &Path, destination: &Path) -> Result<()> {
-    let parent = destination
-        .parent()
-        .context("symlink destination has no parent")?;
-    let file_name = destination
-        .file_name()
-        .context("symlink destination has no file name")?
-        .to_string_lossy();
-    let temporary = parent.join(format!(".{file_name}.new-{}", std::process::id()));
-    let _ = fs::remove_file(&temporary);
-    symlink(target, &temporary).with_context(|| {
-        format!(
-            "failed to create temporary symlink {} -> {}",
-            temporary.display(),
-            target.display()
-        )
-    })?;
-    fs::rename(&temporary, destination).with_context(|| {
-        format!(
-            "failed to atomically install symlink {} -> {}",
-            destination.display(),
-            target.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn ensure_update_allowed(name: &str) -> Result<()> {
-    let state = state_for(name)?;
-    ensure!(
-        !matches!(state, State::Running | State::Starting | State::Stopping),
-        "workspace {name:?} is {}; stop it before updating",
-        state.label()
-    );
-    Ok(())
-}
-
-fn state_for(name: &str) -> Result<State> {
+fn state_for(name: &str, workspace: &Workspace) -> Result<State> {
     let unit = query_unit(name)?;
     Ok(classify_state(
         &unit.active,
         &unit.sub,
-        gcroot_root().join(name).exists(),
+        workspace.runner.path.exists(),
     ))
 }
 
@@ -688,7 +523,7 @@ fn wait_for_ssh(name: &str, workspace: &Workspace) -> Result<()> {
         if TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok() {
             return Ok(());
         }
-        let state = state_for(name)?;
+        let state = state_for(name, workspace)?;
         ensure!(
             matches!(state, State::Running | State::Starting),
             "workspace {name:?} stopped while waiting for SSH"
@@ -786,12 +621,11 @@ fn enter_privileged_mode() -> Result<()> {
     for variable in [
         "SETER_REGISTRY",
         "SETER_STATE_DIR",
-        "SETER_GCROOT_DIR",
+        "SETER_TEST_MODE",
         "SETER_ALLOW_NON_STORE_RUNNER",
         "SETER_SYSTEMCTL",
         "SETER_DEBUGFS",
         "SETER_SSH_KEYGEN",
-        "SETER_NIX",
         "SETER_SSH",
         "SETER_SUDO",
         "SETER_PRIVILEGED_HELPER",
@@ -819,12 +653,6 @@ fn state_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(STATE_ROOT))
 }
 
-fn gcroot_root() -> PathBuf {
-    env::var_os("SETER_GCROOT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(GCROOT_ROOT))
-}
-
 fn lifecycle_lock_path(name: &str) -> PathBuf {
     if uses_test_state() {
         state_root().join(name).join("lifecycle.lock")
@@ -833,8 +661,12 @@ fn lifecycle_lock_path(name: &str) -> PathBuf {
     }
 }
 
+// Unprivileged tests run the privileged halves in-process against a private
+// state directory. Both variables are required so that setting only a state
+// directory can never silently skip real privilege separation, and both are
+// discarded before any genuinely privileged work.
 fn uses_test_state() -> bool {
-    env::var_os("SETER_STATE_DIR").is_some() && env::var_os("SETER_GCROOT_DIR").is_some()
+    env::var_os("SETER_STATE_DIR").is_some() && env::var_os("SETER_TEST_MODE").is_some()
 }
 
 struct TemporaryFile(PathBuf);

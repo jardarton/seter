@@ -1,6 +1,6 @@
 # Configuration ownership
 
-**Status:** accepted design for the first usable milestone. That milestone's generic `default` Guest Profile path is not yet implemented; the current vertical slice expects a project-owned runner that imports Seter's generated guest identity. The future specialized-workload model remains unresolved.
+**Status:** the trusted `default` Guest Profile and host-deployed Runner path are implemented. Workspace Bootstrap is not yet implemented, and the future specialized-workload model remains unresolved.
 
 Seter separates configuration by authority. A repository's development environment is not the same thing as the host policy that contains it or the guest operating system that runs it.
 

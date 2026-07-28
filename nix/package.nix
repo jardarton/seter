@@ -5,7 +5,6 @@
   makeWrapper,
   coreutils,
   e2fsprogs,
-  nix,
   openssl,
   openssh,
   systemd,
@@ -47,7 +46,6 @@ rustPlatform.buildRustPackage {
         lib.makeBinPath [
           coreutils
           e2fsprogs
-          nix
           openssl
           openssh
           systemd
