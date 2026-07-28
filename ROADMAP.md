@@ -23,7 +23,7 @@ The existing implementation provides substantial machinery worth preserving and 
 - strict SSH client behavior;
 - Nix evaluation checks, adversarial network tests, and nested-KVM lifecycle coverage.
 
-This proves an early security vertical slice, not a usable project onboarding workflow. No real project has yet been initialized or used by the intended user. The current whole-host-store VirtioFS export is also a known confidentiality gap.
+This proves an early security vertical slice, not a usable project onboarding workflow. No real project has yet been initialized or used by the intended user.
 
 ## First usable milestone
 
@@ -48,9 +48,11 @@ Evidence: evaluation tests prove registry invariants, host/Runner identity align
 
 ### 2. Close foundational storage and identity gaps
 
+**Status: implemented.** Host-created Workspace SSH Identities, closure-filtered Runner Store Views, and all three persistent volumes are covered by evaluation and adversarial KVM checks.
+
 - Generate each Workspace SSH Identity in root-owned host state before first boot.
 - Supply that identity to the guest and use its public half for strict client verification.
-- Replace the whole-host-store export with a fail-closed, workspace-specific Store View containing only deployed and retained Runner closures.
+- Replace the whole-host-store export with fail-closed, closure-specific Store Views carried by deployed and retained Runners, reconciling the persistent guest database whenever the selected view changes.
 - Add a persistent Home Volume while retaining separate Project and private Nix-store volumes.
 - Ensure a workspace cannot enumerate a sentinel path placed elsewhere in the host Nix store.
 

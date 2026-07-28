@@ -72,16 +72,16 @@ The deployed Runner is available at `/etc/seter/runners/<workspace>` and is an e
 
 ## Host runtime plumbing
 
-When `seter.host.enable` is set, the host creates the configured bridge at boot and assigns `seter.host.gateway` to it (`10.100.0.1` by default). Workspace TAP interfaces and VirtioFS daemons remain off while idle. Starting `seter-runtime-<workspace>.target` creates the registered TAP, attaches it to the bridge, and starts a host-owned `virtiofsd` that exposes only `/nix/store` read-only:
+When `seter.host.enable` is set, the host creates the configured bridge at boot and assigns `seter.host.gateway` to it (`10.100.0.1` by default). Workspace TAP interfaces and the Workspace SSH Identity service remain off while idle. Starting `seter-runtime-<workspace>.target` creates the registered TAP, attaches it to the bridge, stages the root-owned host-created SSH identity for the unprivileged workspace runtime account, and supplies it over a dedicated read-only VirtioFS mount:
 
 ```console
 sudo systemctl start seter-runtime-project.target
 sudo systemctl stop seter-runtime-project.target
 ```
 
-The VirtioFS socket is `/run/seter/<workspace>/virtiofs-ro-store.sock`. Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
+Each workspace receives a separate host system account and private state directory under `/var/lib/seter/workspaces`. The runtime units never execute helpers from a workspace runner as root.
 
-Inside the guest, the read-only host store is the lower layer of an overlay mounted at `/nix/store`. **The current vertical slice exposes the entire host store read-only, including unrelated non-secret source and configuration artifacts; this is a known isolation gap, and the accepted design replaces it with a workspace-specific [closure-filtered Store View](./docs/store-visibility.md).** A dedicated ext4 image, `<workspace>-nix-store.img` by default, is mounted at `/nix` and retains both the overlay's upper/work directories and `/nix/var/nix`. Consequently `nix build`, `nix develop`, and nix-direnv can realize missing paths without writing to the host store, and their database registrations survive clean-root reboots. Every deployed Runner is an explicit dependency of its NixOS system generation, so retained generations keep their Runner closures available for rollback, and on each boot the guest creates a matching root for its own system closure. Only those registered closures are guaranteed to deduplicate; unrelated paths merely present in the host store may be rebuilt privately. Guest store GC is disabled because stock Nix would scan the merged lower store and create persistent whiteouts; reclaiming space currently means replacing the bounded private image. Guest builds remain sandboxed and their fetches remain inside the workspace network boundary. Configure the initial capacity with `seter.host.workspaces.<name>.storage.nixStore.sizeMiB`; existing images are not resized automatically. See [Private writable Nix stores](./docs/nix-store.md).
+Inside the guest, the Runner's closure-filtered, read-only EROFS [Store View](./docs/store-visibility.md) is the lower layer of an overlay mounted at `/nix/store`; the host store itself is never exported. A dedicated ext4 image, `<workspace>-nix-store.img` by default, retains the private upper layer and `/nix/var/nix`. Consequently `nix build`, `nix develop`, and nix-direnv can realize missing paths without writing to the host store, while unrelated host-store paths are not enumerable. Guest store GC is disabled because it could create persistent whiteouts over required lower paths; reclaiming space currently means replacing the bounded private image. See [Private writable Nix stores](./docs/nix-store.md).
 
 These units provide VM plumbing only. They do not start the VM. Separate host-owned DNS, proxy, direct-TCP resolver, and nftables services keep every workspace fail-closed while enabling only declared application egress.
 
@@ -189,7 +189,7 @@ Other secret managers must arrange the equivalent restart. See [Destination-boun
 
 ## VM lifecycle
 
-The host declares an on-demand `seter-vm-<workspace>.service`. The CLI controls that fixed unit rather than executing a VMM itself. Starting it brings up `seter-runtime-<workspace>.target` and launches `microvm-run` from the Runner embedded in the active NixOS generation. Stopping it uses the matching immutable Runner's shutdown helper, with a systemd timeout and forced termination as a fallback, then removes the TAP and VirtioFS socket. Persistent volumes are retained.
+The host declares an on-demand `seter-vm-<workspace>.service`. The CLI controls that fixed unit rather than executing a VMM itself. Starting it brings up `seter-runtime-<workspace>.target` and launches `microvm-run` from the Runner embedded in the active NixOS generation. Stopping it uses the matching immutable Runner's shutdown helper, with a systemd timeout and forced termination as a fallback, then removes the TAP and identity socket. Project, Home, and private Nix-store volumes are retained.
 
 `seter status [workspace]` reports `not-deployed`, `stopped`, `starting`, `running`, `stopping`, or `failed`. A stopped single-workspace status exits with code 3 for scripting.
 
@@ -197,17 +197,15 @@ Lifecycle control is privileged through systemd. Members of `seter.host.operator
 
 Runner deployment is not a CLI privilege: it occurs only through trusted NixOS deployment. Runner code executes as the workspace account, never as host root. See [Lifecycle authorization](./docs/lifecycle-authorization.md) for the trust boundary and implementation rules.
 
-## SSH host-key enrollment
+## Workspace SSH Identity
 
-SSH never silently trusts a network-provided key. After the first boot has generated the guest identity, stop the workspace and read its public key directly from the host-owned ext4 project image:
+SSH never silently trusts a network-provided key. Trusted host activation creates a root-owned identity before the first boot and publishes only its public half to members of the operator group:
 
 ```console
-seter up project
-seter down project
 seter ssh-host-key project
 ```
 
-Review the printed fingerprint, copy the public key into the workspace registry's `knownHostKey`, rebuild the host configuration, and then use `seter shell project`. Shell connections use the registered IP and user, strict host-key checking, and no SSH agent or X11 forwarding. Configure the developer's public login key in the registry at `ssh.authorizedKeys`.
+`seter shell project` reads that host-created public key and uses strict host-key checking automatically, with no SSH agent or X11 forwarding. Configure the developer's public login key in the registry at `ssh.authorizedKeys`.
 
 ## Development
 

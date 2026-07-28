@@ -13,6 +13,8 @@ let
   sshUser = workspace.ssh.user;
   projectImage = workspace.storage.project.image;
   projectSizeMiB = workspace.storage.project.sizeMiB;
+  homeImage = workspace.storage.home.image;
+  homeSizeMiB = workspace.storage.home.sizeMiB;
   nixStoreImage = workspace.storage.nixStore.image;
   nixStoreSizeMiB = workspace.storage.nixStore.sizeMiB;
 
@@ -64,7 +66,13 @@ in
         inherit tap gateway prefixLength;
         proxy = proxyUrl;
         image = projectImage;
-        inherit projectSizeMiB nixStoreImage nixStoreSizeMiB;
+        inherit
+          projectSizeMiB
+          homeImage
+          homeSizeMiB
+          nixStoreImage
+          nixStoreSizeMiB
+          ;
         sshUser = sshUser;
         memoryMiB = workspace.resources.memoryMiB;
       };
@@ -99,6 +107,14 @@ in
         && (volume.fsType or null) == "ext4"
         && (volume.size or null) == expected.nixStoreSizeMiB
       ) config.microvm.volumes;
+      effectiveHomeVolumePresent = lib.any (
+        volume:
+        (volume.image or null) == expected.homeImage
+        && (volume.mountPoint or null) == "/home/${expected.sshUser}"
+        && (volume.label or null) == "seter-home"
+        && (volume.fsType or null) == "ext4"
+        && (volume.size or null) == expected.homeSizeMiB
+      ) config.microvm.volumes;
       baseRunner = config.microvm.runner.${config.microvm.hypervisor};
       identityTree = pkgs.writeTextDir "share/seter/identity.json" identityJson;
       runner = pkgs.symlinkJoin {
@@ -130,6 +146,11 @@ in
           size = projectSizeMiB;
         };
 
+        homeVolume = {
+          image = homeImage;
+          size = homeSizeMiB;
+        };
+
         nixStore = {
           enable = true;
           image = nixStoreImage;
@@ -149,6 +170,7 @@ in
         };
 
         ssh.user = sshUser;
+        ssh.hostKeyPath = "/run/seter-identity/ssh_host_ed25519_key";
       }
       // lib.optionalAttrs (proxyCaCertificate != null) {
         inherit proxyCaCertificate;
@@ -238,6 +260,22 @@ in
           message = "generated Seter workspace identity requires its effective project volume definition";
         }
         {
+          assertion = config.seter.guest.homeVolume.enable;
+          message = "generated Seter workspace identity requires the persistent Home Volume";
+        }
+        {
+          assertion = config.seter.guest.homeVolume.image == expected.homeImage;
+          message = "generated Seter workspace identity forbids overriding the Home Volume image";
+        }
+        {
+          assertion = config.seter.guest.homeVolume.size == expected.homeSizeMiB;
+          message = "generated Seter workspace identity forbids overriding the Home Volume size";
+        }
+        {
+          assertion = effectiveHomeVolumePresent;
+          message = "generated Seter workspace identity requires its effective Home Volume definition";
+        }
+        {
           assertion = config.seter.guest.nixStore.enable;
           message = "generated Seter workspace identity requires a private writable Nix store";
         }
@@ -282,6 +320,10 @@ in
         {
           assertion = config.seter.guest.ssh.user == expected.sshUser;
           message = "generated Seter workspace identity forbids overriding the guest SSH user";
+        }
+        {
+          assertion = config.seter.guest.ssh.hostKeyPath == "/run/seter-identity/ssh_host_ed25519_key";
+          message = "generated Seter workspace identity requires the host-created Workspace SSH Identity";
         }
         {
           assertion = builtins.hasAttr expected.sshUser config.users.users;

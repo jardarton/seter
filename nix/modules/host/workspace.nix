@@ -61,19 +61,16 @@ in
         };
       };
 
-      # The Home Volume is registered and validated here, but nothing mounts it
-      # yet; guest home state remains ephemeral until the storage phase of the
-      # first usable milestone. See docs/storage-lifecycle.md.
       home = {
         image = mkOption {
           type = imageNameType;
           default = "${name}-home.img";
-          description = "Home Volume image name inside the workspace state directory. Not yet mounted.";
+          description = "Home Volume image name inside the workspace state directory.";
         };
         sizeMiB = mkOption {
           type = types.ints.positive;
           default = 4096;
-          description = "Initial Home Volume capacity in MiB. Not yet mounted.";
+          description = "Initial Home Volume capacity in MiB.";
         };
       };
 
@@ -146,11 +143,6 @@ in
         type = types.listOf types.str;
         default = [ ];
         description = "Trusted public keys authorized for workspace login.";
-      };
-      knownHostKey = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = "Pinned SSH host public key. Host-created identity will replace this enrollment field.";
       };
     };
 

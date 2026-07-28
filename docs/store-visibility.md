@@ -1,25 +1,18 @@
 # Host-store visibility
 
-**Status:** accepted product design; not yet implemented. The current vertical slice exports the host's entire `/nix/store` read-only and therefore does not satisfy this visibility boundary.
+**Status:** implemented for each deployed Runner; retained NixOS generations retain their corresponding immutable Runner Store Views for rollback.
 
-A workspace may share host Nix store paths needed to boot its Runner, but must not gain ambient read access to unrelated host-store contents. Read-only access prevents modification, not disclosure: host-store paths can contain source snapshots, configuration artifacts, and other projects even when real secrets are correctly kept out of the store.
+A workspace must not gain ambient read access to unrelated host-store contents. Read-only access prevents modification, not disclosure: host-store paths can contain source snapshots, configuration artifacts, and other projects even when real secrets are correctly kept out of the store.
 
 ## Store View
 
-Each workspace receives a Store View containing only the transitive Nix closure of:
+Each deployed Runner carries a read-only EROFS Store View containing exactly the transitive Nix closure needed to boot that Runner. microvm.nix constructs the image from trusted Nix closure metadata during Runner deployment. The host's `/nix/store` is never shared with the guest.
 
-- its currently deployed Runner; and
-- any explicitly retained Runner generations needed for that workspace's rollback and persistent guest-database contract.
+At boot, the selected Store View and the workspace-private writable overlay appear at the normal guest `/nix/store`. Project dependencies built or substituted later are written only to the private upper store. A workspace can read its boot closure but cannot enumerate another workspace's Runner or arbitrary paths merely present on the host.
 
-The host computes closure membership from trusted Nix store metadata. It constructs a workspace-specific read-only filesystem view and exports that view through the workspace's host-owned VirtioFS service. The VirtioFS root must not expose the host store root, paths outside the selected closure, or host symlink traversal outside the view.
+Older NixOS generations root their corresponding Runners and Store View images for rollback. Activating a generation selects its matching immutable view; an active VM continues using the view with which it booted. Because the private Nix database persists across that selection, boot reconciles registrations whenever the selected view changes so paths absent from the newly active view are not incorrectly treated as valid. Retirement and garbage collection may remove old generations only under the separate lifecycle rules.
 
-At boot, the selected lower closure and the workspace-private writable overlay appear at the normal guest `/nix/store`. Project dependencies built or substituted later are written only to the private upper store. A workspace can read its own current and retained boot closures, but cannot enumerate another workspace's unrelated Runner or arbitrary paths merely present on the host.
-
-## Lifecycle
-
-The Store View is constructed from host-deployed and rooted Runner generations. Runner deployment updates the closure set for the next cold boot; an active VM continues using the view associated with its booted Runner. Retirement and garbage collection may remove generations only after they are no longer required by active or retained workspace state.
-
-If Seter cannot construct a complete filtered view, workspace startup fails. It must never fall back to exporting the whole host store.
+If the filtered image cannot be built or opened, Runner deployment or workspace startup fails. Seter never falls back to exporting the whole host store.
 
 ## Security boundary
 

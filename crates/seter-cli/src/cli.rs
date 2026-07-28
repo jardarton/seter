@@ -32,7 +32,7 @@ pub enum Command {
     List,
     /// Print a workspace's IP address.
     Ip { workspace: String },
-    /// Print the guest SSH host key from its offline project image.
+    /// Print the host-created Workspace SSH Identity public key.
     SshHostKey { workspace: String },
     /// Print the host proxy's public CA certificate for guest enrollment.
     ProxyCa,
@@ -43,9 +43,6 @@ pub enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
-    /// Privileged half of `seter ssh-host-key`.
-    #[command(name = "__read-host-key", hide = true)]
-    ReadHostKey { workspace: String },
     /// Privileged half of `seter up`.
     #[command(name = "__start", hide = true)]
     StartWorkspace { workspace: String },
