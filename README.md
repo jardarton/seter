@@ -31,6 +31,7 @@ flake; it does not provide Seter or NixOS guest configuration.
 The current lifecycle is explicit:
 
 ```console
+seter init project
 seter up project
 seter status project
 seter shell project
@@ -73,6 +74,49 @@ Create the workspace directly in trusted NixOS configuration:
 ```
 
 The schema also owns optional repository credential binding, storage image names and capacities, host services, direct-TCP grants, HTTP policy, and destination-bound secrets. Repository URLs must use HTTPS; only the trusted `default` Guest Profile is currently accepted. Evaluation rejects invalid or duplicate network identity, reused volume names, undefined credential bindings, and host/Runner drift.
+
+## Workspace Bootstrap
+
+`seter init <workspace>` starts the host-deployed Runner, leaves it running,
+and clones the one approved HTTPS repository into
+`/project/<checkout-name>`. A configured branch is selected explicitly;
+otherwise Git uses the remote default branch. Bootstrap never evaluates or
+approves `.envrc`.
+
+Initialization is retryable. An existing complete checkout succeeds only when
+its `origin` exactly matches the registry. An empty directory or partial Git
+clone with the approved origin and no working data can be recovered. Seter
+rejects symlinks, unrelated content, mismatched remotes, and partial clones
+containing working data rather than cleaning, resetting, deleting, or
+overwriting them.
+
+For a private repository, bind a dedicated HTTP Authorization value:
+
+```nix
+seter.host.workspaces.project = {
+  repository = {
+    url = "https://git.example/owner/project.git";
+    credential = "repositoryToken";
+  };
+  secrets.repositoryToken = {
+    placeholder = "seter-placeholder-repository-0123456789abcdef";
+    sourceFile = "/run/secrets/project-repository-token";
+    hosts = [ "git.example" ];
+    headers = [ "authorization" ];
+  };
+};
+```
+
+The guest stores only the non-secret placeholder in repository-local Git
+configuration. The host proxy substitutes the runtime credential only for HTTPS
+requests to the exact repository host and path (including its Git smart-HTTP
+endpoints), and redacts exact reflections. Requests to sibling repository
+paths, traversal-like subpaths, or arbitrary endpoints below the repository
+path cannot use the binding. SSH Git is not supported.
+
+The credential source contains the complete Authorization field value, such
+as `Bearer <token>` or `Basic <base64-user-and-token>`, so the binding works
+with the authentication scheme required by the selected Git service.
 
 The deployed Runner is available at `/etc/seter/runners/<workspace>` and is an explicit dependency of the NixOS system closure. Older NixOS generations retain their corresponding Runners for rollback. The generated registry and systemd units reference that same immutable path, so host activation publishes policy, units, and Runner together rather than maintaining a mutable per-workspace current link. See [Runner deployment](./docs/runner-deployment.md) and [Generated workspace identity](./docs/workspace-identity.md).
 
@@ -235,9 +279,10 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-Roadmap points 1–3 are implemented: trusted host deployment builds each
+Roadmap points 1–4 are implemented: trusted host deployment builds each
 default-profile Runner, foundational identity and persistent storage are in
 place, and an ordinary development flake can run through the trusted default
-profile. Network enforcement, destination-bound secret injection, strict SSH,
-and lifecycle plumbing remain implemented. Safe Workspace Bootstrap is the
-next milestone phase.
+profile. Safe, retryable Workspace Bootstrap supports authenticated clone,
+fetch, and push without exposing repository credentials to the guest. Network
+enforcement, destination-bound secret injection, strict SSH, and lifecycle
+plumbing remain implemented.

@@ -11,7 +11,7 @@ in
   options = {
     repository = {
       url = mkOption {
-        type = types.strMatching "https://[a-zA-Z0-9.-]+(:[0-9]+)?/[^?#[:space:]]+";
+        type = types.strMatching "https://([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])(:443)?/[^?#[:space:]]+";
         description = "Approved HTTPS Git repository URL for this workspace.";
         example = "https://git.example/owner/project.git";
       };
@@ -31,7 +31,7 @@ in
       credential = mkOption {
         type = types.nullOr (types.strMatching "[a-zA-Z][a-zA-Z0-9_-]{0,62}");
         default = null;
-        description = "Optional name of the repository credential binding in this workspace's secrets.";
+        description = "Optional repository-scoped HTTP Authorization binding in this workspace's secrets.";
       };
     };
 

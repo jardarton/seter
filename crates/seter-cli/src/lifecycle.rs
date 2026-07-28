@@ -22,6 +22,153 @@ const PROXY_CA_FILE: &str = "/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem
 const KNOWN_HOSTS_ROOT: &str = "/var/lib/seter/known-hosts";
 const SSH_WAIT: Duration = Duration::from_secs(30);
 
+const BOOTSTRAP_SCRIPT: &str = r#"
+set -eu
+
+url=$1
+target=$2
+branch=$3
+placeholder=$4
+marker=${target%/*}/.seter-bootstrap-${target##*/}
+
+fail() {
+    printf 'seter init: %s\n' "$1" >&2
+    exit 20
+}
+
+configure_credential() {
+    if test -n "$placeholder"; then
+        git -C "$target" config --local "http.$url.extraHeader" "Authorization: $placeholder"
+    fi
+}
+
+ensure_marker() {
+    if test -L "$marker" || { test -e "$marker" && ! test -d "$marker"; }; then
+        fail "bootstrap marker $marker is not a directory; refusing to overwrite it"
+    fi
+    if test -d "$marker" && test -n "$(find "$marker" -mindepth 1 -maxdepth 1 -print -quit)"; then
+        fail "bootstrap marker $marker contains unrelated content; refusing to overwrite it"
+    fi
+    if ! test -d "$marker"; then
+        mkdir -- "$marker"
+    fi
+}
+
+clone_repository() {
+    ensure_marker
+    if test -n "$placeholder"; then
+        if test -n "$branch"; then
+            git -c "http.$url.extraHeader=Authorization: $placeholder" clone --origin origin --branch "$branch" -- "$url" "$target"
+        else
+            git -c "http.$url.extraHeader=Authorization: $placeholder" clone --origin origin -- "$url" "$target"
+        fi
+    elif test -n "$branch"; then
+        git clone --origin origin --branch "$branch" -- "$url" "$target"
+    else
+        git clone --origin origin -- "$url" "$target"
+    fi
+    rmdir -- "$marker"
+    configure_credential
+}
+
+if test -L "$target"; then
+    fail "checkout path $target is a symbolic link; refusing to overwrite it"
+fi
+
+if ! test -e "$target"; then
+    clone_repository
+    printf 'Initialized repository at %s\n' "$target"
+    exit 0
+fi
+
+if ! test -d "$target"; then
+    fail "checkout path $target is not a directory; refusing to overwrite it"
+fi
+
+if test -L "$target/.git"; then
+    fail "checkout path $target has a symbolic-link .git directory; refusing to alter it"
+fi
+
+if ! test -e "$target/.git"; then
+    if test -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)"; then
+        fail "checkout path $target contains unrelated content; move it aside or choose a different checkout name"
+    fi
+    clone_repository
+    printf 'Initialized repository at %s\n' "$target"
+    exit 0
+fi
+
+if ! test -d "$target/.git"; then
+    fail "checkout path $target has an unsupported .git file; refusing to alter it"
+fi
+
+actual_url=$(git -C "$target" remote get-url origin 2>/dev/null || true)
+if test "$actual_url" != "$url"; then
+    fail "checkout path $target has origin $actual_url, expected $url; refusing to alter it"
+fi
+
+recover_empty_worktree=false
+if git -C "$target" rev-parse --verify HEAD >/dev/null 2>&1; then
+    if test -d "$marker"; then
+        if test -z "$(git -C "$target" status --porcelain)"; then
+            rmdir -- "$marker"
+            configure_credential
+            printf 'Workspace repository is already initialized at %s\n' "$target"
+            exit 0
+        fi
+        if test -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)"; then
+            # Seter left its marker and no working files exist, so it is safe
+            # to reconstruct the index and working tree from the fetched HEAD.
+            recover_empty_worktree=true
+        else
+            fail "checkout path $target is a partial repository with working data; refusing to overwrite it"
+        fi
+    else
+        configure_credential
+        printf 'Workspace repository is already initialized at %s\n' "$target"
+        exit 0
+    fi
+fi
+
+# A repository with no checked-out commit is recoverable only while no working
+# data exists. Never fetch, checkout, clean, reset, or otherwise mutate a
+# partial bootstrap that contains anything except Seter's clone metadata.
+if test -n "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)"; then
+    fail "checkout path $target is a partial repository with working data; refusing to overwrite it"
+fi
+
+ensure_marker
+configure_credential
+git -C "$target" fetch origin
+if test -n "$branch"; then
+    git -C "$target" show-ref --verify --quiet "refs/remotes/origin/$branch" \
+        || fail "configured branch $branch does not exist on the approved repository"
+    if git -C "$target" show-ref --verify --quiet "refs/heads/$branch"; then
+        git -C "$target" checkout "$branch"
+    else
+        git -C "$target" checkout --track -b "$branch" "origin/$branch"
+    fi
+else
+    git -C "$target" remote set-head origin --auto >/dev/null
+    default_ref=$(git -C "$target" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) \
+        || fail "approved repository does not advertise a default branch"
+    default_branch=${default_ref#refs/remotes/origin/}
+    if git -C "$target" show-ref --verify --quiet "refs/heads/$default_branch"; then
+        git -C "$target" checkout "$default_branch"
+    else
+        git -C "$target" checkout --track -b "$default_branch" "$default_ref"
+    fi
+fi
+
+if test "$recover_empty_worktree" = true; then
+    git -C "$target" read-tree HEAD
+    git -C "$target" checkout-index --all
+fi
+
+rmdir -- "$marker"
+printf 'Recovered and initialized repository at %s\n' "$target"
+"#;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
     NotBuilt,
@@ -50,6 +197,52 @@ struct UnitState {
     active: String,
     sub: String,
     main_pid: u32,
+}
+
+pub fn init(name: &str) -> Result<i32> {
+    let registry = Registry::load_default()?;
+    let workspace = registry.workspace(name)?;
+
+    ensure!(
+        workspace.runner.path.exists(),
+        "workspace {name:?} has no host-deployed Runner; deploy the NixOS host configuration first"
+    );
+
+    // Starting the immutable Runner creates any missing persistent volume
+    // images. It deliberately remains running whether bootstrap succeeds or
+    // fails so the operator can inspect a rejected partial checkout.
+    up(name)?;
+
+    let host_key = workspace_host_key(name)?;
+    validate_public_key(&host_key)?;
+    wait_for_ssh(name, workspace)?;
+    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
+
+    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let target = format!("/project/{}", workspace.repository.checkout_name);
+    let branch = workspace.repository.branch.as_deref().unwrap_or("");
+    let placeholder = workspace
+        .repository
+        .credential
+        .as_ref()
+        .map(|credential| credential.placeholder.as_str())
+        .unwrap_or("");
+    let remote_command = format!(
+        "sh -c {} seter-bootstrap {} {} {} {}",
+        shell_quote(BOOTSTRAP_SCRIPT),
+        shell_quote(&workspace.repository.url),
+        shell_quote(&target),
+        shell_quote(branch),
+        shell_quote(placeholder),
+    );
+
+    let status = ssh_command(&known_hosts)
+        .arg(&destination)
+        .arg("--")
+        .arg(remote_command)
+        .status()
+        .context("failed to execute ssh for Workspace Bootstrap")?;
+    Ok(status.code().unwrap_or(255))
 }
 
 pub fn up(name: &str) -> Result<i32> {
@@ -176,16 +369,33 @@ pub fn shell(name: &str) -> Result<i32> {
     validate_public_key(&host_key)?;
     wait_for_ssh(name, workspace)?;
 
+    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
+
+    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let status = ssh_command(&known_hosts)
+        .arg("-t")
+        .arg(&destination)
+        .arg("--")
+        .arg("cd /project && exec \"${SHELL:-/bin/sh}\" -l")
+        .status()
+        .context("failed to execute ssh")?;
+
+    Ok(status.code().unwrap_or(255))
+}
+
+fn temporary_known_hosts(workspace: &Workspace, host_key: &str) -> Result<TemporaryFile> {
     let known_hosts = TemporaryFile::new("known-hosts")?;
     fs::write(
         known_hosts.path(),
         format!("{} {}\n", workspace.network.address, host_key.trim()),
     )
     .context("failed to write temporary known_hosts file")?;
+    Ok(known_hosts)
+}
 
-    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
-    let status = command("SETER_SSH", "ssh")
-        .arg("-o")
+fn ssh_command(known_hosts: &TemporaryFile) -> Command {
+    let mut ssh = command("SETER_SSH", "ssh");
+    ssh.arg("-o")
         .arg("StrictHostKeyChecking=yes")
         .arg("-o")
         .arg(format!(
@@ -198,14 +408,13 @@ pub fn shell(name: &str) -> Result<i32> {
         .arg("ForwardAgent=no")
         .arg("-o")
         .arg("ForwardX11=no")
-        .arg("-t")
-        .arg(destination)
-        .arg("--")
-        .arg("cd /project && exec \"${SHELL:-/bin/sh}\" -l")
-        .status()
-        .context("failed to execute ssh")?;
+        .arg("-o")
+        .arg("BatchMode=yes");
+    ssh
+}
 
-    Ok(status.code().unwrap_or(255))
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn ssh_host_key(name: &str) -> Result<i32> {
@@ -609,7 +818,7 @@ impl Drop for TemporaryFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_state, State};
+    use super::{classify_state, shell_quote, State};
 
     #[test]
     fn classifies_systemd_and_build_state() {
@@ -622,5 +831,14 @@ mod tests {
         assert_eq!(classify_state("failed", "failed", true), State::Failed);
         assert_eq!(classify_state("inactive", "dead", true), State::Stopped);
         assert_eq!(classify_state("inactive", "dead", false), State::NotBuilt);
+    }
+
+    #[test]
+    fn quotes_remote_shell_data_without_interpolation() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(
+            shell_quote("a'b; $(touch nope)"),
+            "'a'\\''b; $(touch nope)'"
+        );
     }
 }

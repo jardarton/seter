@@ -96,7 +96,8 @@ let
     "transfer-encoding"
     "upgrade"
   ];
-  allowedSecretHosts = workspace: normalizeHosts workspace.egress.httpHosts;
+  allowedSecretHosts =
+    workspace: normalizeHosts ([ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts);
   secretHosts =
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
@@ -116,6 +117,21 @@ let
         final = builtins.elemAt components (builtins.length components - 1);
       in
       lib.removeSuffix ".git" final;
+
+  repositoryMatchFor =
+    workspace: builtins.match "https://([^/:]+)(:443)?(/.*)" workspace.repository.url;
+  repositoryHostFor = workspace: builtins.elemAt (repositoryMatchFor workspace) 0;
+  repositoryPathFor = workspace: builtins.elemAt (repositoryMatchFor workspace) 2;
+  validRepositoryPath =
+    path:
+    let
+      lower = lib.toLower path;
+      components = lib.drop 1 (lib.splitString "/" path);
+    in
+    lib.all (component: component != "" && component != "." && component != "..") components
+    && !lib.hasInfix "%2e" lower
+    && !lib.hasInfix "%2f" lower
+    && !lib.hasInfix "%5c" lower;
 
   workspaceDefinitions = mapAttrs (
     name: workspace:
@@ -163,8 +179,17 @@ let
         network
         storage
         ;
-      repository = workspace.repository // {
+      repository = {
+        inherit (workspace.repository) url branch;
         checkoutName = checkoutNameFor workspace;
+        credential =
+          if workspace.repository.credential == null then
+            null
+          else
+            {
+              name = workspace.repository.credential;
+              placeholder = workspace.secrets.${workspace.repository.credential}.placeholder;
+            };
       };
       # hostOverheadMiB sizes the host systemd limit only. It is not guest
       # identity and the CLI has no use for it, so it stays out of the registry.
@@ -577,10 +602,31 @@ in
         message = "seter.host.workspaces.${workspace.name} repository URL must end in a checkout name starting with a letter or digit and containing only letters, digits, underscores, dots, or hyphens; set repository.checkoutName explicitly otherwise";
       }
       {
+        assertion = repositoryMatchFor workspace != null;
+        message = "seter.host.workspaces.${workspace.name} repository URL must use HTTPS on port 443 and contain an exact path";
+      }
+      {
+        assertion = validRepositoryPath (repositoryPathFor workspace);
+        message = "seter.host.workspaces.${workspace.name} repository URL path must not contain empty, dot, or encoded separator segments";
+      }
+      {
         assertion =
           workspace.repository.credential == null
           || builtins.hasAttr workspace.repository.credential workspace.secrets;
         message = "seter.host.workspaces.${workspace.name} repository credential must reference a defined secret";
+      }
+      {
+        assertion =
+          workspace.repository.credential == null
+          || (
+            builtins.elem (lib.toLower (repositoryHostFor workspace)) (
+              normalizeHosts workspace.secrets.${workspace.repository.credential}.hosts
+            )
+            && builtins.elem "authorization" (
+              normalizeHeaders workspace.secrets.${workspace.repository.credential}.headers
+            )
+          );
+        message = "seter.host.workspaces.${workspace.name} repository credential must allow the repository's exact host and authorization header";
       }
       {
         assertion = lib.all (secretName: builtins.hasAttr secretName workspace.secrets) (

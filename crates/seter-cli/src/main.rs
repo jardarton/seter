@@ -36,6 +36,7 @@ fn run() -> Result<i32> {
             println!("{}", registry.workspace(&workspace)?.network.address);
             Ok(0)
         }
+        Command::Init { workspace } => lifecycle::init(&workspace),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
         Command::Status { workspace } => lifecycle::status(workspace.as_deref()),
@@ -71,6 +72,7 @@ fn init_tracing(verbose: u8) {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Init { .. } => "init",
         Command::Up { .. } => "up",
         Command::Down { .. } => "down",
         Command::Run { .. } => "run",

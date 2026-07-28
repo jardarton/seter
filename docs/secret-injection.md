@@ -57,6 +57,16 @@ A secret source must produce an ASCII value between 8 bytes and 16 KiB after rem
 
 The source file may be supplied by sops-nix, agenix, or another host secret manager. Seter consumes only its runtime path and does not require a particular manager.
 
+When a secret is selected by `repository.credential`, its runtime value is the
+complete HTTP Authorization field value, such as `Bearer <token>` or
+`Basic <base64-user-and-token>`. `seter init` writes only
+`Authorization: <placeholder>` to the checkout's local Git configuration. In
+addition to the normal secret rules below, the proxy limits that binding to
+the repository URL's exact host
+and path plus the `info/refs`, `git-upload-pack`, and `git-receive-pack`
+smart-HTTP endpoints. A sibling repository, traversal-like subpath, or other
+endpoint on the same host cannot receive the credential.
+
 `LoadCredential=` is a start-time snapshot. Restart the proxy after rotation. For sops-nix:
 
 ```nix
@@ -74,6 +84,8 @@ A request is eligible for injection only when all of the following hold:
 - the request uses HTTPS;
 - TLS SNI and HTTP authority match;
 - the secret is bound to that exact normalized hostname;
+- for a repository credential, the request path is the exact approved
+  repository path or one of its three supported smart-HTTP endpoints;
 - the placeholder occurs in one of the secret's configured header values; and
 - normal public-address pinning succeeds.
 

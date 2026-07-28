@@ -50,6 +50,13 @@ class SeterPolicy:
             "upgrade",
         }
     )
+    _REPOSITORY_SMART_HTTP_SUFFIXES = frozenset(
+        {
+            "/git-receive-pack",
+            "/git-upload-pack",
+            "/info/refs",
+        }
+    )
 
     def __init__(self) -> None:
         self.workspaces: dict[str, dict[str, object]] = {}
@@ -95,7 +102,7 @@ class SeterPolicy:
         try:
             Path(ready_path).unlink(missing_ok=True)
             policy = json.loads(Path(policy_path).read_text())
-            if policy.get("version") != 2:
+            if policy.get("version") != 3:
                 raise ValueError("unsupported policy version")
             workspaces = policy["workspaces"]
             if not isinstance(workspaces, dict):
@@ -108,6 +115,7 @@ class SeterPolicy:
                 name = workspace["name"]
                 http_hosts = workspace["httpHosts"]
                 passthrough_hosts = workspace["passthroughHosts"]
+                repository = workspace["repository"]
                 secrets = workspace["secrets"]
                 if (
                     not isinstance(name, str)
@@ -124,6 +132,7 @@ class SeterPolicy:
                         for host in passthrough_hosts
                     )
                     or not isinstance(secrets, dict)
+                    or not isinstance(repository, dict)
                 ):
                     raise ValueError("invalid workspace policy")
 
@@ -208,10 +217,53 @@ class SeterPolicy:
                         "headers": normalized_headers,
                         "value": credential_value,
                     }
+
+                repository_host = self._normalize(repository.get("host"))
+                repository_path = repository.get("path")
+                repository_credential = repository.get("credential")
+                repository_path_lower = (
+                    repository_path.lower()
+                    if isinstance(repository_path, str)
+                    else ""
+                )
+                if (
+                    self._HOST_NAME.fullmatch(repository_host) is None
+                    or repository_host not in normalized_http_hosts
+                    or not isinstance(repository_path, str)
+                    or not repository_path.startswith("/")
+                    or "?" in repository_path
+                    or "#" in repository_path
+                    or repository_path.rstrip("/") == ""
+                    or any(
+                        component in ("", ".", "..")
+                        for component in repository_path.split("/")[1:]
+                    )
+                    or any(
+                        encoded in repository_path_lower
+                        for encoded in ("%2e", "%2f", "%5c")
+                    )
+                    or (
+                        repository_credential is not None
+                        and (
+                            not isinstance(repository_credential, str)
+                            or repository_credential not in parsed_secrets
+                            or repository_host
+                            not in parsed_secrets[repository_credential]["hosts"]
+                            or "authorization"
+                            not in parsed_secrets[repository_credential]["headers"]
+                        )
+                    )
+                ):
+                    raise ValueError(f"invalid repository policy for {name!r}")
                 parsed[address] = {
                     "name": name,
                     "httpHosts": normalized_http_hosts,
                     "passthroughHosts": normalized_passthrough_hosts,
+                    "repository": {
+                        "host": repository_host,
+                        "path": repository_path.rstrip("/"),
+                        "credential": repository_credential,
+                    },
                     # Credential values came from systemd's private runtime
                     # credential directory, never from this Nix-store policy.
                     "secrets": parsed_secrets,
@@ -258,6 +310,7 @@ class SeterPolicy:
         workspace: dict[str, object],
         host: str,
         scheme: str,
+        path: str,
     ) -> tuple[list[str], str | None]:
         """Replace configured header placeholders after destination approval.
 
@@ -285,6 +338,22 @@ class SeterPolicy:
                 return [], f"secret {secret_name!r} may only be injected over HTTPS"
             if host not in secret["hosts"]:
                 return [], f"secret {secret_name!r} is not bound to host {host!r}"
+            repository = workspace["repository"]
+            if secret_name == repository["credential"]:
+                request_path = path.partition("?")[0]
+                repository_path = repository["path"]
+                suffix = request_path.removeprefix(repository_path)
+                if host != repository["host"] or not (
+                    request_path == repository_path
+                    or (
+                        request_path.startswith(repository_path + "/")
+                        and suffix in SeterPolicy._REPOSITORY_SMART_HTTP_SUFFIXES
+                    )
+                ):
+                    return [], (
+                        f"repository credential {secret_name!r} is not bound to "
+                        f"path {request_path!r}"
+                    )
 
         headers = frozenset(
             header for _, secret in matched for header in secret["headers"]
@@ -660,7 +729,7 @@ class SeterPolicy:
 
                 if decision == "allow":
                     injected_secrets, injection_error = self._inject_request_secrets(
-                        flow, workspace, host, scheme
+                        flow, workspace, host, scheme, flow.request.path
                     )
                     if injection_error is not None:
                         decision = "deny"
