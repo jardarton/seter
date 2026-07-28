@@ -28,15 +28,19 @@ OpenSSH lifecycle tooling, direnv/nix-direnv with Bash integration, and a small
 interactive shell baseline. A repository needs only its ordinary development
 flake; it does not provide Seter or NixOS guest configuration.
 
-The current lifecycle is explicit:
+The daily lifecycle starts workspaces on demand and stops them only when asked:
 
 ```console
 seter init project
-seter up project
-seter status project
 seter shell project
+seter run project -- cargo test
+seter status project
 seter down project
 ```
+
+Both `shell` and `run` enter the registered checkout and leave the VM running.
+They never approve repository code: review `.envrc` and run `direnv allow`
+explicitly in a workspace shell before `run` can load the environment.
 
 ## Workspace Registry
 
@@ -255,7 +259,13 @@ SSH never silently trusts a network-provided key. Trusted host activation create
 seter ssh-host-key project
 ```
 
-`seter shell project` reads that host-created public key and uses strict host-key checking automatically, with no SSH agent or X11 forwarding. Configure the developer's public login key in the registry at `ssh.authorizedKeys`.
+`seter shell project` and `seter run project -- <command>` read that
+host-created public key and use strict host-key checking automatically, with no
+SSH agent or X11 forwarding. Both start the workspace when needed, enter its
+registered checkout, and leave it running. `run` executes through `direnv`, so
+an unreviewed `.envrc` fails closed until the operator explicitly runs
+`direnv allow` in `seter shell`. Configure the developer's public login key in
+the registry at `ssh.authorizedKeys`.
 
 ## Development
 
@@ -279,10 +289,12 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-Roadmap points 1–4 are implemented: trusted host deployment builds each
+Roadmap points 1–5 are implemented: trusted host deployment builds each
 default-profile Runner, foundational identity and persistent storage are in
 place, and an ordinary development flake can run through the trusted default
 profile. Safe, retryable Workspace Bootstrap supports authenticated clone,
-fetch, and push without exposing repository credentials to the guest. Network
-enforcement, destination-bound secret injection, strict SSH, and lifecycle
-plumbing remain implemented.
+fetch, and push without exposing repository credentials to the guest. Daily
+`shell` and `run` entry starts on demand, uses the registered checkout and
+explicit direnv approval, propagates command failures, and leaves shutdown to
+`seter down`. Network enforcement, destination-bound secret injection, and
+strict SSH remain implemented.

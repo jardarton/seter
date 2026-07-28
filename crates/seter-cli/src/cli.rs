@@ -20,13 +20,13 @@ pub enum Command {
     Up { workspace: String },
     /// Gracefully stop a workspace.
     Down { workspace: String },
-    /// Run a command in a workspace, starting it when needed.
+    /// Run a command through direnv in the registered checkout, starting when needed.
     Run {
         workspace: String,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Open an interactive shell in a workspace.
+    /// Open the registered checkout in an interactive shell, starting when needed.
     Shell { workspace: String },
     /// Show one workspace or all workspace statuses.
     Status { workspace: Option<String> },

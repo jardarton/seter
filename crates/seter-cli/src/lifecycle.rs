@@ -358,12 +358,7 @@ pub fn status(name: Option<&str>) -> Result<i32> {
 pub fn shell(name: &str) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
-    let state = state_for(name, workspace)?;
-    ensure!(
-        matches!(state, State::Running | State::Starting),
-        "workspace {name:?} is {}; run `seter up {name}` first",
-        state.label()
-    );
+    ensure_running(name, workspace)?;
 
     let host_key = workspace_host_key(name)?;
     validate_public_key(&host_key)?;
@@ -372,15 +367,81 @@ pub fn shell(name: &str) -> Result<i32> {
     let known_hosts = temporary_known_hosts(workspace, &host_key)?;
 
     let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let checkout = checkout_path(workspace);
+    explain_direnv(name);
     let status = ssh_command(&known_hosts)
         .arg("-t")
         .arg(&destination)
         .arg("--")
-        .arg("cd /project && exec \"${SHELL:-/bin/sh}\" -l")
+        .arg(format!(
+            "cd {} || {{ printf 'seter shell: registered checkout is missing; run seter init %s\\n' {} >&2; exit 72; }}; exec \"${{SHELL:-/bin/sh}}\" -l",
+            shell_quote(&checkout),
+            shell_quote(name),
+        ))
         .status()
         .context("failed to execute ssh")?;
 
     Ok(status.code().unwrap_or(255))
+}
+
+pub fn run(name: &str, arguments: &[String]) -> Result<i32> {
+    ensure!(!arguments.is_empty(), "seter run requires a command");
+
+    let registry = Registry::load_default()?;
+    let workspace = registry.workspace(name)?;
+    ensure_running(name, workspace)?;
+
+    let host_key = workspace_host_key(name)?;
+    validate_public_key(&host_key)?;
+    wait_for_ssh(name, workspace)?;
+    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
+
+    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let remote_command = run_remote_command(name, &checkout_path(workspace), arguments);
+    explain_direnv(name);
+    let status = ssh_command(&known_hosts)
+        .arg(&destination)
+        .arg("--")
+        .arg(remote_command)
+        .status()
+        .context("failed to execute ssh")?;
+
+    Ok(status.code().unwrap_or(255))
+}
+
+fn ensure_running(name: &str, workspace: &Workspace) -> Result<()> {
+    match state_for(name, workspace)? {
+        State::Running | State::Starting => Ok(()),
+        State::Stopping => bail!("workspace {name:?} is stopping"),
+        _ => {
+            up(name)?;
+            Ok(())
+        }
+    }
+}
+
+fn checkout_path(workspace: &Workspace) -> String {
+    format!("/project/{}", workspace.repository.checkout_name)
+}
+
+fn run_remote_command(name: &str, checkout: &str, arguments: &[String]) -> String {
+    let command = arguments
+        .iter()
+        .map(|argument| shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "cd {} || {{ printf 'seter run: registered checkout is missing; run seter init %s\\n' {} >&2; exit 72; }}; exec direnv exec . {}",
+        shell_quote(checkout),
+        shell_quote(name),
+        command,
+    )
+}
+
+fn explain_direnv(name: &str) {
+    eprintln!(
+        "seter: repository code is never approved automatically; review .envrc and run `direnv allow` in `seter shell {name}`"
+    );
 }
 
 fn temporary_known_hosts(workspace: &Workspace, host_key: &str) -> Result<TemporaryFile> {
@@ -409,7 +470,15 @@ fn ssh_command(known_hosts: &TemporaryFile) -> Command {
         .arg("-o")
         .arg("ForwardX11=no")
         .arg("-o")
-        .arg("BatchMode=yes");
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=2");
     ssh
 }
 
@@ -818,7 +887,7 @@ impl Drop for TemporaryFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_state, shell_quote, State};
+    use super::{classify_state, run_remote_command, shell_quote, State};
 
     #[test]
     fn classifies_systemd_and_build_state() {
@@ -839,6 +908,18 @@ mod tests {
         assert_eq!(
             shell_quote("a'b; $(touch nope)"),
             "'a'\\''b; $(touch nope)'"
+        );
+    }
+
+    #[test]
+    fn run_command_enters_checkout_and_preserves_argument_boundaries() {
+        assert_eq!(
+            run_remote_command(
+                "minimal",
+                "/project/project",
+                &["printf".into(), "%s\\n".into(), "a'b; $(touch nope)".into()]
+            ),
+            "cd '/project/project' || { printf 'seter run: registered checkout is missing; run seter init %s\\n' 'minimal' >&2; exit 72; }; exec direnv exec . 'printf' '%s\\n' 'a'\\''b; $(touch nope)'"
         );
     }
 }
