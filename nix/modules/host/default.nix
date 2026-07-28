@@ -274,7 +274,7 @@ let
 
   lifecycleSudoCommands = concatMap (
     name:
-    map
+    (map
       (operation: {
         command = "${lib.getExe cfg.package} ${operation} ${name}";
         options = [ "NOPASSWD" ];
@@ -284,7 +284,27 @@ let
         "__stop"
         "__audit"
       ]
+    )
+    ++
+      map
+        (flags: {
+          command = "${lib.getExe cfg.package} __reset ${name} ${flags}";
+          options = [ "NOPASSWD" ];
+        })
+        [
+          "--home"
+          "--nix-store"
+          "--home --nix-store"
+        ]
   ) (attrNames cfg.workspaces);
+  gcSudoCommand = {
+    command = "${lib.getExe cfg.package} __gc";
+    options = [ "NOPASSWD" ];
+  };
+  destroyProjectSudoCommands = map (name: {
+    command = "${lib.getExe cfg.package} __destroy-project ${name}";
+    options = [ "NOPASSWD" ];
+  }) (attrNames cfg.workspaces);
 
   tapServices = mapAttrs' (
     name: runtime:
@@ -949,11 +969,13 @@ in
     # privileged command reloads the root-owned registry and constructs the
     # systemd unit name itself; operators never receive general systemctl or
     # unrestricted Seter access through sudo.
-    security.sudo.extraRules = lib.optional (lifecycleSudoCommands != [ ]) {
-      groups = [ cfg.operatorGroup ];
-      runAs = "root";
-      commands = lifecycleSudoCommands;
-    };
+    security.sudo.extraRules = [
+      {
+        groups = [ cfg.operatorGroup ];
+        runAs = "root";
+        commands = lifecycleSudoCommands ++ destroyProjectSudoCommands ++ [ gcSudoCommand ];
+      }
+    ];
 
     # These are used by lifecycle commands and Workspace SSH Identity creation.
     environment.systemPackages = [

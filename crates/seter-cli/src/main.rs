@@ -55,6 +55,24 @@ fn run() -> Result<i32> {
         Command::Shell { workspace } => lifecycle::shell(&workspace),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
         Command::ProxyCa => lifecycle::proxy_ca(),
+        Command::Reset {
+            workspace,
+            home,
+            nix_store,
+            all_state,
+            yes,
+        } => lifecycle::reset(&workspace, home || all_state, nix_store || all_state, yes),
+        Command::DestroyProject { workspace, yes } => lifecycle::destroy_project(&workspace, yes),
+        Command::ResetWorkspace {
+            workspace,
+            home,
+            nix_store,
+        } => lifecycle::reset_workspace(&workspace, home, nix_store),
+        Command::Gc => lifecycle::gc(),
+        Command::CollectGarbage => lifecycle::collect_garbage(),
+        Command::DestroyProjectVolume { workspace } => {
+            lifecycle::destroy_project_volume(&workspace)
+        }
         Command::StartWorkspace { workspace } => lifecycle::start_workspace(&workspace),
         Command::StopWorkspace { workspace } => lifecycle::stop_workspace(&workspace),
         Command::ExportAudit { workspace } => audit::privileged_export(&workspace),
@@ -63,10 +81,6 @@ fn run() -> Result<i32> {
             clap_complete::generate(shell, &mut cli::command(), "seter", &mut io::stdout());
             Ok(0)
         }
-        command => anyhow::bail!(
-            "{} is scaffolded but not implemented yet",
-            command_name(&command)
-        ),
     }
 }
 
@@ -81,28 +95,6 @@ fn init_tracing(verbose: u8) {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| fallback.into()))
         .with_writer(io::stderr)
         .init();
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::Init { .. } => "init",
-        Command::Up { .. } => "up",
-        Command::Down { .. } => "down",
-        Command::Run { .. } => "run",
-        Command::Shell { .. } => "shell",
-        Command::Status { .. } => "status",
-        Command::List => "list",
-        Command::Ip { .. } => "ip",
-        Command::Audit { .. } => "audit",
-        Command::Policy { .. } => "policy",
-        Command::SshHostKey { .. } => "ssh-host-key",
-        Command::ProxyCa => "proxy-ca",
-        Command::Gc => "gc",
-        Command::Completions { .. } => "completions",
-        Command::StartWorkspace { .. } => "__start",
-        Command::StopWorkspace { .. } => "__stop",
-        Command::ExportAudit { .. } => "__audit",
-    }
 }
 
 #[cfg(test)]
