@@ -65,6 +65,7 @@ let
       specialArgs = { inherit inputs; };
       modules = [
         self.nixosModules.guest
+        ../nix/modules/guest/profiles/default.nix
       ]
       ++ identityModules
       ++ [ ../examples/minimal/guest.nix ]

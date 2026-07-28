@@ -22,6 +22,12 @@ trusted Workspace Registry ── NixOS deployment ──> host policy + Runner
 
 A Runner contains Seter's guest baseline and registered non-secret identity, never project code. The approved HTTPS repository enters later through Workspace Bootstrap. Cold starts validate and execute the already deployed immutable Runner without evaluating Nix. Guest Profile or identity changes therefore use the operator's normal trusted host deployment; there is no `seter update` command.
 
+The trusted [`default` Guest Profile](./docs/guest-profile-default.md) includes
+flake-enabled Nix with the private writable store, Git and system HTTPS trust,
+OpenSSH lifecycle tooling, direnv/nix-direnv with Bash integration, and a small
+interactive shell baseline. A repository needs only its ordinary development
+flake; it does not provide Seter or NixOS guest configuration.
+
 The current lifecycle is explicit:
 
 ```console
@@ -229,4 +235,9 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 
 ## Status
 
-The guest boundary has a tested security vertical slice. The typed trusted registry now builds and roots a default-profile Runner for every workspace as part of the NixOS generation; host policy, lifecycle units, registry identity, and immutable boot artifacts deploy together. Cold starts perform no Nix evaluation, and the mutable project-installable/update path has been removed. Network enforcement, persistent private Nix stores, secret injection, strict SSH, and lifecycle plumbing remain implemented. Workspace Bootstrap, host-created SSH identity, Home Volume mounting, and closure-filtered Store Views are subsequent roadmap phases.
+Roadmap points 1–3 are implemented: trusted host deployment builds each
+default-profile Runner, foundational identity and persistent storage are in
+place, and an ordinary development flake can run through the trusted default
+profile. Network enforcement, destination-bound secret injection, strict SSH,
+and lifecycle plumbing remain implemented. Safe Workspace Bootstrap is the
+next milestone phase.
