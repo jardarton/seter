@@ -105,6 +105,12 @@ Evidence: an authenticated local HTTPS Git fixture exercises clone, fetch, and p
 
 ### 5. Complete the daily lifecycle
 
+**Status: implemented.** `shell` and `run` start the deployed Runner when
+needed, use the registered checkout with strict SSH verification, preserve
+command status and state, and never stop the VM or approve repository code.
+Lifecycle KVM coverage includes both entry paths, direnv approval, persistence,
+SSH failure, and interruption.
+
 - `seter shell` starts when needed, enters the registered checkout, and leaves the VM running.
 - `seter run -- <command>` starts when needed, runs from the same checkout, propagates the exit code, and leaves the VM running.
 - `seter up` remains useful for explicitly starting background workloads.

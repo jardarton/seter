@@ -390,18 +390,55 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"timeout 60s scp {ssh_options} -r ${normalDevelopmentFlake}/. seter@10.100.0.20:/project/normal-development-flake/")
     machine.succeed(f"timeout 120s ssh {ssh_options} seter@10.100.0.20 -- 'cd /project/normal-development-flake; bash_store=$(dirname $(dirname $(readlink -f $(command -v bash)))); coreutils_store=$(dirname $(dirname $(readlink -f $(command -v mkdir)))); sed -i \"s|@bash@|$bash_store|g; s|@coreutils@|$coreutils_store|g\" flake.nix; if direnv exec . true; then exit 1; fi; direnv allow .; export NIX_CONFIG=\"substituters =\"; direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready; nix develop path:. --command env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready'")
 
+    # Daily entry always targets the registered checkout. Changing this envrc
+    # invalidates any prior approval and lets the test prove neither `run` nor
+    # `shell` silently approves repository code.
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- \"printf '%s\\n' 'export SETER_LIFECYCLE_DIRENV=approved' 'printf evaluated > /project/e2e/direnv-evaluated' > /project/e2e/.envrc; rm -f /project/e2e/direnv-evaluated\"")
+
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-vm-e2e.service")
     machine.succeed("test -s /var/lib/seter/workspaces/e2e/e2e-project.img")
     machine.succeed("test -s /var/lib/seter/workspaces/e2e/e2e-home.img")
     machine.succeed("test -s /var/lib/seter/workspaces/e2e/e2e-nix-store.img")
     machine.succeed("sha256sum -c /tmp/identity-hash")
+    machine.succeed("test \"$(seter list)\" = e2e; test \"$(seter ip e2e)\" = 10.100.0.20; set +e; seter status e2e > /tmp/stopped-status; code=$?; set -e; test $code = 3; grep -F 'state: stopped' /tmp/stopped-status; grep -F 'ip:    10.100.0.20' /tmp/stopped-status")
 
+    # `run` starts a stopped workspace but refuses to evaluate the unapproved
+    # envrc. Failure leaves the VM available for inspection.
+    machine.succeed("set +e; su - operator -c 'seter run e2e -- true' > /tmp/unapproved-run 2>&1; code=$?; set -e; test $code != 0; grep -F 'repository code is never approved automatically' /tmp/unapproved-run; grep -F 'direnv allow' /tmp/unapproved-run")
+    machine.wait_for_unit("seter-vm-e2e.service")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test ! -e /project/e2e/direnv-evaluated'")
+
+    # `shell` also starts when needed, enters the exact checkout, and leaves
+    # explicit review and approval to the operator.
+    machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
+    machine.wait_until_fails("systemctl is-active --quiet seter-vm-e2e.service")
+    machine.succeed("printf 'pwd\\ntest ! -e /project/e2e/direnv-evaluated\\ndirenv allow .\\nexit\\n' | su - operator -c \"timeout 120s script -qec 'seter shell e2e' /dev/null\" > /tmp/shell-entry 2>&1; grep -F 'repository code is never approved automatically' /tmp/shell-entry; grep -F '/project/e2e' /tmp/shell-entry")
+    machine.wait_for_unit("seter-vm-e2e.service")
+
+    # Running entry loads only the explicitly approved environment, preserves
+    # argument exit status, and retains Project and Home changes.
+    machine.succeed("su - operator -c 'seter run e2e -- pwd' | grep -Fx /project/e2e")
+    machine.succeed("su - operator -c 'seter run e2e -- env' | grep -Fx SETER_LIFECYCLE_DIRENV=approved")
+    machine.succeed("su - operator -c 'seter run e2e -- touch run-persistent'")
+    machine.succeed("su - operator -c 'seter run e2e -- touch /home/seter/.run-home-persistent'")
+    machine.succeed("set +e; su - operator -c \"seter run e2e -- sh -c 'exit 42'\" > /tmp/run-42 2>&1; code=$?; set -e; test $code = 42")
+    machine.succeed("systemctl is-active --quiet seter-vm-e2e.service")
+
+    # Interrupting the local invocation never turns command completion into an
+    # implicit workspace shutdown; the workspace accepts the next command.
+    machine.succeed("cat > /tmp/interrupt-seter-run.py <<'PY'\nimport os\nimport select\nimport signal\nimport subprocess\nimport time\n\ncommand = \"seter run e2e -- sh -c 'echo interrupt-ready; sleep 10'\"\nprocess = subprocess.Popen(\n    [\"su\", \"-\", \"operator\", \"-c\", command],\n    stdout=subprocess.PIPE,\n    stderr=subprocess.DEVNULL,\n    start_new_session=True,\n    text=True,\n)\ndeadline = time.monotonic() + 30\nready = False\nwhile time.monotonic() < deadline:\n    readable, _, _ = select.select([process.stdout], [], [], 1)\n    if readable and process.stdout.readline().strip() == \"interrupt-ready\":\n        ready = True\n        break\nif not ready:\n    process.kill()\n    raise SystemExit(\"remote command did not start\")\nos.killpg(process.pid, signal.SIGINT)\ntry:\n    code = process.wait(timeout=20)\nexcept subprocess.TimeoutExpired:\n    os.killpg(process.pid, signal.SIGKILL)\n    raise\nif code == 0:\n    raise SystemExit(\"interrupted seter run unexpectedly succeeded\")\nPY\n${pkgs.python3}/bin/python /tmp/interrupt-seter-run.py")
+    machine.succeed("systemctl is-active --quiet seter-vm-e2e.service; su - operator -c 'seter run e2e -- test -d .git'")
+
+    # Strict verification failures propagate SSH's failure status and likewise
+    # leave the workspace running.
+    machine.succeed("cp -a /var/lib/seter/known-hosts/e2e /tmp/e2e-correct-known-host; printf '%s\\n' '${testSshPublicKey}' > /var/lib/seter/known-hosts/e2e; chown root:seter-operators /var/lib/seter/known-hosts/e2e; chmod 0440 /var/lib/seter/known-hosts/e2e; set +e; su - operator -c 'seter run e2e -- true' > /tmp/strict-failure 2>&1; code=$?; set -e; mv /tmp/e2e-correct-known-host /var/lib/seter/known-hosts/e2e; test $code = 255; grep -E 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' /tmp/strict-failure; systemctl is-active --quiet seter-vm-e2e.service")
+
+    machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
+    machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
     machine.succeed("su - operator -c 'seter up e2e' | grep -F 'Started e2e at 10.100.0.20'")
     machine.wait_for_unit("seter-vm-e2e.service")
-    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && cd /project/normal-development-flake && direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
-    machine.succeed("printf 'test \"$(cat /project/runner-model-marker)\" = project-persistent && test \"$(cat ~/.seter-home-marker)\" = home-persistent && echo shell-ok\\nexit\\n' | su - operator -c \"timeout 30s script -qec 'seter shell e2e' /dev/null\" | grep -F shell-ok")
-
+    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && test -e /project/e2e/run-persistent && test -e ~/.run-home-persistent && cd /project/normal-development-flake && direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
     machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")

@@ -53,5 +53,6 @@ These commands remain unprivileged:
 - `seter ip`
 - `seter status`
 - `seter shell`
+- `seter run`
 
 There is no CLI Runner-install privilege. Before each cold start, the privileged path parses the deployed Runner's bounded regular-file identity manifest and compares it with the root-owned registry without executing Runner code or evaluating Nix. The manifest is consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` separately elevates offline access to the host-owned Project Volume. That operation is not included in the lifecycle operator group's passwordless start/stop grant.

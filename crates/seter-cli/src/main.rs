@@ -39,6 +39,7 @@ fn run() -> Result<i32> {
         Command::Init { workspace } => lifecycle::init(&workspace),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
+        Command::Run { workspace, command } => lifecycle::run(&workspace, &command),
         Command::Status { workspace } => lifecycle::status(workspace.as_deref()),
         Command::Shell { workspace } => lifecycle::shell(&workspace),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
