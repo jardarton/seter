@@ -1,6 +1,5 @@
 {
   config,
-  lib,
   ...
 }:
 {
@@ -15,6 +14,4 @@
   # A real workspace supplies its developer's public key here. Keeping the
   # repository example keyless avoids embedding personal access material.
   seter.guest.ssh.authorizedKeys = [ ];
-
-  system.stateVersion = lib.trivial.release;
 }

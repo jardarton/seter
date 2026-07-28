@@ -123,6 +123,7 @@
         modules = [
           self.nixosModules.guest
           identityWorkspace.guestModule
+          (import ../nix/modules/guest/profiles/default.nix)
           {
             # Supplied by the host module from the same registry entry.
             seter.guest.memory =
@@ -1315,6 +1316,13 @@
             );
           assert identityHostConfiguration.config.seter.host.workspaces.identity.guestProfile == "default";
           assert identityGuestConfiguration.config.seter.guest.name == "identity";
+          assert identityGuestConfiguration.config.programs.direnv.enable;
+          assert identityGuestConfiguration.config.programs.direnv.enableBashIntegration;
+          assert identityGuestConfiguration.config.programs.direnv.nix-direnv.enable;
+          assert builtins.elem "nix-command"
+            identityGuestConfiguration.config.nix.settings.experimental-features;
+          assert builtins.elem "flakes" identityGuestConfiguration.config.nix.settings.experimental-features;
+          assert identityGuestConfiguration.config.security.pki.installCACerts;
           assert identityGuestConfiguration.config.seter.guest.network.address == "10.100.0.12";
           assert identityGuestConfiguration.config.seter.guest.network.mac == "02:00:00:00:00:12";
           assert identityGuestConfiguration.config.seter.guest.network.tap == "seter-identity";

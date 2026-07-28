@@ -60,6 +60,12 @@ Evidence: adversarial KVM tests prove strict SSH identity, absence of unrelated 
 
 ### 3. Implement the trusted `default` Guest Profile
 
+**Status: implemented.** Host-deployed Runners provide the flake-enabled Nix
+toolchain, system HTTPS trust, Git and SSH, explicit direnv/nix-direnv Bash
+integration, and a small interactive utility baseline. Evaluation and KVM
+checks exercise the profile with a repository containing only a development
+flake and `.envrc`.
+
 The first profile includes only:
 
 - Nix and the private writable-store machinery;

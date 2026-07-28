@@ -55,6 +55,38 @@ let
     ];
   };
   runner = deployment.config.environment.etc."seter/runners/e2e".source;
+  normalDevelopmentFlake = pkgs.runCommand "seter-normal-development-flake" { } ''
+    mkdir -p "$out"
+    cat > "$out/flake.nix" <<'EOF'
+    {
+      description = "Ordinary development flake used by the Seter default-profile test";
+
+      outputs = { self }:
+        let
+          # The KVM test fills these with package paths from the booted
+          # Runner. Opaque contexts model already-realized flake dependencies
+          # without requiring public network access in this default-deny test.
+          bash = builtins.appendContext "@bash@" {
+            "@bash@" = { path = true; };
+          };
+          coreutils = builtins.appendContext "@coreutils@" {
+            "@coreutils@" = { path = true; };
+          };
+        in {
+          devShells.${system}.default = derivation {
+            name = "seter-normal-development-shell";
+            outputs = [ "out" ];
+            system = "${system}";
+            builder = "''${bash}/bin/bash";
+            args = [ "-c" "mkdir -p \"$out\"" ];
+            PATH = "''${coreutils}/bin";
+            shellHook = "export NORMAL_DEVELOPMENT_FLAKE=ready";
+          };
+        };
+    }
+    EOF
+    printf '%s\n' 'use flake' > "$out/.envrc"
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "seter-lifecycle-e2e";
@@ -86,6 +118,7 @@ pkgs.testers.runNixOSTest {
         cores = 2;
         additionalPaths = [
           runner
+          normalDevelopmentFlake
           unrelatedStoreSentinel
         ];
         qemu = {
@@ -127,8 +160,16 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed("key=$(awk '{print $2}' /tmp/e2e-host-key); grep -F \" $key\" /tmp/e2e-known-hosts")
     ssh_options = "-i /tmp/seter-e2e-key -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/e2e-known-hosts -o GlobalKnownHostsFile=/dev/null"
-    machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v direnv && test -e /etc/direnv/direnvrc && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
+    machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
     machine.succeed("grep -Fx 'host confidential sentinel' ${unrelatedStoreSentinel}")
+
+    # A repository needs only its normal flake and .envrc. Copying this local
+    # fixture models the post-bootstrap working tree without introducing any
+    # repository-owned NixOS or Seter configuration. Merely entering it does
+    # not approve the .envrc; activation succeeds only after an explicit allow.
+    machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'mkdir /project/normal-development-flake'")
+    machine.succeed(f"timeout 60s scp {ssh_options} -r ${normalDevelopmentFlake}/. seter@10.100.0.20:/project/normal-development-flake/")
+    machine.succeed(f"timeout 120s ssh {ssh_options} seter@10.100.0.20 -- 'cd /project/normal-development-flake; bash_store=$(dirname $(dirname $(readlink -f $(command -v bash)))); coreutils_store=$(dirname $(dirname $(readlink -f $(command -v mkdir)))); sed -i \"s|@bash@|$bash_store|g; s|@coreutils@|$coreutils_store|g\" flake.nix; if direnv exec . true; then exit 1; fi; direnv allow .; export NIX_CONFIG=\"substituters =\"; direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready; nix develop path:. --command env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready'")
 
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-vm-e2e.service")
@@ -139,7 +180,7 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed("su - operator -c 'seter up e2e' | grep -F 'Started e2e at 10.100.0.20'")
     machine.wait_for_unit("seter-vm-e2e.service")
-    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
+    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && cd /project/normal-development-flake && direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
     machine.succeed("printf 'test \"$(cat /project/runner-model-marker)\" = project-persistent && test \"$(cat ~/.seter-home-marker)\" = home-persistent && echo shell-ok\\nexit\\n' | su - operator -c \"timeout 30s script -qec 'seter shell e2e' /dev/null\" | grep -F shell-ok")
 
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
