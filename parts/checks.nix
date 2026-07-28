@@ -116,6 +116,18 @@
       };
       identityRegistryFile =
         identityHostConfiguration.config.environment.etc."seter/workspaces.json".source;
+      identityActivePolicyFile =
+        identityHostConfiguration.config.environment.etc."seter/policy.json".source;
+      identityDesiredPolicyFile = pkgs.writeText "seter-identity-desired-policy.toml" ''
+        version = 1
+        [workspaces.identity.egress]
+        http-hosts = ["api.example.com"]
+      '';
+      identityRevokedPolicyFile = pkgs.writeText "seter-identity-revoked-policy.toml" ''
+        version = 1
+        [workspaces.identity.egress]
+        http-hosts = []
+      '';
       identityWorkspace = import ../nix/lib/mk-runner-definition.nix {
         name = "identity";
         workspace = identityHostConfiguration.config.seter.host.workspaces.identity;
@@ -880,6 +892,82 @@
             true
         )).success;
 
+      importedPolicyFile = builtins.toFile "seter-test-policy.toml" ''
+        version = 1
+
+        [workspaces.alpha.egress]
+        http-hosts = ["*.example.com"]
+        passthrough-hosts = ["downloads.example.net"]
+
+        [[workspaces.alpha.egress.tcp]]
+        host = "ssh.example.org"
+        port = 2222
+      '';
+      importedPolicyConfiguration = mkHostWith {
+        policyFile = importedPolicyFile;
+        workspaces = validWorkspaces;
+      };
+      importedPolicyAlpha = importedPolicyConfiguration.config.seter.host.workspaces.alpha.egress;
+
+      recursivePolicyWildcardRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-recursive-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["*.*.example.com"]
+        '';
+        workspaces = validWorkspaces;
+      };
+      sharedHostingPolicyWildcardRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-shared-hosting-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["*.github.io"]
+        '';
+        workspaces = validWorkspaces;
+      };
+      objectStoragePolicyWildcardRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-object-storage-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["*.s3.amazonaws.com"]
+        '';
+        workspaces = validWorkspaces;
+      };
+      multiTenantPublicSuffixWildcardRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-public-suffix-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["*.uk.com"]
+        '';
+        workspaces = validWorkspaces;
+      };
+      overlappingWildcardPolicyRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-overlapping-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["*.example.com"]
+          passthrough-hosts = ["api.example.com"]
+        '';
+        workspaces = validWorkspaces;
+      };
+      wildcardDirectTcpPolicyRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-wildcard-tcp-policy.toml" ''
+          version = 1
+          [[workspaces.alpha.egress.tcp]]
+          host = "*.example.com"
+          port = 2222
+        '';
+        workspaces = validWorkspaces;
+      };
+      unknownPolicyWorkspaceRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-unknown-workspace-policy.toml" ''
+          version = 1
+          [workspaces.missing.egress]
+          http-hosts = ["api.example.com"]
+        '';
+        workspaces = validWorkspaces;
+      };
+
       dnsBurstRejected = hostConfigurationRejected {
         dns = {
           queriesPerSecond = 100;
@@ -1521,6 +1609,34 @@
               test "$status_code" = 3
               grep -F 'state: stopped' status
 
+              export SETER_REGISTRY=${identityRegistryFile}
+              export SETER_ACTIVE_POLICY=${identityActivePolicyFile}
+              seter policy status identity --file ${identityDesiredPolicyFile} | grep -F 'agree'
+              set +e
+              seter policy status identity --file ${identityRevokedPolicyFile} > policy-pending
+              policy_status_code=$?
+              set -e
+              test "$policy_status_code" = 2
+              grep -F 'pending' policy-pending
+              grep -F -- '- http api.example.com' policy-pending
+
+              cat > audit-sudo <<'EOF'
+              #!${pkgs.runtimeShell}
+              printf '%s\n' '{"timestampMicros":1,"boundary":"http","decision":"deny","destination":"new.example.com","port":null,"protocol":null,"method":"GET","reason":"host is denied","path":"/private?query=hidden"}'
+              printf '%s\n' '{"timestampMicros":2,"boundary":"dns","decision":"deny","destination":"ambiguous.example.net","port":null,"protocol":"udp","method":null,"reason":"name is denied","path":null}'
+              EOF
+              chmod +x audit-sudo
+              cp ${identityDesiredPolicyFile} review-policy.toml
+              chmod u+w review-policy.toml
+              export SETER_SUDO=$PWD/audit-sudo
+              printf 'y\nh\nn\ny\n' | seter policy review identity --file $PWD/review-policy.toml > policy-review
+              grep -F 'exact diff' policy-review
+              grep -F 'new.example.com' review-policy.toml
+              grep -F 'ambiguous.example.net' review-policy.toml
+              grep -F 'api.example.com' review-policy.toml
+              ! grep -F 'private?query=hidden' review-policy.toml
+              export SETER_REGISTRY=${registryFile}
+
               mkdir known-hosts
               echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey seter-test' > known-hosts/alpha
               export SETER_KNOWN_HOSTS_DIR=$PWD/known-hosts
@@ -1562,6 +1678,19 @@
           assert overlappingProxyHostsRejected;
           assert proxyPortAsDirectTcpRejected;
           assert proxyPortCollisionRejected;
+          assert builtins.elem "*.example.com" importedPolicyAlpha.httpHosts;
+          assert builtins.elem "downloads.example.net" importedPolicyAlpha.passthroughHosts;
+          assert builtins.elem {
+            host = "ssh.example.org";
+            port = 2222;
+          } importedPolicyAlpha.tcp;
+          assert recursivePolicyWildcardRejected;
+          assert sharedHostingPolicyWildcardRejected;
+          assert objectStoragePolicyWildcardRejected;
+          assert multiTenantPublicSuffixWildcardRejected;
+          assert overlappingWildcardPolicyRejected;
+          assert wildcardDirectTcpPolicyRejected;
+          assert unknownPolicyWorkspaceRejected;
           assert dnsBurstRejected;
           assert excessiveDnsTimeoutRejected;
           assert insufficientDnsTimeoutRejected;
@@ -1826,6 +1955,7 @@
               "bad-cert.example"
               "passthrough.example"
               "second-allowed.example"
+              "api.wild.example"
             ];
             networking.hosts."127.0.0.1" = [
               "private.example"
@@ -1863,6 +1993,7 @@
                   hostServices = [ "adb" ];
                   egress.httpHosts = [
                     "allowed.example"
+                    "*.wild.example"
                     "bad-cert.example"
                     "multicast.example"
                     "private.example"
@@ -2037,7 +2168,7 @@
             machine.succeed("ip netns add outside; ip link add outside-host type veth peer name eth0 netns outside")
             machine.succeed("ip address add 11.0.0.1/24 dev outside-host; ip link set outside-host up")
             machine.succeed("ip -n outside link set lo up; ip -n outside link set eth0 up; ip -n outside address add 11.0.0.2/24 dev eth0; ip -n outside route add 10.100.0.0/24 via 11.0.0.1")
-            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --log-queries --log-facility=- --address=/allowed.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/direct.example/11.0.0.2 --address=/multicast.example/224.0.0.1 --address=/passthrough.example/11.0.0.2 --address=/rebind.example/10.0.0.2 --address=/second-allowed.example/11.0.0.2")
+            machine.succeed("systemd-run --unit=seter-test-upstream --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --user=root --port=53 --listen-address=11.0.0.2 --bind-interfaces --no-resolv --no-hosts --log-queries --log-facility=- --address=/allowed.example/11.0.0.2 --address=/api.wild.example/11.0.0.2 --address=/bad-cert.example/11.0.0.2 --address=/direct.example/11.0.0.2 --address=/multicast.example/224.0.0.1 --address=/passthrough.example/11.0.0.2 --address=/rebind.example/10.0.0.2 --address=/second-allowed.example/11.0.0.2")
             machine.wait_for_unit("seter-test-upstream.service")
             machine.succeed("systemd-run --unit=seter-test-direct-tcp --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:2222,bind=11.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/cat")
             machine.wait_for_unit("seter-test-direct-tcp.service")
@@ -2066,6 +2197,9 @@
             # network boundary remains IPv4-only.
             machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 allowed.example A) = 11.0.0.2")
             machine.succeed("test $(ip netns exec alpha dig +tcp +short @10.100.0.1 allowed.example A) = 11.0.0.2")
+            machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 api.wild.example A) = 11.0.0.2")
+            machine.succeed("ip netns exec alpha dig @10.100.0.1 wild.example A | grep -F 'status: REFUSED'")
+            machine.succeed("ip netns exec alpha dig @10.100.0.1 deep.api.wild.example A | grep -F 'status: REFUSED'")
             machine.succeed("ip netns exec alpha dig @10.100.0.1 child.allowed.example A | grep -F 'status: REFUSED'")
             machine.succeed("ip netns exec alpha dig @10.100.0.1 denied.example A | grep -F 'status: REFUSED'")
             machine.succeed("ip netns exec beta dig @10.100.0.1 allowed.example A | grep -F 'status: REFUSED'")
@@ -2118,6 +2252,9 @@
             # returns a useful 403 on denials, and resolves the reviewed host
             # instead of trusting the packet's original destination.
             machine.succeed("ip netns exec alpha curl --noproxy '*' --fail --silent http://allowed.example/ | grep -F 'allowed upstream'")
+            machine.succeed("ip netns exec alpha curl --noproxy '*' --fail --silent http://api.wild.example/ | grep -F 'allowed upstream'")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/wild-apex-denied --write-out '%{http_code}' -H 'Host: wild.example' http://11.0.0.2/) = 403")
+            machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/wild-deep-denied --write-out '%{http_code}' -H 'Host: deep.api.wild.example' http://11.0.0.2/) = 403")
             machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --fail --silent http://allowed.example/ | grep -F 'allowed upstream'")
             machine.succeed("test $(ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --silent --output /tmp/explicit-denied --write-out '%{http_code}' http://denied.example/) = 403; grep -F 'not in this workspace' /tmp/explicit-denied")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --fail --silent http://allowed.example/ http://allowed.example/index.html | grep -c 'allowed upstream') = 2")
@@ -2125,6 +2262,10 @@
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/denied --write-out '%{http_code}' -H 'Host: denied.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/denied")
             machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/child-denied --write-out '%{http_code}' -H 'Host: child.allowed.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/child-denied")
             machine.succeed("test $(ip netns exec beta curl --noproxy '*' --silent --output /tmp/beta-denied --write-out '%{http_code}' -H 'Host: allowed.example' http://11.0.0.2/) = 403; grep -F 'not in this workspace' /tmp/beta-denied")
+            machine.succeed("ip netns exec alpha curl --noproxy '*' --silent -H 'Host: denied.example' 'http://11.0.0.2/private?seter-sensitive-query=1' >/dev/null")
+            machine.succeed("ip netns exec beta dig @10.100.0.1 beta-only-observation.example A | grep -F 'status: REFUSED'")
+            machine.succeed("seter audit alpha --since 1h > /tmp/alpha-audit; grep -F denied.example /tmp/alpha-audit; grep -F direct-tcp /tmp/alpha-audit; ! grep -F beta-only-observation.example /tmp/alpha-audit; ! grep -F seter-sensitive-query /tmp/alpha-audit")
+            machine.succeed("seter audit alpha --since 1h --paths > /tmp/alpha-audit-paths; grep -F seter-sensitive-query /tmp/alpha-audit-paths")
             machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
             machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString explicitProxyPort} --cacert /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem --fail --silent https://allowed.example/index.html | grep -F 'allowed upstream'")
             # Header placeholders are replaced from the workspace's private

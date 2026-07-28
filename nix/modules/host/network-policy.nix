@@ -89,8 +89,11 @@ let
 
   forwardRules = concatMapStringsSep "\n" (workspace: ''
     ${lib.optionalString (workspace.egress.tcp != [ ])
-      ''iifname "${cfg.bridge}" ip saddr ${workspace.network.address} ip daddr . tcp dport @${workspace.tcpSet} accept comment "seter direct TCP ${workspace.name}"''
+      ''
+        iifname "${cfg.bridge}" ip saddr ${workspace.network.address} ip daddr . tcp dport @${workspace.tcpSet} ct state new limit rate 20/second burst 40 packets log prefix "seter-tcp ${workspace.network.address} allow "
+              iifname "${cfg.bridge}" ip saddr ${workspace.network.address} ip daddr . tcp dport @${workspace.tcpSet} accept comment "seter direct TCP ${workspace.name}"''
     }
+    iifname "${cfg.bridge}" ip saddr ${workspace.network.address} meta l4proto tcp ct state new limit rate 20/second burst 40 packets log prefix "seter-tcp ${workspace.network.address} deny "
     iifname "${cfg.bridge}" ip saddr ${workspace.network.address} counter drop comment "seter default-deny ${workspace.name}"
   '') workspaces;
 in

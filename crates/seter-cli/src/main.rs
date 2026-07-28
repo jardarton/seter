@@ -1,12 +1,14 @@
+mod audit;
 mod cli;
 mod lifecycle;
+mod policy;
 mod registry;
 
 use std::{io, process::ExitCode};
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, PolicyCommand};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
@@ -36,6 +38,15 @@ fn run() -> Result<i32> {
             println!("{}", registry.workspace(&workspace)?.network.address);
             Ok(0)
         }
+        Command::Audit {
+            workspace,
+            since,
+            paths,
+        } => audit::show(&workspace, &since, paths),
+        Command::Policy { command } => match command {
+            PolicyCommand::Review { workspace, file } => policy::review(&workspace, &file),
+            PolicyCommand::Status { workspace, file } => policy::status(&workspace, &file),
+        },
         Command::Init { workspace } => lifecycle::init(&workspace),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
@@ -46,6 +57,7 @@ fn run() -> Result<i32> {
         Command::ProxyCa => lifecycle::proxy_ca(),
         Command::StartWorkspace { workspace } => lifecycle::start_workspace(&workspace),
         Command::StopWorkspace { workspace } => lifecycle::stop_workspace(&workspace),
+        Command::ExportAudit { workspace } => audit::privileged_export(&workspace),
         Command::Completions { shell } => {
             let shell: clap_complete::Shell = shell.into();
             clap_complete::generate(shell, &mut cli::command(), "seter", &mut io::stdout());
@@ -81,12 +93,15 @@ fn command_name(command: &Command) -> &'static str {
         Command::Status { .. } => "status",
         Command::List => "list",
         Command::Ip { .. } => "ip",
+        Command::Audit { .. } => "audit",
+        Command::Policy { .. } => "policy",
         Command::SshHostKey { .. } => "ssh-host-key",
         Command::ProxyCa => "proxy-ca",
         Command::Gc => "gc",
         Command::Completions { .. } => "completions",
         Command::StartWorkspace { .. } => "__start",
         Command::StopWorkspace { .. } => "__stop",
+        Command::ExportAudit { .. } => "__audit",
     }
 }
 

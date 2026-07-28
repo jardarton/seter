@@ -6,7 +6,7 @@ Seter treats guest DNS as part of the egress boundary, not merely as a name-reso
 
 The listener derives its allowlist from the workspace's intercepted HTTP hosts, TLS-passthrough hosts, and named direct-TCP destinations. Literal IPv4 direct-TCP destinations are omitted because they require no DNS.
 
-Matching is exact, case-insensitive, and insensitive to one final DNS root dot. For example, `api.example.com` permits `API.EXAMPLE.COM.` but not `child.api.example.com`.
+Matching is case-insensitive and insensitive to one final DNS root dot. Exact grants match only that name. A reviewed single-label Host Pattern such as `*.example.com` matches `api.example.com`, but excludes both `example.com` and `deep.api.example.com`.
 
 Only Internet-class `A` queries are forwarded. An exact `AAAA` query receives a local `NOERROR` response with no answers so dual-stack clients can immediately continue with IPv4. Other classes and record types receive `REFUSED`. IPv6 and general UDP egress are out of scope.
 

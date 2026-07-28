@@ -15,6 +15,7 @@ let
     mapAttrsToList
     mkEnableOption
     mkIf
+    mkAfter
     nameValuePair
     mkOption
     types
@@ -25,6 +26,38 @@ let
   defaultPackage = pkgs.callPackage ../../package.nix { };
   lifecycleLockDirectory = "/run/lock/seter";
   workspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
+
+  hostPatterns = import ./host-patterns.nix { inherit lib; };
+  policyRaw =
+    if cfg.policyFile == null then
+      {
+        version = 1;
+        workspaces = { };
+      }
+    else
+      builtins.fromTOML (builtins.readFile cfg.policyFile);
+  policyWorkspaces = policyRaw.workspaces or { };
+  policyEgressFor = value: value.egress or { };
+  policyHttpFor = value: (policyEgressFor value)."http-hosts" or [ ];
+  policyPassthroughFor = value: (policyEgressFor value)."passthrough-hosts" or [ ];
+  policyTcpFor = value: (policyEgressFor value).tcp or [ ];
+  hasOnlyAttrs =
+    allowed: value:
+    builtins.isAttrs value && lib.all (name: builtins.elem name allowed) (attrNames value);
+  policyStructureValid =
+    hasOnlyAttrs [ "version" "workspaces" ] policyRaw
+    && builtins.isAttrs policyWorkspaces
+    && lib.all (
+      value:
+      hasOnlyAttrs [ "egress" ] value
+      && hasOnlyAttrs [ "http-hosts" "passthrough-hosts" "tcp" ] (policyEgressFor value)
+      && lib.all (destination: hasOnlyAttrs [ "host" "port" ] destination) (policyTcpFor value)
+    ) (builtins.attrValues policyWorkspaces);
+  policyWorkspaceDefinitions = mapAttrs (_: value: {
+    egress.httpHosts = mkAfter (policyHttpFor value);
+    egress.passthroughHosts = mkAfter (policyPassthroughFor value);
+    egress.tcp = mkAfter (policyTcpFor value);
+  }) policyWorkspaces;
 
   valuesFor = select: map select workspaces;
   hasUniqueValues = values: builtins.length values == builtins.length (unique values);
@@ -207,6 +240,20 @@ let
   };
 
   registryFile = pkgs.writeText "seter-workspaces.json" (builtins.toJSON lifecycleRegistry);
+  activePolicyFile = pkgs.writeText "seter-active-policy.json" (
+    builtins.toJSON {
+      version = 1;
+      workspaces = mapAttrs (_: workspace: {
+        egress = {
+          "http-hosts" = map lib.toLower workspace.egress.httpHosts;
+          "passthrough-hosts" = map lib.toLower workspace.egress.passthroughHosts;
+          tcp = map (
+            destination: destination // { host = lib.toLower destination.host; }
+          ) workspace.egress.tcp;
+        };
+      }) cfg.workspaces;
+    }
+  );
 
   workspaceRuntime = mapAttrs (
     name: workspace:
@@ -235,6 +282,7 @@ let
       [
         "__start"
         "__stop"
+        "__audit"
       ]
   ) (attrNames cfg.workspaces);
 
@@ -535,10 +583,30 @@ in
       default = null;
       description = "Reviewed public interception CA certificate installed in every trusted Runner.";
     };
+
+    policyFile = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      description = "Consumer-owned TOML Policy File imported into effective workspace Policy Grants.";
+    };
   };
 
   config = mkIf cfg.enable {
+    seter.host.workspaces = policyWorkspaceDefinitions;
+
     assertions = [
+      {
+        assertion = (policyRaw.version or null) == 1;
+        message = "seter.host.policyFile must use Policy File version 1";
+      }
+      {
+        assertion = policyStructureValid;
+        message = "seter.host.policyFile contains unknown fields or invalid table structure";
+      }
+      {
+        assertion = lib.all (name: builtins.hasAttr name cfg.workspaces) (attrNames policyWorkspaces);
+        message = "seter.host.policyFile must not refer to an unknown workspace";
+      }
       {
         assertion = lib.all (name: builtins.match "[a-z0-9][a-z0-9-]{0,62}" name != null) (
           attrNames cfg.workspaces
@@ -597,6 +665,32 @@ in
       }
     ]
     ++ concatMap (workspace: [
+      {
+        assertion = lib.all hostPatterns.valid (
+          workspace.egress.httpHosts ++ workspace.egress.passthroughHosts
+        );
+        message = "seter.host.workspaces.${workspace.name} HTTP and passthrough grants must be exact lower-case hosts or safe single-label Host Patterns";
+      }
+      {
+        assertion =
+          hasUniqueValues (normalizeHosts workspace.egress.httpHosts)
+          && hasUniqueValues (normalizeHosts workspace.egress.passthroughHosts)
+          && hasUniqueValues (
+            map (
+              destination: "${lib.toLower destination.host}:${toString destination.port}"
+            ) workspace.egress.tcp
+          );
+        message = "seter.host.workspaces.${workspace.name} Policy Grants must not contain duplicates";
+      }
+      {
+        assertion = lib.all (
+          http:
+          lib.all (
+            passthrough: !(hostPatterns.overlaps (lib.toLower http) (lib.toLower passthrough))
+          ) workspace.egress.passthroughHosts
+        ) workspace.egress.httpHosts;
+        message = "seter.host.workspaces.${workspace.name} intercepted HTTP and TLS passthrough Host Patterns must not overlap";
+      }
       {
         assertion = validCheckoutName (checkoutNameFor workspace);
         message = "seter.host.workspaces.${workspace.name} repository URL must end in a checkout name starting with a letter or digit and containing only letters, digits, underscores, dots, or hyphens; set repository.checkoutName explicitly otherwise";
@@ -704,6 +798,10 @@ in
     environment.etc = {
       "seter/workspaces.json" = {
         source = registryFile;
+        mode = "0444";
+      };
+      "seter/policy.json" = {
+        source = activePolicyFile;
         mode = "0444";
       };
     }

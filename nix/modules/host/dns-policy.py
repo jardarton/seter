@@ -64,7 +64,7 @@ class PolicyServer:
             ipaddress.IPv4Address(require_string(config, "sourceAddress"))
         )
         self.allowed_names = frozenset(
-            canonical_policy_name(name) for name in require_string_list(config, "allowedNames")
+            canonical_policy_pattern(name) for name in require_string_list(config, "allowedNames")
         )
         self.backend_address = str(
             ipaddress.IPv4Address(require_string(config, "backendAddress"))
@@ -301,12 +301,12 @@ class PolicyServer:
                 rcode=dns.rcode.REFUSED,
                 tcp=tcp,
             )
-        if name not in self.allowed_names:
+        if not policy_name_allowed(self.allowed_names, name):
             return self.deny(
                 query,
                 source=source,
                 protocol=protocol,
-                reason="name is not exactly allowlisted",
+                reason="name is not exactly allowlisted or matched by an allowed Host Pattern",
                 name=name,
                 query_type=query_type,
                 rcode=dns.rcode.REFUSED,
@@ -439,6 +439,25 @@ def canonical_policy_name(value: str) -> str:
     if not name.is_absolute():
         raise ValueError(f"allowed DNS name is not absolute: {value!r}")
     return name.to_text(omit_final_dot=True)
+
+
+def canonical_policy_pattern(value: str) -> str:
+    text = value.rstrip(".").lower()
+    if text.startswith("*."):
+        suffix = canonical_policy_name(text[2:])
+        if "*" in suffix:
+            raise ValueError("wildcard syntax is allowed only in the leading label")
+        return "*." + suffix
+    if "*" in text:
+        raise ValueError("wildcard syntax is allowed only in the leading label")
+    return canonical_policy_name(text)
+
+
+def policy_name_allowed(patterns: frozenset[str], name: str) -> bool:
+    if name in patterns:
+        return True
+    first, separator, suffix = name.partition(".")
+    return bool(first) and separator == "." and ("*." + suffix) in patterns
 
 
 def local_response(query: dns.message.Message, rcode: int) -> dns.message.Message:
