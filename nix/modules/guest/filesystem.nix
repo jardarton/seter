@@ -7,6 +7,7 @@
 let
   cfg = config.seter.guest;
   volume = cfg.projectVolume;
+  home = cfg.homeVolume;
   nixStore = cfg.nixStore;
   nixGcGuard =
     pkgs.runCommand "seter-nix-gc-guard"
@@ -95,6 +96,24 @@ in
     };
   };
 
+  options.seter.guest.homeVolume = {
+    enable = mkEnableOption "a persistent Home Volume" // {
+      default = true;
+    };
+
+    image = mkOption {
+      type = types.str;
+      default = "${cfg.name}-home.img";
+      description = "Host path to the Home Volume image, absolute or relative to the runner directory.";
+    };
+
+    size = mkOption {
+      type = types.ints.positive;
+      default = 4096;
+      description = "Initial Home Volume capacity in MiB.";
+    };
+  };
+
   config = mkIf cfg.enable {
     assertions = [
       {
@@ -104,6 +123,14 @@ in
       {
         assertion = !nixStore.enable || !volume.enable || nixStore.image != volume.image;
         message = "seter.guest.nixStore.image must differ from seter.guest.projectVolume.image";
+      }
+      {
+        assertion = !home.enable || !volume.enable || home.image != volume.image;
+        message = "seter.guest.homeVolume.image must differ from seter.guest.projectVolume.image";
+      }
+      {
+        assertion = !home.enable || !nixStore.enable || home.image != nixStore.image;
+        message = "seter.guest.homeVolume.image must differ from seter.guest.nixStore.image";
       }
     ];
 
@@ -119,14 +146,22 @@ in
           fsType = "ext4";
         }
       ]
+      ++ optionals home.enable [
+        {
+          inherit (home) image size;
+          label = "seter-home";
+          mountPoint = "/home/${cfg.ssh.user}";
+          fsType = "ext4";
+        }
+      ]
       ++ optionals nixStore.enable [
         {
           inherit (nixStore) image size;
           label = "seter-nix";
           # Mount one persistent filesystem at /nix so both the overlay's
           # upper/work directories and /nix/var/nix use the same bounded
-          # workspace-private volume. The host share remains a read-only
-          # lower layer at /nix/.ro-store.
+          # workspace-private volume. The Runner Store View remains a
+          # read-only lower layer at /nix/.ro-store.
           mountPoint = "/nix";
           fsType = "ext4";
         }
@@ -150,26 +185,41 @@ in
       sandbox = true;
     };
 
-    # Nix GC sees the merged overlay namespace, including unrelated paths in
-    # the shared host store. Deleting any lower-only path creates a persistent
-    # whiteout in the private upper layer and can hide a future runner closure.
+    # Nix GC sees the merged overlay namespace. Deleting any lower-only path
+    # creates a persistent whiteout in the private upper layer and can hide a
+    # future Runner closure.
     # Disable daemon-triggered collection and shadow the normal destructive
     # CLI entry points to prevent accidents. This is not a guest security
     # boundary: a hostile workspace can call the real store binary directly,
     # but it can already corrupt its own private image and recovery is the same.
     environment.systemPackages = mkIf nixStore.enable [ nixGcGuard ];
 
-    # The guest Nix database is persistent, so closures loaded from the
-    # read-only host store remain registered across runner changes. Preserve
-    # every booted system as a guest GC root so its registrations stay live.
-    # The host keeps the corresponding runner generations rooted as the other
-    # half of this persistent-database contract.
-    boot.postBootCommands = mkIf nixStore.enable ''
-      booted_system="$(${pkgs.coreutils}/bin/readlink -f /run/booted-system)"
-      booted_root=/nix/var/nix/gcroots/seter-lower-closures/"$(${pkgs.coreutils}/bin/basename "$booted_system")"
-      ${pkgs.coreutils}/bin/mkdir -p /nix/var/nix/gcroots/seter-lower-closures
-      ${pkgs.coreutils}/bin/ln -sfn "$booted_system" "$booted_root"
-    '';
+    # The private Nix database persists while each Runner carries a different
+    # immutable Store View. When the selected Runner changes, remove database
+    # registrations for paths that disappeared with the old view; otherwise
+    # Nix would continue treating those absent paths as valid. A rolled-back
+    # host generation loads its own Runner closure again before this runs.
+    boot.postBootCommands = mkIf nixStore.enable (
+      lib.mkAfter ''
+        booted_system="$(${pkgs.coreutils}/bin/readlink -f /run/booted-system)"
+        view_marker=/nix/var/nix/seter-store-view
+        booted_root=/nix/var/nix/gcroots/seter-lower-closures/current
+        ${pkgs.coreutils}/bin/mkdir -p /nix/var/nix/gcroots/seter-lower-closures
+        ${pkgs.findutils}/bin/find /nix/var/nix/gcroots/seter-lower-closures \
+          -mindepth 1 -maxdepth 1 ! -name current -delete
+        ${pkgs.coreutils}/bin/ln -sfn "$booted_system" "$booted_root"
+
+        previous_view=
+        if test -f "$view_marker"; then
+          previous_view="$(${pkgs.coreutils}/bin/cat "$view_marker")"
+        fi
+        if test "$previous_view" != "$booted_system"; then
+          ${config.nix.package}/bin/nix-store --verify
+          ${pkgs.coreutils}/bin/printf '%s\n' "$booted_system" > "$view_marker.tmp"
+          ${pkgs.coreutils}/bin/mv -f "$view_marker.tmp" "$view_marker"
+        fi
+      ''
+    );
 
     systemd.tmpfiles.settings."10-seter-project" = mkIf (volume.enable && cfg.ssh.enable) {
       ${cfg.projectDirectory}.d = {
@@ -177,22 +227,25 @@ in
         group = "users";
         mode = "0755";
       };
-      "${cfg.projectDirectory}/.seter-state".d = {
-        user = "root";
-        group = "root";
-        mode = "0700";
+      "/home/${cfg.ssh.user}" = mkIf home.enable {
+        d = {
+          user = cfg.ssh.user;
+          group = "users";
+          mode = "0700";
+        };
       };
     };
 
+    # microvm.nix builds the Runner closure into a read-only EROFS store disk.
+    # In particular, do not add a /nix/store share here: doing so would make
+    # the whole host store enumerable and disable the closure-filtered disk.
     microvm.shares = [
       {
         proto = "virtiofs";
-        tag = "ro-store";
-        # Keep the runner and host module on one deterministic socket
-        # contract. The workspace name is validated by the host registry.
-        socket = "/run/seter/${cfg.name}/virtiofs-ro-store.sock";
-        source = "/nix/store";
-        mountPoint = "/nix/.ro-store";
+        tag = "seter-identity";
+        socket = "/run/seter/${cfg.name}/virtiofs-identity.sock";
+        source = "/run/credentials/seter-identity-virtiofsd-${cfg.name}.service";
+        mountPoint = "/run/seter-identity";
         readOnly = true;
       }
     ];

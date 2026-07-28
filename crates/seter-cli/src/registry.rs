@@ -111,7 +111,6 @@ pub struct Resources {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ssh {
     pub user: String,
-    pub known_host_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -294,13 +293,6 @@ impl Registry {
                     volume.image
                 );
             }
-            if let Some(host_key) = &workspace.ssh.known_host_key {
-                ensure!(
-                    !host_key.trim().is_empty(),
-                    "workspace {name:?} has an empty SSH host key"
-                );
-            }
-
             ensure!(
                 addresses.insert(workspace.network.address),
                 "workspace {name:?} reuses IPv4 address {}",
@@ -374,7 +366,7 @@ mod tests {
             "tap": "seter-minimal"
           },
           "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
-          "ssh": { "user": "seter", "knownHostKey": null },
+          "ssh": { "user": "seter" },
           "storage": {
             "project": { "image": "minimal-project.img", "sizeMiB": 4096 },
             "home": { "image": "minimal-home.img", "sizeMiB": 4096 },

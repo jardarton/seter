@@ -4,11 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     net::{SocketAddr, TcpStream},
-    os::{
-        fd::AsRawFd,
-        raw::c_int,
-        unix::fs::{OpenOptionsExt, PermissionsExt},
-    },
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output},
     thread,
@@ -22,9 +18,8 @@ use crate::registry::{Registry, RunnerIdentity, Workspace};
 const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
 const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
 
-const STATE_ROOT: &str = "/var/lib/seter/workspaces";
-const LOCK_ROOT: &str = "/run/lock/seter";
 const PROXY_CA_FILE: &str = "/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem";
+const KNOWN_HOSTS_ROOT: &str = "/var/lib/seter/known-hosts";
 const SSH_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,12 +172,8 @@ pub fn shell(name: &str) -> Result<i32> {
         state.label()
     );
 
-    let host_key = workspace.ssh.known_host_key.as_deref().with_context(|| {
-        format!(
-            "workspace {name:?} has no pinned SSH host key; after its first boot and shutdown, run `seter ssh-host-key {name}`"
-        )
-    })?;
-    validate_public_key(host_key)?;
+    let host_key = workspace_host_key(name)?;
+    validate_public_key(&host_key)?;
     wait_for_ssh(name, workspace)?;
 
     let known_hosts = TemporaryFile::new("known-hosts")?;
@@ -219,21 +210,8 @@ pub fn shell(name: &str) -> Result<i32> {
 
 pub fn ssh_host_key(name: &str) -> Result<i32> {
     let registry = Registry::load_default()?;
-    let workspace = registry.workspace(name)?;
-    ensure!(
-        !matches!(
-            state_for(name, workspace)?,
-            State::Running | State::Starting | State::Stopping
-        ),
-        "workspace {name:?} must be stopped before reading its project image"
-    );
-
-    if uses_test_state() || is_root()? {
-        read_host_key(name)
-    } else {
-        run_elevated(&[OsString::from("__read-host-key"), OsString::from(name)])?;
-        Ok(0)
-    }
+    registry.workspace(name)?;
+    print_host_key(&workspace_host_key(name)?)
 }
 
 pub fn proxy_ca() -> Result<i32> {
@@ -280,37 +258,31 @@ pub fn proxy_ca() -> Result<i32> {
     Ok(0)
 }
 
-pub fn read_host_key(name: &str) -> Result<i32> {
-    enter_privileged_mode()?;
-    let registry = Registry::load_default()?;
-    let workspace = registry.workspace(name)?;
-    let state_dir = state_root().join(name);
-    let _lifecycle_lock = LifecycleLock::acquire(&lifecycle_lock_path(name))?;
-    ensure!(
-        !matches!(
-            state_for(name, workspace)?,
-            State::Running | State::Starting | State::Stopping
+fn workspace_host_key(name: &str) -> Result<String> {
+    let root = env::var_os("SETER_KNOWN_HOSTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(KNOWN_HOSTS_ROOT));
+    let path = root.join(name);
+    match fs::read_to_string(&path) {
+        Ok(key) => {
+            let key = key.trim().to_owned();
+            validate_public_key(&key).with_context(|| {
+                format!("host-created Workspace SSH Identity at {} is invalid", path.display())
+            })?;
+            Ok(key)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => bail!(
+            "workspace {name:?} has no host-created Workspace SSH Identity at {}; redeploy the NixOS host configuration",
+            path.display()
         ),
-        "workspace {name:?} must be stopped before reading its project image"
-    );
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read Workspace SSH Identity public key {}", path.display())
+        }),
+    }
+}
 
-    let image = state_dir.join(&workspace.storage.project.image);
-    ensure!(
-        image.is_file(),
-        "project image {} does not exist; boot the workspace once, then shut it down",
-        image.display()
-    );
-
-    let output = command("SETER_DEBUGFS", "debugfs")
-        .arg("-R")
-        .arg("cat /.seter-state/ssh/ssh_host_ed25519_key.pub")
-        .arg(&image)
-        .output()
-        .with_context(|| format!("failed to read SSH host key from {}", image.display()))?;
-    ensure_success("debugfs", &output)?;
-    let key = String::from_utf8(output.stdout).context("SSH host key was not UTF-8")?;
-    let key = key.trim();
-    validate_public_key(key).context("project image contained an invalid SSH host public key")?;
+fn print_host_key(key: &str) -> Result<i32> {
+    validate_public_key(key)?;
 
     let key_file = TemporaryFile::new("host-key")?;
     fs::write(key_file.path(), format!("{key}\n"))?;
@@ -324,7 +296,6 @@ pub fn read_host_key(name: &str) -> Result<i32> {
 
     println!("{key}");
     eprintln!("{}", String::from_utf8_lossy(&fingerprint.stdout).trim());
-    eprintln!("Add this value as the workspace's `knownHostKey` after verifying the fingerprint.");
     Ok(0)
 }
 
@@ -386,54 +357,6 @@ fn validate_runner(
         "runner identity does not match workspace {workspace_name:?}\nexpected: {expected_identity:#?}\nfound: {actual:#?}"
     );
     Ok(())
-}
-
-struct LifecycleLock(fs::File);
-
-impl LifecycleLock {
-    fn acquire(path: &Path) -> Result<Self> {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).truncate(false);
-        // Production locks are provisioned by tmpfiles under a root-owned
-        // directory so the workspace account cannot replace them. Isolated
-        // tests use disposable state directories and create their own lock.
-        if uses_test_state() {
-            options.create(true).mode(0o600);
-        }
-        let file = options
-            .open(path)
-            .with_context(|| format!("failed to open lifecycle lock {}", path.display()))?;
-        // SAFETY: flock only inspects the valid file descriptor and integer
-        // operation flags supplied here. The descriptor remains owned by
-        // this value for at least as long as the lock.
-        let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            bail!(
-                "workspace lifecycle is busy (could not lock {}: {error})",
-                path.display()
-            );
-        }
-        Ok(Self(file))
-    }
-}
-
-impl Drop for LifecycleLock {
-    fn drop(&mut self) {
-        // SAFETY: the descriptor is still valid while Drop runs. Unlocking
-        // is best effort because closing the descriptor releases it anyway.
-        unsafe {
-            flock(self.0.as_raw_fd(), LOCK_UN);
-        }
-    }
-}
-
-const LOCK_EX: c_int = 2;
-const LOCK_NB: c_int = 4;
-const LOCK_UN: c_int = 8;
-
-unsafe extern "C" {
-    fn flock(fd: c_int, operation: c_int) -> c_int;
 }
 
 fn state_for(name: &str, workspace: &Workspace) -> Result<State> {
@@ -645,20 +568,6 @@ fn vm_unit(name: &str) -> String {
 
 fn runtime_unit(name: &str) -> String {
     format!("seter-runtime-{name}.target")
-}
-
-fn state_root() -> PathBuf {
-    env::var_os("SETER_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(STATE_ROOT))
-}
-
-fn lifecycle_lock_path(name: &str) -> PathBuf {
-    if uses_test_state() {
-        state_root().join(name).join("lifecycle.lock")
-    } else {
-        PathBuf::from(LOCK_ROOT).join(format!("{name}.lock"))
-    }
 }
 
 // Unprivileged tests run the privileged halves in-process against a private

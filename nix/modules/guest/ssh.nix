@@ -31,6 +31,12 @@ in
       default = [ ];
       description = "SSH public keys authorized for the Seter guest user.";
     };
+
+    hostKeyPath = mkOption {
+      type = types.str;
+      default = "/run/seter-identity/ssh_host_ed25519_key";
+      description = "Read-only host-supplied Workspace SSH Identity private-key path.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -38,12 +44,10 @@ in
 
     services.openssh = mkIf ssh.enable {
       enable = true;
-      # The guest root is ephemeral, so retain its server identity on the
-      # persistent project volume without exposing it to the project user.
       hostKeys = [
         {
           type = "ed25519";
-          path = "${cfg.projectDirectory}/.seter-state/ssh/ssh_host_ed25519_key";
+          path = ssh.hostKeyPath;
         }
       ];
       settings = {

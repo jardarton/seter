@@ -42,7 +42,6 @@ fn run() -> Result<i32> {
         Command::Shell { workspace } => lifecycle::shell(&workspace),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
         Command::ProxyCa => lifecycle::proxy_ca(),
-        Command::ReadHostKey { workspace } => lifecycle::read_host_key(&workspace),
         Command::StartWorkspace { workspace } => lifecycle::start_workspace(&workspace),
         Command::StopWorkspace { workspace } => lifecycle::stop_workspace(&workspace),
         Command::Completions { shell } => {
@@ -83,7 +82,6 @@ fn command_name(command: &Command) -> &'static str {
         Command::ProxyCa => "proxy-ca",
         Command::Gc => "gc",
         Command::Completions { .. } => "completions",
-        Command::ReadHostKey { .. } => "__read-host-key",
         Command::StartWorkspace { .. } => "__start",
         Command::StopWorkspace { .. } => "__stop",
     }

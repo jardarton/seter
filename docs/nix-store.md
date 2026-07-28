@@ -1,16 +1,14 @@
 # Private writable Nix stores
 
-> **Current implementation warning:** the vertical slice exports the host's entire `/nix/store`, so guests can read unrelated host-store source and configuration artifacts. The accepted product design replaces this with a closure-filtered workspace [Store View](./store-visibility.md); it is not yet implemented.
+Seter guests combine two storage layers at `/nix/store`:
 
-Seter guests currently combine two storage layers at `/nix/store`:
-
-- the host `/nix/store`, exported by host-owned virtiofsd and mounted read-only at `/nix/.ro-store`;
+- the Runner's closure-filtered EROFS [Store View](./store-visibility.md), mounted read-only at `/nix/.ro-store`;
 - a workspace-private ext4 image mounted at `/nix`, with microvm.nix using `/nix/.rw-store` as the overlay upper and work directory.
 
 The same private image retains `/nix/var/nix`, including the guest Nix database, profiles, and GC state. The VM root remains tmpfs and the project tree remains on its separate project image.
 
 ```text
-host /nix/store (read-only VirtioFS lower)
+Runner Store View (read-only EROFS lower)
                       +
 <workspace>-nix-store.img (/nix/.rw-store upper)
                       |
@@ -22,9 +20,9 @@ guest /nix/store (writable overlay)
 
 Interactive development must be able to realize paths after a flake or lock-file change. A conventional remote builder or substituter normally copies its result into the requesting machine's store, so neither makes a read-only guest store sufficient by itself.
 
-Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The registered closure of every runner the workspace has booted remains shared without duplication. Other paths that merely happen to exist in the host store are not automatically valid in the guest's separate Nix database and may be rebuilt or substituted into the private layer.
+Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The deployed Runner closure is supplied by its immutable Store View. Other paths that merely happen to exist in the host store are not visible; required development paths are built or substituted into the private layer.
 
-The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their Runner closures for rollback. On each boot the guest creates a matching permanent root for its system closure under `/nix/var/nix/gcroots/seter-lower-closures/`.
+The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their matching Runner and Store View for rollback. On boot the guest roots the selected system closure under `/nix/var/nix/gcroots/seter-lower-closures/current`. When that selection changes, it verifies the persistent database after loading the new closure and removes registrations for paths no longer present in the active Store View. This prevents Nix from treating an absent path from an older view as valid; rolling the host generation back loads and registers that generation's closure again.
 
 ## Configuration
 
@@ -68,7 +66,7 @@ nix develop
 nix build
 ```
 
-Guest store garbage collection and deletion are deliberately unsupported. Nix scans the merged `/nix/store`, not only the private upper layer. It therefore treats unrelated, unregistered paths visible in the host lower store as garbage; deleting them records persistent OverlayFS whiteouts in the private image. Those whiteouts can hide a path required by a future runner even though the host copy was never modified.
+Guest store garbage collection and deletion are deliberately unsupported. Nix scans the merged `/nix/store`, not only the private upper layer. Deleting lower paths records persistent OverlayFS whiteouts in the private image. Those whiteouts can hide a path required by a future Runner even though its immutable Store View was never modified.
 
 Seter sets Nix's automatic free-space collection thresholds to zero, disables the NixOS GC timer, and shadows the normal `nix-collect-garbage`, `nix store gc`, `nix store delete`, `nix-store --gc`, and `nix-store --delete` entry points with a diagnostic refusal. The guard prevents accidents, not hostile guest behavior: project code can invoke the immutable real Nix binary directly, but such code can already corrupt its own private state. If that happens, recover by replacing the private Nix image as described below.
 
@@ -82,7 +80,7 @@ Back up this image only if avoiding dependency rebuilds matters. The project vol
 
 ## Security properties and limits
 
-- The host VirtioFS export remains read-only.
+- The host store is not exported; the Runner's closure-filtered EROFS Store View is read-only.
 - Guest Nix builds are sandboxed, but Nix's build sandbox is defense in depth inside the VM rather than a replacement for the VM boundary.
 - Build and fetch traffic originates in the guest and remains subject to Seter network policy.
 - Only registered runner closures are guaranteed to be reused from the host store; physical presence alone does not register a path in the guest database.

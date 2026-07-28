@@ -25,7 +25,6 @@ let
     ssh = {
       user = "seter";
       authorizedKeys = [ ];
-      knownHostKey = null;
     };
     storage = {
       project = {

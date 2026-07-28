@@ -1,6 +1,6 @@
 # Workspace storage lifecycle
 
-**Status:** accepted product design; separate persistent Home storage and reset commands are not yet implemented. The current vertical slice persists a Project Volume and private Nix-store volume while guest home state remains ephemeral.
+**Status:** persistent Project, Home, and private Nix-store volumes are implemented; reset commands remain roadmap work.
 
 A workspace has three persistent storage classes with different safety contracts.
 

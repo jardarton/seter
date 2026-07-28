@@ -28,7 +28,6 @@ let
 
   valuesFor = select: map select workspaces;
   hasUniqueValues = values: builtins.length values == builtins.length (unique values);
-  nonBlank = value: builtins.match ".*[^[:space:]].*" value != null;
 
   parseIpv4 =
     address:
@@ -173,7 +172,7 @@ let
         inherit (workspace.resources) memoryMiB cpuQuotaPercent;
       };
       ssh = {
-        inherit (workspace.ssh) user knownHostKey;
+        inherit (workspace.ssh) user;
       };
       runner = {
         path = toString workspaceRunners.${name};
@@ -194,7 +193,9 @@ let
       inherit account workspace;
       lifecycleLock = "${lifecycleLockDirectory}/${name}.lock";
       runtimeDirectory = "seter/${name}";
-      socket = "/run/seter/${name}/virtiofs-ro-store.sock";
+      identitySocket = "/run/seter/${name}/virtiofs-identity.sock";
+      identityDirectory = "/var/lib/seter/identities/${name}";
+      knownHostFile = "/var/lib/seter/known-hosts/${name}";
       stateDirectory = "/var/lib/seter/workspaces/${name}";
     }
   ) cfg.workspaces;
@@ -286,20 +287,21 @@ let
     }
   ) workspaceRuntime;
 
-  virtiofsdServices = mapAttrs' (
+  identityVirtiofsdServices = mapAttrs' (
     name: runtime:
     let
-      inherit (runtime) account socket;
-      runVirtiofsd = pkgs.writeShellScript "seter-virtiofsd-${name}" ''
+      inherit (runtime) identityDirectory identitySocket;
+      runtimeIdentityDirectory = "/run/credentials/seter-identity-virtiofsd-${name}.service";
+      runIdentityVirtiofsd = pkgs.writeShellScript "seter-identity-virtiofsd-${name}" ''
         set -eu
-        rm -f ${lib.escapeShellArg socket}
+        test "$CREDENTIALS_DIRECTORY" = ${lib.escapeShellArg runtimeIdentityDirectory}
+        rm -f ${lib.escapeShellArg identitySocket}
         ${lib.getExe pkgs.virtiofsd} \
-          --socket-path=${lib.escapeShellArg socket} \
-          --socket-group=${lib.escapeShellArg account} \
-          --shared-dir=/nix/store \
+          --socket-path=${lib.escapeShellArg identitySocket} \
+          --shared-dir="$CREDENTIALS_DIRECTORY" \
           --readonly \
           --posix-acl=always \
-          --cache=auto \
+          --cache=never \
           --inode-file-handles=prefer &
         virtiofsd_pid=$!
 
@@ -312,39 +314,44 @@ let
         trap shutdown INT TERM
         wait "$virtiofsd_pid"
       '';
-      waitForSocket = pkgs.writeShellScript "seter-virtiofsd-${name}-ready" ''
+      waitForSocket = pkgs.writeShellScript "seter-identity-virtiofsd-${name}-ready" ''
         set -eu
         for attempt in $(${pkgs.coreutils}/bin/seq 1 100); do
-          test -S ${lib.escapeShellArg socket} && exit 0
+          if test -S ${lib.escapeShellArg identitySocket} && kill -0 "$MAINPID" 2>/dev/null; then
+            exit 0
+          fi
           ${pkgs.coreutils}/bin/sleep 0.05
         done
-        echo "VirtioFS socket ${socket} did not become ready" >&2
+        echo "Workspace SSH Identity socket ${identitySocket} did not become ready" >&2
         exit 1
       '';
     in
-    nameValuePair "seter-virtiofsd-${name}" {
-      description = "Read-only Nix store VirtioFS daemon for workspace ${name}";
+    nameValuePair "seter-identity-virtiofsd-${name}" {
+      description = "Read-only Workspace SSH Identity for ${name}";
       after = [ "seter-tap-${name}.service" ];
       requires = [ "seter-tap-${name}.service" ];
       bindsTo = [ "seter-tap-${name}.service" ];
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
         Type = "exec";
-        User = account;
-        Group = account;
+        User = runtime.account;
+        Group = runtime.account;
         RuntimeDirectory = runtime.runtimeDirectory;
-        RuntimeDirectoryMode = "0750";
-        ExecStart = runVirtiofsd;
+        RuntimeDirectoryMode = "0700";
+        LoadCredential = [
+          "ssh_host_ed25519_key:${identityDirectory}/ssh_host_ed25519_key"
+          "ssh_host_ed25519_key.pub:${identityDirectory}/ssh_host_ed25519_key.pub"
+        ];
+        ExecStart = runIdentityVirtiofsd;
         ExecStartPost = waitForSocket;
         TimeoutStopSec = "10s";
         Restart = "on-failure";
         RestartSec = "1s";
-        LimitNOFILE = 1048576;
-        UMask = "0007";
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
         ProtectSystem = "strict";
+        ReadOnlyPaths = [ identityDirectory ];
       };
     }
   ) workspaceRuntime;
@@ -353,8 +360,9 @@ let
     name: _:
     nameValuePair "seter-runtime-${name}" {
       description = "Host runtime plumbing for Seter workspace ${name}";
-      requires = [ "seter-virtiofsd-${name}.service" ];
-      after = [ "seter-virtiofsd-${name}.service" ];
+      requires = [ "seter-identity-virtiofsd-${name}.service" ];
+      bindsTo = [ "seter-identity-virtiofsd-${name}.service" ];
+      after = [ "seter-identity-virtiofsd-${name}.service" ];
       # Stopping either half of the lifecycle tears down the other. The VM
       # service also has PartOf= on this target so operators may still stop
       # the plumbing target directly.
@@ -581,10 +589,6 @@ in
         message = "seter.host.workspaces.${workspace.name} secret variables must reference defined secrets";
       }
       {
-        assertion = workspace.ssh.knownHostKey == null || nonBlank workspace.ssh.knownHostKey;
-        message = "seter.host.workspaces.${workspace.name}.ssh.knownHostKey must not be blank";
-      }
-      {
         assertion = hasUniqueValues [
           workspace.storage.project.image
           workspace.storage.home.image
@@ -688,7 +692,7 @@ in
 
     systemd.services =
       tapServices
-      // virtiofsdServices
+      // identityVirtiofsdServices
       // vmServices
       // {
         seter-bridge = {
@@ -728,6 +732,16 @@ in
         group = "root";
         mode = "0711";
       };
+      "/var/lib/seter/identities".d = {
+        user = "root";
+        group = "root";
+        mode = "0700";
+      };
+      "/var/lib/seter/known-hosts".d = {
+        user = "root";
+        group = cfg.operatorGroup;
+        mode = "0750";
+      };
       ${lifecycleLockDirectory}.d = {
         user = "root";
         group = "root";
@@ -757,6 +771,36 @@ in
 
     systemd.targets = runtimeTargets;
 
+    # Workspace identities are host state, not guest-generated project data.
+    # Generate them during trusted host activation, before any first boot.
+    system.activationScripts.seterWorkspaceState = {
+      deps = [
+        "users"
+        "groups"
+      ];
+      text = lib.concatStringsSep "\n" (
+        mapAttrsToList (name: runtime: ''
+          install -d -m 0700 -o root -g root ${lib.escapeShellArg runtime.identityDirectory}
+          if ! test -f ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}; then
+            ${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N "" \
+              -C ${lib.escapeShellArg "seter workspace ${name}"} \
+              -f ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}
+          fi
+          chown root:root ${lib.escapeShellArg runtime.identityDirectory}/ssh_host_ed25519_key{,.pub}
+          chmod 0600 ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}
+          chmod 0644 ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key.pub"}
+
+          install -d -m 0750 -o root -g ${lib.escapeShellArg cfg.operatorGroup} /var/lib/seter/known-hosts
+          install -m 0440 -o root -g ${lib.escapeShellArg cfg.operatorGroup} \
+            ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key.pub"} \
+            ${lib.escapeShellArg runtime.knownHostFile}
+
+          install -d -m 0700 -o ${lib.escapeShellArg runtime.account} -g ${lib.escapeShellArg runtime.account} \
+            ${lib.escapeShellArg runtime.stateDirectory}
+        '') workspaceRuntime
+      );
+    };
+
     # Authorize only exact internal commands for configured workspaces. The
     # privileged command reloads the root-owned registry and constructs the
     # systemd unit name itself; operators never receive general systemctl or
@@ -767,17 +811,14 @@ in
       commands = lifecycleSudoCommands;
     };
 
-    # These are used by lifecycle commands for strict SSH host-key handling
-    # and offline enrollment from the persistent ext4 image.
+    # These are used by lifecycle commands and Workspace SSH Identity creation.
     environment.systemPackages = [
       cfg.package
-      pkgs.e2fsprogs
       pkgs.openssh
     ];
 
     # The plumbing units expose only the registered TAP and read-only
-    # /nix/store share and never invoke runner-provided setup helpers. Only
-    # seter-vm-* executes the runner, always as the dedicated unprivileged
-    # workspace account.
+    # Workspace SSH Identity. Only seter-vm-* executes the Runner, always as
+    # the dedicated unprivileged workspace account.
   };
 }

@@ -13,7 +13,6 @@
           ip,
           mac,
           tap,
-          knownHostKey ? null,
         }:
         {
           guestProfile = "default";
@@ -34,7 +33,6 @@
           ssh = {
             user = "seter";
             authorizedKeys = [ ];
-            inherit knownHostKey;
           };
           storage = {
             project.sizeMiB = 4096;
@@ -79,7 +77,6 @@
           ip = "10.100.0.10";
           mac = "02:00:00:00:00:10";
           tap = "seter-alpha";
-          knownHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test";
         };
         beta = mkTestWorkspace {
           ip = "10.100.0.11";
@@ -195,7 +192,10 @@
 
       hostConfiguration = mkHost validWorkspaces;
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
-      minimalStoreSocket = (builtins.head self.nixosConfigurations.minimal.config.microvm.shares).socket;
+      minimalIdentityShare = builtins.head self.nixosConfigurations.minimal.config.microvm.shares;
+      minimalIdentitySocket = minimalIdentityShare.socket;
+      minimalStoreOnDisk = self.nixosConfigurations.minimal.config.microvm.storeOnDisk;
+      minimalPostBootCommands = self.nixosConfigurations.minimal.config.boot.postBootCommands;
       alphaDeviceAllow =
         hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.DeviceAllow;
       alphaTapRequires = hostConfiguration.config.systemd.services.seter-tap-alpha.requires;
@@ -643,14 +643,6 @@
         broken = validWorkspaces.alpha // {
           repository = validWorkspaces.alpha.repository // {
             url = "https://example.invalid/owner/..";
-          };
-        };
-      };
-
-      blankKnownHostKeyRejected = configurationRejected {
-        broken = validWorkspaces.alpha // {
-          ssh = validWorkspaces.alpha.ssh // {
-            knownHostKey = "   ";
           };
         };
       };
@@ -1250,7 +1242,11 @@
         nixos-host-module = hostConfiguration.config.system.build.toplevel;
 
         workspace-registry =
-          assert minimalStoreSocket == "/run/seter/minimal/virtiofs-ro-store.sock";
+          assert minimalIdentitySocket == "/run/seter/minimal/virtiofs-identity.sock";
+          assert minimalIdentityShare.source == "/run/credentials/seter-identity-virtiofsd-minimal.service";
+          assert minimalStoreOnDisk;
+          assert lib.hasInfix "nix-store --verify" minimalPostBootCommands;
+          assert lib.hasInfix "seter-store-view" minimalPostBootCommands;
           assert builtins.elem "vhost_vsock" hostConfiguration.config.boot.kernelModules;
           assert builtins.elem "/dev/vhost-vsock rw" alphaDeviceAllow;
           assert builtins.elem "nftables.service" alphaTapRequires;
@@ -1325,9 +1321,15 @@
           assert identityGuestConfiguration.config.seter.guest.network.gateway == "10.100.0.1";
           assert identityGuestConfiguration.config.seter.guest.proxy == "http://10.100.0.1:18081";
           assert identityGuestConfiguration.config.seter.guest.nixStore.enable;
+          assert identityGuestConfiguration.config.seter.guest.homeVolume.enable;
+          assert identityGuestConfiguration.config.seter.guest.homeVolume.image == "identity-home.img";
+          assert identityGuestConfiguration.config.seter.guest.homeVolume.size == 4096;
           assert identityGuestConfiguration.config.seter.guest.nixStore.image == "identity-nix-store.img";
           assert identityGuestConfiguration.config.seter.guest.nixStore.size == 16384;
           assert identityGuestConfiguration.config.microvm.writableStoreOverlay == "/nix/.rw-store";
+          assert identityGuestConfiguration.config.microvm.storeOnDisk;
+          assert
+            !(lib.any (share: share.source == "/nix/store") identityGuestConfiguration.config.microvm.shares);
           assert identityGuestConfiguration.config.fileSystems."/nix".neededForBoot;
           assert identityGuestConfiguration.config.nix.settings.sandbox;
           assert !identityGuestConfiguration.config.nix.settings.auto-optimise-store;
@@ -1364,7 +1366,7 @@
                 (.workspaces.alpha.network.mac == "02:00:00:00:00:10") and
                 (.workspaces.alpha.resources.memoryMiB == 4096) and
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
-                (.workspaces.alpha.ssh.knownHostKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test") and
+                (.workspaces.alpha.ssh == { user: "seter" }) and
                 (.workspaces.alpha.guestProfile == "default") and
                 (.workspaces.alpha.repository.url == "https://example.invalid/owner/workspace.git") and
                 (.workspaces.alpha.repository.checkoutName == "workspace") and
@@ -1444,15 +1446,11 @@
                 printf '%s\n' ActiveState=inactive SubState=dead MainPID=0
               fi
               EOF
-              cat > test-bin/debugfs <<'EOF'
-              #!${pkgs.runtimeShell}
-              echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey seter-test'
-              EOF
               cat > test-bin/ssh-keygen <<'EOF'
               #!${pkgs.runtimeShell}
               echo '256 SHA256:test seter-test (ED25519)'
               EOF
-              chmod +x test-bin/systemctl test-bin/debugfs test-bin/ssh-keygen
+              chmod +x test-bin/systemctl test-bin/ssh-keygen
               export SETER_SYSTEMCTL=$PWD/test-bin/systemctl
               export SETER_STATE_DIR=$PWD/state
               export SETER_TEST_MODE=1
@@ -1487,8 +1485,9 @@
               test "$status_code" = 3
               grep -F 'state: stopped' status
 
-              touch state/alpha/alpha-project.img state/alpha/lifecycle.lock
-              export SETER_DEBUGFS=$PWD/test-bin/debugfs
+              mkdir known-hosts
+              echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey seter-test' > known-hosts/alpha
+              export SETER_KNOWN_HOSTS_DIR=$PWD/known-hosts
               export SETER_SSH_KEYGEN=$PWD/test-bin/ssh-keygen
               seter ssh-host-key alpha > host-key 2> fingerprint
               grep -F 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey' host-key
@@ -1510,7 +1509,6 @@
           assert outOfSubnetGatewayRejected;
           assert nonHttpsRepositoryRejected;
           assert traversingCheckoutNameRejected;
-          assert blankKnownHostKeyRejected;
           assert reusedStorageImageRejected;
           assert blankSecretPlaceholderRejected;
           assert nonDistinctiveSecretPlaceholderRejected;
@@ -1707,7 +1705,7 @@
             machine.succeed("systemctl start seter-runtime-alpha.target")
             machine.wait_for_unit("seter-dns-alpha.service")
             machine.wait_for_unit("seter-tap-alpha.service")
-            machine.wait_for_unit("seter-virtiofsd-alpha.service")
+            machine.wait_for_unit("seter-identity-virtiofsd-alpha.service")
             machine.succeed("ip link show dev seter-alpha | grep -F 'master seter0'")
             machine.succeed("bridge -details link show dev seter-alpha | grep -F 'isolated on'")
             machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); ip tuntap show dev seter-alpha | grep -F \"user $uid\"")
@@ -1717,18 +1715,28 @@
             machine.succeed("test $(stat -c %a /run/lock/seter/alpha.lock) = 640")
             machine.fail("account=$(stat -c %G /run/lock/seter/alpha.lock); runuser -u $account -- rm -f /run/lock/seter/alpha.lock")
             machine.succeed("ip tuntap show dev seter-alpha | grep -F 'multi_queue'")
-            machine.succeed("test -S /run/seter/alpha/virtiofs-ro-store.sock")
-            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); test $(awk '/^Uid:/ { print $2 }' /proc/$main/status) = $uid")
-            machine.succeed("stat -c %A /run/seter/alpha/virtiofs-ro-store.sock | grep -E '^s[rwx-]{6}---$'")
-            machine.succeed("stat -c %G /run/seter/alpha/virtiofs-ro-store.sock | grep -E '^seter-alpha-[0-9a-f]{8}$'")
-            machine.succeed("main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--shared-dir=/nix/store'")
-            machine.succeed("main=$(systemctl show --value --property MainPID seter-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--readonly'")
+            machine.succeed("test -S /run/seter/alpha/virtiofs-identity.sock")
+            machine.succeed("test $(stat -c %U:%G /var/lib/seter/identities/alpha/ssh_host_ed25519_key) = root:root")
+            machine.succeed("test $(stat -c %a /var/lib/seter/identities/alpha/ssh_host_ed25519_key) = 600")
+            machine.succeed("test $(stat -c %U /run/credentials/seter-identity-virtiofsd-alpha.service/ssh_host_ed25519_key) = root")
+            machine.fail("runuser -u outsider -- test -r /run/credentials/seter-identity-virtiofsd-alpha.service/ssh_host_ed25519_key")
+            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); runuser -u $account -- test -r /run/credentials/seter-identity-virtiofsd-alpha.service/ssh_host_ed25519_key")
+            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); uid=$(id -u $account); main=$(systemctl show --value --property MainPID seter-identity-virtiofsd-alpha.service); test $(awk '/^Uid:/ { print $2 }' /proc/$main/status) = $uid")
+            machine.succeed("stat -c %G /run/seter/alpha/virtiofs-identity.sock | grep -E '^seter-alpha-[0-9a-f]{8}$'")
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-identity-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--shared-dir=/run/credentials/seter-identity-virtiofsd-alpha.service'")
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-identity-virtiofsd-alpha.service); for pid in $(cat /proc/$main/task/$main/children); do tr '\\0' ' ' < /proc/$pid/cmdline; done | grep -F -- '--readonly'")
+
+            # An unexpected daemon failure must restart instead of being
+            # classified as a successful exit and silently disabling the
+            # identity service.
+            machine.succeed("main=$(systemctl show --value --property MainPID seter-identity-virtiofsd-alpha.service); echo $main > /tmp/identity-main; child=$(cat /proc/$main/task/$main/children); kill -KILL $child")
+            machine.wait_until_succeeds("old=$(cat /tmp/identity-main); new=$(systemctl show --value --property MainPID seter-identity-virtiofsd-alpha.service); test $new -ne 0 -a $new -ne $old; systemctl is-active --quiet seter-identity-virtiofsd-alpha.service; test -S /run/seter/alpha/virtiofs-identity.sock")
 
             machine.succeed("systemctl stop seter-runtime-alpha.target")
             machine.wait_until_fails("ip link show dev seter-alpha")
-            machine.wait_until_fails("test -e /run/seter/alpha/virtiofs-ro-store.sock")
+            machine.wait_until_fails("test -e /run/seter/alpha/virtiofs-identity.sock")
             machine.wait_until_fails("systemctl is-active --quiet seter-dns-alpha.service")
-            machine.succeed("test $(systemctl show --value --property Result seter-virtiofsd-alpha.service) = success")
+            machine.succeed("test $(systemctl show --value --property Result seter-identity-virtiofsd-alpha.service) = success")
             machine.succeed("systemctl is-active --quiet seter-bridge.service")
             machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
 
@@ -2265,13 +2273,13 @@
             machine.fail("systemctl is-active --quiet seter-dns-alpha.service")
             machine.fail("systemctl is-active --quiet seter-tcp-egress-alpha.service")
             machine.fail("systemctl is-active --quiet seter-proxy.service")
-            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-tcp-egress-alpha.service seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
+            machine.succeed("rm -rf /run/systemd/system/nftables.service.d; systemctl daemon-reload; systemctl reset-failed nftables.service seter-dns-alpha.service seter-tcp-egress-alpha.service seter-proxy.service seter-tap-alpha.service seter-identity-virtiofsd-alpha.service seter-runtime-alpha.target")
 
             # A proxy startup failure must also keep the workspace TAP absent.
             machine.succeed("systemctl start nftables.service; mkdir -p /run/systemd/system/seter-proxy.service.d; printf '[Service]\\nExecStart=\\nExecStart=${pkgs.coreutils}/bin/false\\n' > /run/systemd/system/seter-proxy.service.d/fail.conf; systemctl daemon-reload")
             machine.fail("systemctl start seter-runtime-alpha.target")
             machine.fail("ip link show dev seter-alpha")
-            machine.succeed("rm -rf /run/systemd/system/seter-proxy.service.d; systemctl daemon-reload; systemctl reset-failed seter-proxy.service seter-tap-alpha.service seter-virtiofsd-alpha.service seter-runtime-alpha.target")
+            machine.succeed("rm -rf /run/systemd/system/seter-proxy.service.d; systemctl daemon-reload; systemctl reset-failed seter-proxy.service seter-tap-alpha.service seter-identity-virtiofsd-alpha.service seter-runtime-alpha.target")
           '';
         };
       };
