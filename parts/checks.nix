@@ -92,6 +92,12 @@
           tap = "seter-identity";
         })
         // {
+          repository = {
+            url = "https://api.example.com/owner/workspace.git";
+            branch = null;
+            checkoutName = null;
+            credential = "githubToken";
+          };
           secrets.githubToken = {
             placeholder = "seter-placeholder-github-0123456789abcdef";
             sourceFile = "/run/secrets/identity-github-token";
@@ -634,6 +640,14 @@
         broken = validWorkspaces.alpha // {
           repository = validWorkspaces.alpha.repository // {
             url = "ssh://git@example.invalid/owner/workspace.git";
+          };
+        };
+      };
+
+      invalidRepositoryHostRejected = configurationRejected {
+        broken = validWorkspaces.alpha // {
+          repository = validWorkspaces.alpha.repository // {
+            url = "https://./owner/workspace.git";
           };
         };
       };
@@ -1392,6 +1406,15 @@
 
               jq -e '
                 .version == 5 and
+                .workspaces.identity.repository == {
+                  url: "https://api.example.com/owner/workspace.git",
+                  branch: null,
+                  checkoutName: "workspace",
+                  credential: {
+                    name: "githubToken",
+                    placeholder: "seter-placeholder-github-0123456789abcdef"
+                  }
+                } and
                 .workspaces.identity.runner.identity.version == 2 and
                 .workspaces.identity.runner.identity.workspace == "identity" and
                 .workspaces.identity.runner.identity.hostname == "identity.vm" and
@@ -1421,16 +1444,21 @@
                 .version == 1 and
                 .workspace == "alpha" and
                 .sourceAddress == "10.100.0.10" and
-                .allowedNames == [] and
+                .allowedNames == ["example.invalid"] and
                 .backendAddress == "127.0.0.1" and
                 .backendPort == 15353
               ' ${dnsPolicyFile}
 
               jq -e '
-                .version == 2 and
+                .version == 3 and
                 (.workspaces["10.100.0.10"].name == "alpha") and
-                (.workspaces["10.100.0.10"].httpHosts == ["api.example.com"]) and
+                (.workspaces["10.100.0.10"].httpHosts == ["example.invalid", "api.example.com"]) and
                 (.workspaces["10.100.0.10"].passthroughHosts == []) and
+                (.workspaces["10.100.0.10"].repository == {
+                  host: "example.invalid",
+                  path: "/owner/workspace.git",
+                  credential: null
+                }) and
                 (.workspaces["10.100.0.10"].secrets.githubToken == {
                   credential: "seter-alpha.githubToken",
                   placeholder: "seter-placeholder-0123456789abcdef",
@@ -1516,6 +1544,7 @@
           assert bridgeTapRejected;
           assert outOfSubnetGatewayRejected;
           assert nonHttpsRepositoryRejected;
+          assert invalidRepositoryHostRejected;
           assert traversingCheckoutNameRejected;
           assert reusedStorageImageRejected;
           assert blankSecretPlaceholderRejected;

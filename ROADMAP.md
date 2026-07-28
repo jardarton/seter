@@ -80,6 +80,12 @@ Evidence: a repository with only a normal development flake can use Seter withou
 
 ### 4. Implement safe Workspace Bootstrap
 
+**Status: implemented.** `seter init` performs non-destructive, retryable
+HTTPS bootstrap through exact repository-path credential authority. The KVM
+workflow covers authenticated clone, fetch, push, default-branch selection,
+credential isolation, path rejection, complete retries, partial recovery, and
+mismatched-remote preservation.
+
 Add `seter init <workspace>` with this contract:
 
 - require the Runner installed by successful host deployment;

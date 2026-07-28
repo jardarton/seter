@@ -14,6 +14,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Bootstrap a workspace from its approved HTTPS repository.
+    Init { workspace: String },
     /// Start a workspace using its host-deployed Runner.
     Up { workspace: String },
     /// Gracefully stop a workspace.

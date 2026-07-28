@@ -40,7 +40,14 @@ pub struct Repository {
     pub url: String,
     pub branch: Option<String>,
     pub checkout_name: String,
-    pub credential: Option<String>,
+    pub credential: Option<RepositoryCredential>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCredential {
+    pub name: String,
+    pub placeholder: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,10 +181,9 @@ impl Registry {
                 "workspace {name:?} uses unsupported Guest Profile {:?}",
                 workspace.guest_profile
             );
-            ensure!(
-                workspace.repository.url.starts_with("https://"),
-                "workspace {name:?} repository must use HTTPS"
-            );
+            if let Err(error) = validate_repository_url(&workspace.repository.url) {
+                bail!("workspace {name:?} has an invalid repository URL: {error}");
+            }
             // Mirrors the host module's constraint. Requiring a leading
             // alphanumeric rejects "." and ".." along with any separator, so a
             // checkout name can never escape the project directory.
@@ -200,8 +206,17 @@ impl Registry {
             }
             if let Some(credential) = &workspace.repository.credential {
                 ensure!(
-                    !credential.trim().is_empty(),
+                    !credential.name.trim().is_empty(),
                     "workspace {name:?} has an empty repository credential binding"
+                );
+                ensure!(
+                    credential.placeholder.starts_with("seter-placeholder-")
+                        && credential.placeholder["seter-placeholder-".len()..].len() >= 16
+                        && credential.placeholder["seter-placeholder-".len()..]
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric()
+                                || matches!(character, '_' | '-')),
+                    "workspace {name:?} has an invalid repository credential placeholder"
                 );
             }
             ensure!(
@@ -319,6 +334,49 @@ impl Registry {
     }
 }
 
+fn validate_repository_url(url: &str) -> Result<()> {
+    let remainder = url
+        .strip_prefix("https://")
+        .context("repository must use HTTPS")?;
+    let (authority, path) = remainder
+        .split_once('/')
+        .context("repository URL must contain an exact repository path")?;
+    let host = authority.strip_suffix(":443").unwrap_or(authority);
+    ensure!(
+        !authority.contains('@')
+            && host
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+            && host
+                .chars()
+                .last()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+            && host.chars().all(
+                |character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
+            ),
+        "repository URL has an invalid host or port"
+    );
+    ensure!(
+        !path.is_empty() && !path.contains(['?', '#']) && !path.chars().any(char::is_whitespace),
+        "repository URL must contain an exact path without a query or fragment"
+    );
+    let lower_path = path.to_ascii_lowercase();
+    ensure!(
+        path.split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+            && !lower_path.contains("%2e")
+            && !lower_path.contains("%2f")
+            && !lower_path.contains("%5c"),
+        "repository URL path must not contain empty, dot, or encoded separator segments"
+    );
+    ensure!(
+        !authority.contains(':') || authority.ends_with(":443"),
+        "repository HTTPS URL may only use port 443"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Registry;
@@ -406,6 +464,24 @@ mod tests {
         let input = VALID.replacen("https://git.example", "ssh://git.example", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("repository must use HTTPS"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_repository_paths() {
+        for candidate in [
+            "https://./owner/project.git",
+            "https://git.example/owner/../other.git",
+            "https://git.example/owner//project.git",
+            "https://git.example/owner/project.git%2f..%2fother.git",
+        ] {
+            let input = VALID.replacen("https://git.example/owner/project.git", candidate, 1);
+            let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+            assert!(
+                error.to_string().contains("repository URL path must not")
+                    || error.to_string().contains("invalid host or port"),
+                "repository URL {candidate:?} was not rejected: {error}"
+            );
+        }
     }
 
     #[test]
