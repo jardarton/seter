@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -34,6 +36,21 @@ pub enum Command {
     List,
     /// Print a workspace's IP address.
     Ip { workspace: String },
+    /// Show grouped, workspace-scoped Policy Observations.
+    Audit {
+        workspace: String,
+        /// Include observations no older than this duration (for example 30m or 2h).
+        #[arg(long, default_value = "30m")]
+        since: String,
+        /// Reveal request paths, which may contain sensitive query parameters.
+        #[arg(long)]
+        paths: bool,
+    },
+    /// Review or reconcile the consumer-owned declarative Policy File.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     /// Print the host-created Workspace SSH Identity public key.
     SshHostKey { workspace: String },
     /// Print the host proxy's public CA certificate for guest enrollment.
@@ -51,6 +68,25 @@ pub enum Command {
     /// Privileged half of `seter down`.
     #[command(name = "__stop", hide = true)]
     StopWorkspace { workspace: String },
+    /// Privileged, workspace-scoped journal export used by `audit`.
+    #[command(name = "__audit", hide = true)]
+    ExportAudit { workspace: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Interactively add exact grants or revoke existing grants.
+    Review {
+        workspace: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Compare the desired Policy File with the active host projection.
+    Status {
+        workspace: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, ValueEnum)]

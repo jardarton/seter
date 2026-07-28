@@ -4,6 +4,7 @@ let
 
   hostNameType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
   httpHostType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
+  hostPatternType = types.strMatching "(\\*\\.)?([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
   httpHeaderType = types.strMatching "[!#$%&'*+.^_`|~0-9a-zA-Z-]+";
   imageNameType = types.strMatching "[a-zA-Z0-9_.-]+";
 in
@@ -154,12 +155,12 @@ in
 
     egress = {
       httpHosts = mkOption {
-        type = types.listOf httpHostType;
+        type = types.listOf hostPatternType;
         default = [ ];
         description = "HTTP and HTTPS destination hosts allowed through the policy proxy.";
       };
       passthroughHosts = mkOption {
-        type = types.listOf httpHostType;
+        type = types.listOf hostPatternType;
         default = [ ];
         description = "Allowed HTTPS hosts that bypass TLS interception.";
       };

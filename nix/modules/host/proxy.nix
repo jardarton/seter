@@ -17,6 +17,7 @@ let
 
   normalizeHosts = hosts: unique (map lib.toLower hosts);
   normalizeHeaders = headers: unique (map lib.toLower headers);
+  hostPatterns = import ./host-patterns.nix { inherit lib; };
   repositoryMatchFor =
     workspace: builtins.match "https://([^/:]+)(:443)?(/.*)" workspace.repository.url;
   repositoryHostFor = workspace: lib.toLower (builtins.elemAt (repositoryMatchFor workspace) 0);
@@ -158,10 +159,12 @@ in
       }
     ]
     ++ lib.mapAttrsToList (name: workspace: {
-      assertion =
-        lib.intersectLists (normalizeHosts (
-          [ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts
-        )) (normalizeHosts workspace.egress.passthroughHosts) == [ ];
+      assertion = lib.all (
+        http:
+        lib.all (passthrough: !(hostPatterns.overlaps http passthrough)) (
+          normalizeHosts workspace.egress.passthroughHosts
+        )
+      ) (normalizeHosts ([ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts));
       message = "seter.host.workspaces.${name} must not list a host for both HTTP interception and TLS passthrough";
     }) cfg.workspaces;
 

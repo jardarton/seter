@@ -1,6 +1,6 @@
 # Policy observation and review
 
-**Status:** accepted product design; the unified audit, review, Policy File, and desired-versus-active commands are not yet implemented. Current DNS and proxy decisions are available in service journals.
+**Status:** implemented. Policy File import, bounded single-label Host Patterns, workspace-scoped audit, interactive review/revocation, atomic edits, and desired-versus-active status are covered by Rust, evaluation, and KVM checks.
 
 Seter's default-deny boundary is usable only when operators can understand failed traffic and grant narrowly reviewed authority without firewall archaeology. Observed traffic is evidence, never authorization: workspace code can produce Policy Observations, but only an explicit host-operator action can create a Policy Grant.
 
@@ -22,19 +22,23 @@ port = 2222
 
 The consumer's Nix configuration imports this file and merges its grants into the Workspace Registry. Personal workspace names, destinations, file locations, and deployment commands remain in private consumer configuration; the public Seter repository defines only the schema and integration contract.
 
+```nix
+seter.host.policyFile = ./seter-policy.toml;
+```
+
 A dedicated file is intentional. Seter can safely parse, validate, preserve, and atomically edit TOML, but cannot reliably rewrite arbitrary Nix expressions. Policy changes remain reviewable version-controlled data rather than mutable runtime exceptions.
 
 The Policy File contains network and host-capability grants only. It must not contain real credential values. Credential bindings and source paths remain separate trusted configuration and are never inferred from traffic.
 
 ## Observing policy decisions
 
-`seter audit <workspace>` presents normalized records from only that workspace's DNS, proxy, passthrough, and direct-TCP policy boundary:
+`seter audit <workspace>` presents normalized records from only that workspace's DNS, proxy, passthrough, and direct-TCP policy boundary. Direct-TCP observations identify the destination address and port; they do not pretend that an address proves the intended hostname:
 
 ```console
 seter audit example --since 30m
 ```
 
-The default view groups repeated observations by decision, protocol, and exact destination. Request paths are hidden by default because they may contain sensitive query parameters; an explicit option may reveal them when diagnosis requires it.
+The default view groups repeated observations by decision, protocol, and exact destination. Request paths are hidden by default because they may contain sensitive query parameters; `--paths` reveals a representative path when diagnosis requires it.
 
 Operators must not need broad access to unrelated host journals. Host integration should expose only the selected workspace's policy records through a narrow privileged helper or equivalent workspace-scoped interface.
 

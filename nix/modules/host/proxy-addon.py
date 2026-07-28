@@ -21,6 +21,9 @@ class SeterPolicy:
     _HOST_NAME = re.compile(
         r"(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])"
     )
+    _HOST_PATTERN = re.compile(
+        r"(?:\*\.)?(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])"
+    )
     _PLACEHOLDER = re.compile(r"seter-placeholder-[A-Za-z0-9_-]{16,}")
     _SECRET_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,62}")
     _PROHIBITED_SECRET_HEADERS = frozenset(
@@ -122,13 +125,13 @@ class SeterPolicy:
                     or not isinstance(http_hosts, list)
                     or not all(
                         isinstance(host, str)
-                        and self._HOST_NAME.fullmatch(host) is not None
+                        and self._HOST_PATTERN.fullmatch(host) is not None
                         for host in http_hosts
                     )
                     or not isinstance(passthrough_hosts, list)
                     or not all(
                         isinstance(host, str)
-                        and self._HOST_NAME.fullmatch(host) is not None
+                        and self._HOST_PATTERN.fullmatch(host) is not None
                         for host in passthrough_hosts
                     )
                     or not isinstance(secrets, dict)
@@ -145,7 +148,11 @@ class SeterPolicy:
                 if (
                     len(normalized_http_hosts) != len(http_hosts)
                     or len(normalized_passthrough_hosts) != len(passthrough_hosts)
-                    or normalized_http_hosts & normalized_passthrough_hosts
+                    or any(
+                        self._patterns_overlap(http, passthrough)
+                        for http in normalized_http_hosts
+                        for passthrough in normalized_passthrough_hosts
+                    )
                 ):
                     raise ValueError("invalid workspace host policy")
 
@@ -534,6 +541,24 @@ class SeterPolicy:
             )
 
     @staticmethod
+    def _pattern_matches(pattern: str, host: str) -> bool:
+        if pattern == host:
+            return True
+        if not pattern.startswith("*."):
+            return False
+        suffix = pattern[2:]
+        prefix, separator, remainder = host.partition(".")
+        return bool(prefix) and separator == "." and remainder == suffix
+
+    @classmethod
+    def _patterns_overlap(cls, left: str, right: str) -> bool:
+        return cls._pattern_matches(left, right) or cls._pattern_matches(right, left)
+
+    @classmethod
+    def _host_allowed(cls, patterns: frozenset[str], host: str) -> bool:
+        return any(cls._pattern_matches(pattern, host) for pattern in patterns)
+
+    @staticmethod
     def _client_ip(flow: http.HTTPFlow) -> str:
         return flow.client_conn.peername[0]
 
@@ -569,7 +594,7 @@ class SeterPolicy:
             allowed_hosts = workspace["httpHosts"] | workspace["passthroughHosts"]
             if port != 443:
                 reason = "explicit HTTP CONNECT is restricted to port 443"
-            elif host not in allowed_hosts:
+            elif not self._host_allowed(allowed_hosts, host):
                 reason = (
                     f"host {host or '<missing>'!r} is not in this workspace's "
                     "HTTP or TLS-passthrough allowlist"
@@ -633,7 +658,7 @@ class SeterPolicy:
             )
             return
 
-        if sni in workspace["passthroughHosts"]:
+        if self._host_allowed(workspace["passthroughHosts"], sni):
             # The original packet destination is attacker-controlled. Resolve
             # the allowlisted SNI once, reject host-private destinations, and
             # relay only to the resulting pinned address.
@@ -665,7 +690,7 @@ class SeterPolicy:
                     "reason": "SNI is allowlisted for TLS passthrough",
                 }
             )
-        elif sni not in workspace["httpHosts"]:
+        elif not self._host_allowed(workspace["httpHosts"], sni):
             self._audit(
                 {
                     "workspace": workspace["name"],
@@ -698,7 +723,7 @@ class SeterPolicy:
         if workspace is not None:
             if scheme not in ("http", "https"):
                 reason = f"unsupported URL scheme {scheme!r}"
-            elif host not in workspace["httpHosts"]:
+            elif not self._host_allowed(workspace["httpHosts"], host):
                 reason = f"host {host or '<missing>'!r} is not in this workspace's HTTP allowlist"
             elif scheme == "https" and self._normalize(flow.client_conn.sni) != host:
                 reason = "HTTPS SNI and HTTP host do not match"

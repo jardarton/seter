@@ -122,6 +122,8 @@ Evidence: lifecycle tests cover stopped and running entry, cwd, exit-code propag
 
 ### 6. Make default-deny policy operable
 
+**Status: implemented.** Consumer-owned TOML import, bounded Host Patterns, workspace-scoped normalized audit, interactive exact-grant review and revocation, atomic locked edits, and desired-versus-active status are covered by Rust, evaluation, and KVM checks.
+
 - Define and import the consumer-owned TOML Policy File.
 - Support exact Host Patterns and explicit single-label wildcards for intercepted HTTP and TLS passthrough.
 - Reject recursive syntax, apex implication, public/shared-hosting suffix wildcards, and HTTP/passthrough overlap.
