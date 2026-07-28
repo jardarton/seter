@@ -441,6 +441,23 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && test -e /project/e2e/run-persistent && test -e ~/.run-home-persistent && cd /project/normal-development-flake && direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
+    # Reset is stopped-only and --all-state mechanically excludes the Project
+    # Volume. Preserve sentinels and trusted host artifacts while replacing
+    # both reproducible images.
+    machine.succeed("project=$(jq -r .workspaces.e2e.storage.project.image /etc/seter/workspaces.json); home=$(jq -r .workspaces.e2e.storage.home.image /etc/seter/workspaces.json); store=$(jq -r .workspaces.e2e.storage.nixStore.image /etc/seter/workspaces.json); state=/var/lib/seter/workspaces/e2e; test -e $state/$project; test -e $state/$home; test -e $state/$store; sha256sum /var/lib/seter/identities/e2e/ssh_host_ed25519_key > /tmp/identity-before; su - operator -c 'seter reset e2e --all-state --yes' | grep -F 'Project Volume preserved'; test -e $state/$project; test ! -e $state/$home; test ! -e $state/$store; sha256sum -c /tmp/identity-before")
+    machine.succeed("su - operator -c 'seter up e2e' | grep -F 'Started e2e at 10.100.0.20'")
+    machine.wait_for_unit("seter-vm-e2e.service")
+    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test -e /project/e2e/run-persistent && test ! -e ~/.seter-home-marker && test ! -e ~/.run-home-persistent'", timeout=300)
+    machine.fail("su - operator -c 'seter reset e2e --home --yes'")
+    machine.succeed("su - operator -c 'seter down e2e'")
+    machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
+    # GC removes only replaceable retired projections and reports retained
+    # orphan state; neither active nor orphan Project Volumes are touched.
+    machine.succeed("mkdir -p /var/lib/seter/workspaces/retired; printf sentinel > /var/lib/seter/workspaces/retired/project.img; printf key > /var/lib/seter/known-hosts/retired; chown root:seter-operators /var/lib/seter/known-hosts/retired; chmod 0440 /var/lib/seter/known-hosts/retired; su - operator -c 'seter gc' | tee /tmp/seter-gc; grep -F 'Retained orphaned state for retired workspace retired' /tmp/seter-gc; test -e /var/lib/seter/workspaces/retired/project.img; test ! -e /var/lib/seter/known-hosts/retired; test -e /var/lib/seter/workspaces/e2e/$(jq -r .workspaces.e2e.storage.project.image /etc/seter/workspaces.json)")
+    # Project destruction is a separate, strongly confirmed stopped-only
+    # operation and warns when dirty/unpushed state cannot be inspected.
+    machine.fail("su - operator -c 'seter destroy-project e2e' </dev/null")
+    machine.succeed("su - operator -c 'seter destroy-project e2e --yes' > /tmp/destroy-out 2> /tmp/destroy-err; grep -F 'dirty or unpushed' /tmp/destroy-err; grep -F 'Destroyed Project Volume for e2e' /tmp/destroy-out; test ! -e /var/lib/seter/workspaces/e2e/$(jq -r .workspaces.e2e.storage.project.image /etc/seter/workspaces.json)")
     machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
   '';
 }

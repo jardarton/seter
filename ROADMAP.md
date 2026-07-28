@@ -142,6 +142,12 @@ Evidence: tests cover malicious observation floods, wildcard boundaries, ambiguo
 
 ### 7. Add safe reset and retirement operations
 
+**Status: implemented.** Stopped-only, lifecycle-locked reset preserves the
+Project Volume and trusted identity/configuration. Garbage collection reports
+retained retired-workspace state and removes only replaceable public host-key
+projections; Runner closures remain governed by NixOS generation roots. Project
+Volume destruction is a separate, strongly confirmed stopped-only operation.
+
 - Implement stopped-workspace reset for Home, private Nix store, or both.
 - Define `--all-state` as Home plus private Nix store, never Project Volume.
 - Preserve Workspace SSH Identity, deployed Runner, registry, and policy across reset.

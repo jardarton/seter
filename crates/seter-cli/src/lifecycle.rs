@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     net::{SocketAddr, TcpStream},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{bail, ensure, Context, Result};
+use fs2::FileExt;
 
 use crate::registry::{Registry, RunnerIdentity, Workspace};
 
@@ -335,6 +336,212 @@ pub fn stop_workspace(name: &str) -> Result<i32> {
         state.label()
     );
     println!("Stopped {name}");
+    Ok(0)
+}
+
+pub fn reset(name: &str, home: bool, nix_store: bool, yes: bool) -> Result<i32> {
+    ensure!(
+        home || nix_store,
+        "select --home, --nix-store, or --all-state"
+    );
+    Registry::load_default()?.workspace(name)?;
+    let labels = match (home, nix_store) {
+        (true, true) => "Home and private Nix-store volumes",
+        (true, false) => "Home Volume",
+        (false, true) => "private Nix-store volume",
+        _ => unreachable!(),
+    };
+    println!("Reset {labels} for {name}. The Project Volume will be preserved.");
+    if !yes {
+        ensure!(
+            io::stdin().is_terminal(),
+            "non-interactive reset requires --yes"
+        );
+        print!("Type the workspace name to continue: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        ensure!(answer.trim() == name, "reset cancelled");
+    }
+    if uses_test_state() || is_root()? {
+        return reset_workspace(name, home, nix_store);
+    }
+    let mut arguments = vec![OsString::from("__reset"), OsString::from(name)];
+    if home {
+        arguments.push(OsString::from("--home"));
+    }
+    if nix_store {
+        arguments.push(OsString::from("--nix-store"));
+    }
+    run_elevated(&arguments)?;
+    Ok(0)
+}
+
+pub fn reset_workspace(name: &str, home: bool, nix_store: bool) -> Result<i32> {
+    enter_privileged_mode()?;
+    ensure!(home || nix_store, "no reset storage selected");
+    let registry = Registry::load_default()?;
+    let workspace = registry.workspace(name)?;
+    ensure!(
+        state_for(name, workspace)? == State::Stopped,
+        "workspace {name:?} must be stopped before reset"
+    );
+
+    let root = state_directory(name);
+    fs::create_dir_all(&root)
+        .with_context(|| format!("failed to open workspace state {}", root.display()))?;
+    let lock_path = lifecycle_lock(name);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o640)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
+    lock.try_lock_exclusive()
+        .with_context(|| format!("workspace {name:?} lifecycle is busy"))?;
+    // Recheck under the same lock held for the VM lifetime, closing the start/reset race.
+    ensure!(
+        state_for(name, workspace)? == State::Stopped,
+        "workspace {name:?} must be stopped before reset"
+    );
+    let mut removed = Vec::new();
+    for (selected, label, image) in [
+        (home, "Home", &workspace.storage.home.image),
+        (
+            nix_store,
+            "private Nix store",
+            &workspace.storage.nix_store.image,
+        ),
+    ] {
+        if selected {
+            let path = root.join(image);
+            match fs::remove_file(&path) {
+                Ok(()) => removed.push(label),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to reset {}", path.display()))
+                }
+            }
+        }
+    }
+    println!(
+        "Reset {} for {name}; Project Volume preserved",
+        if removed.is_empty() {
+            "selected absent state".into()
+        } else {
+            removed.join(" and ")
+        }
+    );
+    Ok(0)
+}
+
+pub fn destroy_project(name: &str, yes: bool) -> Result<i32> {
+    let registry = Registry::load_default()?;
+    registry.workspace(name)?;
+    eprintln!(
+        "WARNING: the Project Volume may contain dirty or unpushed Git work; its offline image cannot be inspected safely."
+    );
+    eprintln!("This permanently destroys all working data for workspace {name}.");
+    if !yes {
+        ensure!(
+            io::stdin().is_terminal(),
+            "non-interactive destruction requires --yes"
+        );
+        print!("Type 'destroy {name}' to continue: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        ensure!(
+            answer.trim() == format!("destroy {name}"),
+            "destruction cancelled"
+        );
+    }
+    if uses_test_state() || is_root()? {
+        return destroy_project_volume(name);
+    }
+    run_elevated(&[OsString::from("__destroy-project"), OsString::from(name)])?;
+    Ok(0)
+}
+
+pub fn destroy_project_volume(name: &str) -> Result<i32> {
+    enter_privileged_mode()?;
+    let registry = Registry::load_default()?;
+    let workspace = registry.workspace(name)?;
+    let root = state_directory(name);
+    let lock_path = lifecycle_lock(name);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o640)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
+    lock.try_lock_exclusive()
+        .with_context(|| format!("workspace {name:?} lifecycle is busy"))?;
+    ensure!(
+        state_for(name, workspace)? == State::Stopped,
+        "workspace {name:?} must be stopped before Project Volume destruction"
+    );
+    let project = root.join(&workspace.storage.project.image);
+    fs::remove_file(&project)
+        .with_context(|| format!("failed to destroy Project Volume {}", project.display()))?;
+    println!("Destroyed Project Volume for {name}");
+    Ok(0)
+}
+
+pub fn gc() -> Result<i32> {
+    if uses_test_state() || is_root()? {
+        return collect_garbage();
+    }
+    run_elevated(&[OsString::from("__gc")])?;
+    Ok(0)
+}
+
+pub fn collect_garbage() -> Result<i32> {
+    enter_privileged_mode()?;
+    let registry = Registry::load_default()?;
+    let root = state_root();
+    if !root.exists() {
+        return Ok(0);
+    }
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("failed to inspect {}", root.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !registry.workspaces.contains_key(&name) {
+                println!("Retained orphaned state for retired workspace {name}: {} (Project Volume is never garbage-collected)", entry.path().display());
+            }
+        }
+    }
+    // Known-host projections contain only the public half of the preserved
+    // identity and are recreated by deployment. They are therefore safe to
+    // remove after retirement; identities and volume directories are not.
+    let known_hosts = if uses_test_state() {
+        state_root().join(".known-hosts")
+    } else {
+        PathBuf::from("/var/lib/seter/known-hosts")
+    };
+    if known_hosts.exists() {
+        for entry in fs::read_dir(&known_hosts)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !registry.workspaces.contains_key(&name) && entry.file_type()?.is_file() {
+                fs::remove_file(entry.path()).with_context(|| {
+                    format!("failed to remove retired known-host projection {name:?}")
+                })?;
+                println!("Removed replaceable known-host projection for retired workspace {name}");
+            }
+        }
+    }
+    println!(
+        "Garbage collection complete; active Runner roots and all workspace volumes were preserved"
+    );
     Ok(0)
 }
 
@@ -846,6 +1053,26 @@ fn vm_unit(name: &str) -> String {
 
 fn runtime_unit(name: &str) -> String {
     format!("seter-runtime-{name}.target")
+}
+
+fn state_root() -> PathBuf {
+    if uses_test_state() {
+        PathBuf::from(env::var_os("SETER_STATE_DIR").unwrap())
+    } else {
+        PathBuf::from("/var/lib/seter/workspaces")
+    }
+}
+
+fn state_directory(name: &str) -> PathBuf {
+    state_root().join(name)
+}
+
+fn lifecycle_lock(name: &str) -> PathBuf {
+    if uses_test_state() {
+        state_root().join(format!(".{name}.lock"))
+    } else {
+        PathBuf::from(format!("/run/lock/seter/{name}.lock"))
+    }
 }
 
 // Unprivileged tests run the privileged halves in-process against a private

@@ -55,6 +55,26 @@ pub enum Command {
     SshHostKey { workspace: String },
     /// Print the host proxy's public CA certificate for guest enrollment.
     ProxyCa,
+    /// Replace selected reproducible state of a stopped workspace.
+    Reset {
+        workspace: String,
+        #[arg(long)]
+        home: bool,
+        #[arg(long)]
+        nix_store: bool,
+        #[arg(long)]
+        all_state: bool,
+        /// Confirm non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Permanently destroy a stopped workspace's Project Volume.
+    DestroyProject {
+        workspace: String,
+        /// Confirm non-interactively after inspecting the retained state.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Remove GC roots belonging to retired workspaces.
     Gc,
     /// Generate shell completion code.
@@ -71,6 +91,18 @@ pub enum Command {
     /// Privileged, workspace-scoped journal export used by `audit`.
     #[command(name = "__audit", hide = true)]
     ExportAudit { workspace: String },
+    #[command(name = "__reset", hide = true)]
+    ResetWorkspace {
+        workspace: String,
+        #[arg(long)]
+        home: bool,
+        #[arg(long)]
+        nix_store: bool,
+    },
+    #[command(name = "__gc", hide = true)]
+    CollectGarbage,
+    #[command(name = "__destroy-project", hide = true)]
+    DestroyProjectVolume { workspace: String },
 }
 
 #[derive(Debug, Subcommand)]
