@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  seterMicrovmModule,
   ...
 }:
 let
@@ -100,37 +101,84 @@ let
   secretHosts =
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
+  # The repository URL path is deliberately permissive, so a name derived from
+  # its final component must satisfy the same constraint the explicit
+  # repository.checkoutName option enforces. Requiring a leading alphanumeric
+  # also rejects "." and "..".
+  validCheckoutName = name: builtins.match "[a-zA-Z0-9][a-zA-Z0-9_.-]*" name != null;
+
+  checkoutNameFor =
+    workspace:
+    if workspace.repository.checkoutName != null then
+      workspace.repository.checkoutName
+    else
+      let
+        components = lib.splitString "/" workspace.repository.url;
+        final = builtins.elemAt components (builtins.length components - 1);
+      in
+      lib.removeSuffix ".git" final;
+
+  workspaceDefinitions = mapAttrs (
+    name: workspace:
+    import ../../lib/mk-runner-definition.nix {
+      inherit name workspace;
+      gateway = cfg.gateway;
+      prefixLength = subnetPrefix;
+      proxyPort = cfg.proxy.explicitPort;
+      proxyCaCertificate = cfg.proxyCaCertificate;
+    }
+  ) cfg.workspaces;
+
+  workspaceSystems = mapAttrs (
+    name: workspace:
+    import "${pkgs.path}/nixos/lib/eval-config.nix" {
+      system = pkgs.stdenv.hostPlatform.system;
+      modules = [
+        seterMicrovmModule
+        (import ../guest)
+        workspaceDefinitions.${name}.guestModule
+        (import ../guest/profiles/default.nix)
+        {
+          seter.guest = {
+            memory = workspace.resources.memoryMiB;
+            ssh.authorizedKeys = workspace.ssh.authorizedKeys;
+          };
+          # Derive the vsock context ID from the already-unique workspace
+          # address so two workspaces can never collide. The values are large
+          # and unmemorable by construction; they are host-internal identifiers
+          # rather than anything an operator configures or reads.
+          microvm.vsock.cid = 3 + parseIpv4 workspace.network.address;
+        }
+      ];
+    }
+  ) cfg.workspaces;
+
+  workspaceRunners = mapAttrs (_: system: system.config.microvm.declaredRunner) workspaceSystems;
+
   lifecycleRegistry = {
-    version = 4;
+    version = 5;
     workspaces = mapAttrs (name: workspace: {
-      inherit (workspace) hostname;
-      runner = {
-        inherit (workspace.runner) installable;
-        identity =
-          if workspace.runner.requireIdentity then
-            {
-              version = 2;
-              workspace = name;
-              inherit (workspace) hostname;
-              network = {
-                inherit (workspace.network) address tap;
-                inherit (workspace.network) mac;
-                gateway = cfg.gateway;
-                prefixLength = subnetPrefix;
-              };
-              proxy.url = "http://${cfg.gateway}:${toString cfg.proxy.explicitPort}";
-              ssh.user = workspace.ssh.user;
-              storage = workspace.storage;
-            }
-          else
-            null;
-      };
       inherit (workspace)
+        hostname
+        guestProfile
         network
-        resources
-        ssh
         storage
         ;
+      repository = workspace.repository // {
+        checkoutName = checkoutNameFor workspace;
+      };
+      # hostOverheadMiB sizes the host systemd limit only. It is not guest
+      # identity and the CLI has no use for it, so it stays out of the registry.
+      resources = {
+        inherit (workspace.resources) memoryMiB cpuQuotaPercent;
+      };
+      ssh = {
+        inherit (workspace.ssh) user knownHostKey;
+      };
+      runner = {
+        path = toString workspaceRunners.${name};
+        identity = workspaceDefinitions.${name}.identity;
+      };
     }) cfg.workspaces;
   };
 
@@ -319,18 +367,14 @@ let
     let
       inherit (runtime) account lifecycleLock stateDirectory;
       workspace = runtime.workspace;
+      runner = workspaceRunners.${name};
       runVm = pkgs.writeShellScript "seter-vm-${name}-run" ''
         set -eu
         exec {lifecycle_lock}<${lib.escapeShellArg lifecycleLock}
         ${pkgs.util-linux}/bin/flock --exclusive "$lifecycle_lock"
-        runner=$(${pkgs.coreutils}/bin/readlink -f ${lib.escapeShellArg "${stateDirectory}/current"})
-        test -x "$runner/bin/microvm-run"
-        test -x "$runner/bin/microvm-shutdown"
-        ${pkgs.coreutils}/bin/ln -sTf "$runner" ${lib.escapeShellArg "${stateDirectory}/booted"}
-        exec ${lib.escapeShellArg "${stateDirectory}/booted/bin/microvm-run"}
-      '';
-      removeBooted = pkgs.writeShellScript "seter-vm-${name}-cleanup" ''
-        ${pkgs.coreutils}/bin/rm -f ${lib.escapeShellArg "${stateDirectory}/booted"}
+        test -x ${runner}/bin/microvm-run
+        test -x ${runner}/bin/microvm-shutdown
+        exec ${runner}/bin/microvm-run
       '';
     in
     nameValuePair "seter-vm-${name}" {
@@ -338,19 +382,18 @@ let
       requires = [ "seter-runtime-${name}.target" ];
       after = [ "seter-runtime-${name}.target" ];
       partOf = [ "seter-runtime-${name}.target" ];
-      unitConfig.ConditionPathExists = "${stateDirectory}/current/bin/microvm-run";
+      unitConfig.ConditionPathExists = "${runner}/bin/microvm-run";
       serviceConfig = {
         Type = "simple";
         User = account;
         Group = account;
         WorkingDirectory = stateDirectory;
         ExecStart = runVm;
-        ExecStop = "${stateDirectory}/booted/bin/microvm-shutdown";
-        ExecStopPost = removeBooted;
+        ExecStop = "${runner}/bin/microvm-shutdown";
         TimeoutStopSec = "30s";
         KillMode = "mixed";
         Restart = "no";
-        MemoryMax = workspace.resources.memoryMiB * 1024 * 1024;
+        MemoryMax = (workspace.resources.memoryMiB + workspace.resources.hostOverheadMiB) * 1024 * 1024;
         CPUQuota = "${toString workspace.resources.cpuQuotaPercent}%";
         LimitNOFILE = 1048576;
         LimitMEMLOCK = "infinity";
@@ -453,6 +496,12 @@ in
       default = "seter-operators";
       description = "Host group allowed to start and stop registered Seter workspaces without a sudo password.";
     };
+
+    proxyCaCertificate = mkOption {
+      type = types.nullOr types.lines;
+      default = null;
+      description = "Reviewed public interception CA certificate installed in every trusted Runner.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -516,16 +565,32 @@ in
     ]
     ++ concatMap (workspace: [
       {
-        assertion = nonBlank workspace.runner.installable;
-        message = "seter.host.workspaces.${workspace.name}.runner.installable must not be blank";
+        assertion = validCheckoutName (checkoutNameFor workspace);
+        message = "seter.host.workspaces.${workspace.name} repository URL must end in a checkout name starting with a letter or digit and containing only letters, digits, underscores, dots, or hyphens; set repository.checkoutName explicitly otherwise";
+      }
+      {
+        assertion =
+          workspace.repository.credential == null
+          || builtins.hasAttr workspace.repository.credential workspace.secrets;
+        message = "seter.host.workspaces.${workspace.name} repository credential must reference a defined secret";
+      }
+      {
+        assertion = lib.all (secretName: builtins.hasAttr secretName workspace.secrets) (
+          builtins.attrValues workspace.secretVariables
+        );
+        message = "seter.host.workspaces.${workspace.name} secret variables must reference defined secrets";
       }
       {
         assertion = workspace.ssh.knownHostKey == null || nonBlank workspace.ssh.knownHostKey;
         message = "seter.host.workspaces.${workspace.name}.ssh.knownHostKey must not be blank";
       }
       {
-        assertion = workspace.storage.image != workspace.storage.nixStoreImage;
-        message = "seter.host.workspaces.${workspace.name} project and Nix store images must use different names";
+        assertion = hasUniqueValues [
+          workspace.storage.project.image
+          workspace.storage.home.image
+          workspace.storage.nixStore.image
+        ];
+        message = "seter.host.workspaces.${workspace.name} volume images must use distinct names";
       }
       {
         assertion = hasUniqueValues workspace.hostServices;
@@ -586,10 +651,25 @@ in
       }
     ]) workspaces;
 
-    environment.etc."seter/workspaces.json" = {
-      source = registryFile;
-      mode = "0444";
-    };
+    environment.etc = {
+      "seter/workspaces.json" = {
+        source = registryFile;
+        mode = "0444";
+      };
+    }
+    // mapAttrs' (
+      name: runner:
+      nameValuePair "seter/runners/${name}" {
+        source = runner;
+      }
+    ) workspaceRunners;
+
+    # Runners are part of the trusted NixOS generation. The /etc entries above
+    # already place each closure in the system closure; declaring them again as
+    # explicit system dependencies keeps that rooting guarantee independent of
+    # how the /etc layout may later change. Older NixOS generations therefore
+    # retain the runners needed for rollback.
+    system.extraDependencies = builtins.attrValues workspaceRunners;
 
     boot.kernelModules = [
       "tun"

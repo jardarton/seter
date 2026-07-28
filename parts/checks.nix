@@ -8,21 +8,47 @@
       ...
     }:
     let
-      mkWorkspace =
+      mkTestWorkspace =
         {
           ip,
           mac,
           tap,
           knownHostKey ? null,
         }:
-        self.lib.mkWorkspace {
-          runnerInstallable = "github:example/project#nixosConfigurations.guest.config.microvm.declaredRunner";
-          inherit
-            ip
-            knownHostKey
-            mac
-            tap
-            ;
+        {
+          guestProfile = "default";
+          repository = {
+            url = "https://example.invalid/owner/workspace.git";
+            branch = null;
+            checkoutName = null;
+            credential = null;
+          };
+          network = {
+            address = ip;
+            inherit mac tap;
+          };
+          resources = {
+            memoryMiB = 4096;
+            cpuQuotaPercent = 200;
+          };
+          ssh = {
+            user = "seter";
+            authorizedKeys = [ ];
+            inherit knownHostKey;
+          };
+          storage = {
+            project.sizeMiB = 4096;
+            home.sizeMiB = 4096;
+            nixStore.sizeMiB = 16384;
+          };
+          hostServices = [ ];
+          egress = {
+            httpHosts = [ ];
+            passthroughHosts = [ ];
+            tcp = [ ];
+          };
+          secrets = { };
+          secretVariables = { };
         };
 
       hostModuleBase = {
@@ -49,47 +75,63 @@
       mkHost = workspaces: mkHostWith { inherit workspaces; };
 
       validWorkspaces = {
-        alpha = mkWorkspace {
+        alpha = mkTestWorkspace {
           ip = "10.100.0.10";
           mac = "02:00:00:00:00:10";
           tap = "seter-alpha";
           knownHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test";
         };
-        beta = mkWorkspace {
+        beta = mkTestWorkspace {
           ip = "10.100.0.11";
           mac = "02:00:00:00:00:11";
           tap = "seter-beta";
         };
       };
 
-      identityWorkspace = self.lib.mkWorkspaceDefinition {
-        name = "identity";
-        runnerInstallable = "github:example/identity#nixosConfigurations.guest.config.microvm.declaredRunner";
-        ip = "10.100.0.12";
-        mac = "02:00:00:00:00:12";
-        tap = "seter-identity";
+      identityWorkspaceEntry =
+        (mkTestWorkspace {
+          ip = "10.100.0.12";
+          mac = "02:00:00:00:00:12";
+          tap = "seter-identity";
+        })
+        // {
+          secrets.githubToken = {
+            placeholder = "seter-placeholder-github-0123456789abcdef";
+            sourceFile = "/run/secrets/identity-github-token";
+            hosts = [ "api.example.com" ];
+            headers = [ "authorization" ];
+          };
+          secretVariables = {
+            GITHUB_TOKEN = "githubToken";
+            GH_TOKEN = "githubToken";
+          };
+          egress.httpHosts = [ "api.example.com" ];
+        };
+      identityHostConfiguration = mkHostWith {
         proxyCaCertificate = builtins.readFile proxyTrustCa;
-        secrets.githubToken = {
-          placeholder = "seter-placeholder-github-0123456789abcdef";
-          sourceFile = "/run/secrets/identity-github-token";
-          hosts = [ "api.example.com" ];
-          headers = [ "authorization" ];
-        };
-        secretVariables = {
-          GITHUB_TOKEN = "githubToken";
-          GH_TOKEN = "githubToken";
-        };
-        allowedHTTPHosts = [ "api.example.com" ];
+        workspaces.identity = identityWorkspaceEntry;
       };
-      identityHostConfiguration = mkHost { identity = identityWorkspace.host; };
       identityRegistryFile =
         identityHostConfiguration.config.environment.etc."seter/workspaces.json".source;
+      identityWorkspace = import ../nix/lib/mk-runner-definition.nix {
+        name = "identity";
+        workspace = identityHostConfiguration.config.seter.host.workspaces.identity;
+        gateway = "10.100.0.1";
+        prefixLength = 24;
+        proxyPort = 18081;
+        proxyCaCertificate = builtins.readFile proxyTrustCa;
+      };
       identityGuestConfiguration = inputs.nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           self.nixosModules.guest
           identityWorkspace.guestModule
-          { system.stateVersion = "24.11"; }
+          {
+            # Supplied by the host module from the same registry entry.
+            seter.guest.memory =
+              identityHostConfiguration.config.seter.host.workspaces.identity.resources.memoryMiB;
+            system.stateVersion = "24.11";
+          }
         ];
       };
 
@@ -175,29 +217,6 @@
         rule: if builtins.elem "seter-operators" (rule.groups or [ ]) then rule.commands else [ ]
       ) hostConfiguration.config.security.sudo.extraRules;
       lifecycleHelper = lib.getExe hostConfiguration.config.seter.host.package;
-
-      fakeRunner = pkgs.runCommand "seter-fake-runner" { } ''
-        mkdir -p "$out/bin"
-        cat > "$out/bin/microvm-run" <<'EOF'
-        #!${pkgs.runtimeShell}
-        set -eu
-        touch fake-vm-started
-        trap 'exit 0' TERM INT
-        while true; do
-          ${pkgs.coreutils}/bin/sleep 1 &
-          wait $! || true
-        done
-        EOF
-        cat > "$out/bin/microvm-shutdown" <<'EOF'
-        #!${pkgs.runtimeShell}
-        set -eu
-        kill -TERM "$MAINPID"
-        while kill -0 "$MAINPID" 2>/dev/null; do
-          ${pkgs.coreutils}/bin/sleep 0.1
-        done
-        EOF
-        chmod +x "$out/bin/microvm-run" "$out/bin/microvm-shutdown"
-      '';
 
       proxyTestCertificate =
         pkgs.runCommand "seter-proxy-test-certificate"
@@ -552,7 +571,7 @@
       };
 
       invalidIpRejected = configurationRejected {
-        broken = mkWorkspace {
+        broken = mkTestWorkspace {
           ip = "10.100.0.999";
           mac = "02:00:00:00:00:12";
           tap = "seter-broken";
@@ -560,7 +579,7 @@
       };
 
       outOfSubnetIpRejected = configurationRejected {
-        broken = mkWorkspace {
+        broken = mkTestWorkspace {
           ip = "10.101.0.12";
           mac = "02:00:00:00:00:12";
           tap = "seter-broken";
@@ -568,7 +587,7 @@
       };
 
       gatewayIpRejected = configurationRejected {
-        broken = mkWorkspace {
+        broken = mkTestWorkspace {
           ip = "10.100.0.1";
           mac = "02:00:00:00:00:12";
           tap = "seter-broken";
@@ -576,7 +595,7 @@
       };
 
       networkIpRejected = configurationRejected {
-        broken = mkWorkspace {
+        broken = mkTestWorkspace {
           ip = "10.100.0.0";
           mac = "02:00:00:00:00:12";
           tap = "seter-broken";
@@ -584,7 +603,7 @@
       };
 
       bridgeTapRejected = configurationRejected {
-        broken = mkWorkspace {
+        broken = mkTestWorkspace {
           ip = "10.100.0.12";
           mac = "02:00:00:00:00:12";
           tap = "seter0";
@@ -610,9 +629,21 @@
             true
         )).success;
 
-      blankInstallableRejected = configurationRejected {
+      nonHttpsRepositoryRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
-          runner.installable = "   ";
+          repository = validWorkspaces.alpha.repository // {
+            url = "ssh://git@example.invalid/owner/workspace.git";
+          };
+        };
+      };
+
+      # The URL path is permissive by design, so the derived checkout name must
+      # be constrained even though an explicit override is type-checked.
+      traversingCheckoutNameRejected = configurationRejected {
+        broken = validWorkspaces.alpha // {
+          repository = validWorkspaces.alpha.repository // {
+            url = "https://example.invalid/owner/..";
+          };
         };
       };
 
@@ -627,8 +658,14 @@
       reusedStorageImageRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
           storage = validWorkspaces.alpha.storage // {
-            image = "reused.img";
-            nixStoreImage = "reused.img";
+            project = {
+              image = "reused.img";
+              sizeMiB = 4096;
+            };
+            nixStore = {
+              image = "reused.img";
+              sizeMiB = 16384;
+            };
           };
         };
       };
@@ -1267,7 +1304,20 @@
           assert lib.all (rule: rule.runAs == "root") lifecycleSudoRules;
           assert lib.all (entry: !(lib.hasInfix "*" entry.command)) lifecycleSudoCommands;
           assert proxyService.serviceConfig.LoadCredential == [ ];
-          assert identityWorkspace.host.runner.requireIdentity;
+          assert builtins.elem hostConfiguration.config.environment.etc."seter/runners/alpha".source
+            hostConfiguration.config.system.extraDependencies;
+          assert lib.hasInfix
+            (builtins.unsafeDiscardStringContext (
+              toString hostConfiguration.config.environment.etc."seter/runners/alpha".source
+            ))
+            (
+              builtins.unsafeDiscardStringContext hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop
+            );
+          assert
+            !lib.hasInfix "/var/lib/seter/workspaces/alpha/current" (
+              builtins.unsafeDiscardStringContext hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop
+            );
+          assert identityHostConfiguration.config.seter.host.workspaces.identity.guestProfile == "default";
           assert identityGuestConfiguration.config.seter.guest.name == "identity";
           assert identityGuestConfiguration.config.seter.guest.network.address == "10.100.0.12";
           assert identityGuestConfiguration.config.seter.guest.network.mac == "02:00:00:00:00:12";
@@ -1307,7 +1357,7 @@
             }
             ''
               jq -e '
-                .version == 4 and
+                .version == 5 and
                 (.workspaces | keys == ["alpha", "beta"]) and
                 (.workspaces.alpha.hostname == "alpha.vm") and
                 (.workspaces.alpha.network.address == "10.100.0.10") and
@@ -1315,18 +1365,23 @@
                 (.workspaces.alpha.resources.memoryMiB == 4096) and
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
                 (.workspaces.alpha.ssh.knownHostKey == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alpha-test") and
+                (.workspaces.alpha.guestProfile == "default") and
+                (.workspaces.alpha.repository.url == "https://example.invalid/owner/workspace.git") and
+                (.workspaces.alpha.repository.checkoutName == "workspace") and
+                (.workspaces.alpha.runner.path | startswith("/nix/store/")) and
                 (.workspaces.alpha.storage == {
-                  image: "alpha-project.img",
-                  nixStoreImage: "alpha-nix-store.img",
-                  nixStoreSizeMiB: 16384
+                  project: { image: "alpha-project.img", sizeMiB: 4096 },
+                  home: { image: "alpha-home.img", sizeMiB: 4096 },
+                  nixStore: { image: "alpha-nix-store.img", sizeMiB: 16384 }
                 }) and
+                (.workspaces.alpha.resources | has("hostOverheadMiB") | not) and
                 (.workspaces.alpha | has("egress") | not) and
                 (.workspaces.alpha | has("secrets") | not) and
                 (.workspaces.alpha | has("hostServices") | not)
               ' ${registryFile}
 
               jq -e '
-                .version == 4 and
+                .version == 5 and
                 .workspaces.identity.runner.identity.version == 2 and
                 .workspaces.identity.runner.identity.workspace == "identity" and
                 .workspaces.identity.runner.identity.hostname == "identity.vm" and
@@ -1339,10 +1394,12 @@
                 } and
                 .workspaces.identity.runner.identity.proxy.url == "http://10.100.0.1:18081" and
                 .workspaces.identity.runner.identity.ssh.user == "seter" and
+                .workspaces.identity.runner.identity.guestProfile == "default" and
+                .workspaces.identity.runner.identity.resources.memoryMiB == 4096 and
                 .workspaces.identity.runner.identity.storage == {
-                  image: "identity-project.img",
-                  nixStoreImage: "identity-nix-store.img",
-                  nixStoreSizeMiB: 16384
+                  project: { image: "identity-project.img", sizeMiB: 4096 },
+                  home: { image: "identity-home.img", sizeMiB: 4096 },
+                  nixStore: { image: "identity-nix-store.img", sizeMiB: 16384 }
                 }
               ' ${identityRegistryFile}
 
@@ -1380,16 +1437,12 @@
               test "$(seter list)" = $'alpha\nbeta'
               test "$(seter ip alpha)" = "10.100.0.10"
 
-              mkdir -p test-bin
+              mkdir -p test-bin state/alpha
               cat > test-bin/systemctl <<'EOF'
               #!${pkgs.runtimeShell}
               if test "$1" = show; then
                 printf '%s\n' ActiveState=inactive SubState=dead MainPID=0
               fi
-              EOF
-              cat > test-bin/nix <<'EOF'
-              #!${pkgs.runtimeShell}
-              echo "$SETER_TEST_RUNNER"
               EOF
               cat > test-bin/debugfs <<'EOF'
               #!${pkgs.runtimeShell}
@@ -1399,27 +1452,21 @@
               #!${pkgs.runtimeShell}
               echo '256 SHA256:test seter-test (ED25519)'
               EOF
-              chmod +x test-bin/systemctl test-bin/nix test-bin/debugfs test-bin/ssh-keygen
+              chmod +x test-bin/systemctl test-bin/debugfs test-bin/ssh-keygen
               export SETER_SYSTEMCTL=$PWD/test-bin/systemctl
-              export SETER_NIX=$PWD/test-bin/nix
               export SETER_STATE_DIR=$PWD/state
-              export SETER_GCROOT_DIR=$PWD/gcroots
+              export SETER_TEST_MODE=1
+
+              # Runner deployment is declarative. The removed update command
+              # must not provide a second mutable deployment path.
+              set +e
+              seter update alpha > /dev/null 2> update-error
+              update_code=$?
+              set -e
+              test "$update_code" = 2
+              grep -F "unrecognized subcommand 'update'" update-error
 
               export SETER_REGISTRY=${identityRegistryFile}
-              export SETER_TEST_RUNNER=${self.nixosConfigurations.minimal.config.microvm.declaredRunner}
-              set +e
-              seter update identity > /dev/null 2> identity-error
-              identity_code=$?
-              set -e
-              test "$identity_code" = 1
-              grep -F 'runner identity does not match workspace "identity"' identity-error
-              test ! -e state/identity/current
-
-              export SETER_TEST_RUNNER=${identityGuestConfiguration.config.microvm.declaredRunner}
-              seter update identity
-              test "$(readlink state/identity/current)" = "${identityGuestConfiguration.config.microvm.declaredRunner}"
-              test "$(readlink gcroots/.runner-history/identity/${builtins.baseNameOf identityGuestConfiguration.config.microvm.declaredRunner})" = "${identityGuestConfiguration.config.microvm.declaredRunner}"
-
               jq '
                 .workspaces.identity.network.address = "10.100.0.13" |
                 .workspaces.identity.runner.identity.network.address = "10.100.0.13"
@@ -1433,58 +1480,19 @@
               grep -F 'runner identity does not match workspace "identity"' stale-identity-error
 
               export SETER_REGISTRY=${registryFile}
-              export SETER_TEST_RUNNER=${fakeRunner}
-              seter update alpha
-              test "$(readlink state/alpha/current)" = "${fakeRunner}"
-              test "$(readlink gcroots/alpha)" = "${fakeRunner}"
-              test "$(readlink gcroots/.runner-history/alpha/${builtins.baseNameOf fakeRunner})" = "${fakeRunner}"
-              test -z "$(find gcroots -maxdepth 1 -name '.alpha.pending-*' -print -quit)"
               set +e
               seter status alpha > status
               status_code=$?
               set -e
               test "$status_code" = 3
               grep -F 'state: stopped' status
-              touch state/alpha/alpha-project.img
+
+              touch state/alpha/alpha-project.img state/alpha/lifecycle.lock
               export SETER_DEBUGFS=$PWD/test-bin/debugfs
               export SETER_SSH_KEYGEN=$PWD/test-bin/ssh-keygen
-
-              (
-                flock --exclusive 9
-                touch host-key-lock-held
-                sleep 30
-              ) 9>state/alpha/lifecycle.lock &
-              lock_pid=$!
-              for attempt in $(seq 1 100); do
-                test -e host-key-lock-held && break
-                sleep 0.01
-              done
-              test -e host-key-lock-held
-              set +e
-              seter ssh-host-key alpha > /dev/null 2> host-key-lock-error
-              lock_code=$?
-              set -e
-              test "$lock_code" = 1
-              grep -F 'workspace lifecycle is busy' host-key-lock-error
-              kill "$lock_pid"
-              wait "$lock_pid" 2>/dev/null || true
-
               seter ssh-host-key alpha > host-key 2> fingerprint
               grep -F 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey' host-key
               grep -F 'SHA256:test' fingerprint
-
-              rm gcroots/alpha
-              mkdir gcroots/alpha
-              set +e
-              seter update alpha > /dev/null 2> gcroot-error
-              update_code=$?
-              set -e
-              test "$update_code" = 1
-              grep -F 'it was retained to protect the installed runner' gcroot-error
-              pending=$(find gcroots -maxdepth 1 -type l -name '.alpha.pending-*' -print -quit)
-              test -n "$pending"
-              test "$(readlink "$pending")" = "${fakeRunner}"
-              test "$(readlink state/alpha/current)" = "${fakeRunner}"
 
               touch "$out"
             '';
@@ -1500,7 +1508,8 @@
           assert networkIpRejected;
           assert bridgeTapRejected;
           assert outOfSubnetGatewayRejected;
-          assert blankInstallableRejected;
+          assert nonHttpsRepositoryRejected;
+          assert traversingCheckoutNameRejected;
           assert blankKnownHostKeyRejected;
           assert reusedStorageImageRejected;
           assert blankSecretPlaceholderRejected;
@@ -1723,29 +1732,18 @@
             machine.succeed("systemctl is-active --quiet seter-bridge.service")
             machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
 
-            machine.succeed("mkdir -p /nix/var/nix/gcroots/per-project; ln -s ${fakeRunner} /nix/var/nix/gcroots/per-project/alpha")
-            machine.succeed("ln -s ${fakeRunner} /var/lib/seter/workspaces/alpha/current")
             machine.succeed("set +e; seter status alpha > /tmp/seter-status; code=$?; set -e; test $code = 3; grep -F 'state: stopped' /tmp/seter-status")
             machine.fail("su - outsider -c 'seter up alpha'")
             machine.succeed("set +e; su - operator -c 'seter up missing' 2> /tmp/missing-workspace; code=$?; set -e; test $code = 1; grep -F 'is not configured' /tmp/missing-workspace")
             machine.fail("su - operator -c 'sudo -n true'")
             machine.fail("su - operator -c 'sudo -n -u outsider ${lifecycleHelper} __start alpha'")
             machine.fail("su - operator -c 'seter __start alpha'")
-            machine.succeed("su - operator -c 'seter up alpha' | grep -F 'Started alpha at 10.100.0.10'")
-            machine.wait_for_unit("seter-vm-alpha.service")
-            machine.wait_until_succeeds("test -e /var/lib/seter/workspaces/alpha/fake-vm-started")
-            machine.succeed("test $(readlink /var/lib/seter/workspaces/alpha/booted) = ${fakeRunner}")
-            machine.succeed("account=$(stat -c %U /var/lib/seter/workspaces/alpha); main=$(systemctl show --value --property MainPID seter-vm-alpha.service); test $(awk '/^Name:/ { print $2 }' /proc/$main/status) = microvm-run")
-            machine.succeed("test $(systemctl show --value --property MemoryMax seter-vm-alpha.service) = 4294967296")
+            # 4096 MiB of guest RAM plus the default 512 MiB of VMM overhead.
+            machine.succeed("test $(systemctl show --value --property MemoryMax seter-vm-alpha.service) = 4831838208")
             machine.succeed("test $(systemctl show --value --property CPUQuotaPerSecUSec seter-vm-alpha.service) = 2s")
-            machine.succeed("systemctl is-active --quiet seter-runtime-alpha.target")
-            machine.fail("flock --nonblock /run/lock/seter/alpha.lock true")
-            machine.succeed("seter status alpha | grep -F 'state: running'")
-            machine.succeed("set +e; seter update alpha > /tmp/seter-update 2>&1; code=$?; set -e; test $code = 1; grep -F 'stop it before updating' /tmp/seter-update")
-            machine.succeed("su - operator -c 'seter down alpha' | grep -F 'Stopped alpha'")
-            machine.wait_until_fails("test -e /var/lib/seter/workspaces/alpha/booted")
-            machine.succeed("flock --nonblock /run/lock/seter/alpha.lock true")
-            machine.wait_until_fails("ip link show dev seter-alpha")
+            machine.succeed("systemctl cat seter-vm-alpha.service | grep -F '/nix/store/' | grep -F 'microvm-run'")
+            machine.fail("systemctl cat seter-vm-alpha.service | grep -F '/var/lib/seter/workspaces/alpha/current'")
+            machine.succeed("set +e; seter update alpha > /tmp/seter-update 2>&1; code=$?; set -e; test $code = 2; grep -F \"unrecognized subcommand 'update'\" /tmp/seter-update")
             machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
 
             machine.succeed("systemctl stop seter-bridge.service")

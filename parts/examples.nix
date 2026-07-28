@@ -4,13 +4,59 @@
   ...
 }:
 let
-  minimalWorkspace = self.lib.mkWorkspaceDefinition {
+  minimalWorkspace = {
+    hostname = "minimal.vm";
+    guestProfile = "default";
+    repository = {
+      url = "https://example.invalid/owner/minimal.git";
+      branch = null;
+      checkoutName = null;
+      credential = null;
+    };
+    network = {
+      address = "10.100.0.10";
+      mac = "02:00:00:00:00:10";
+      tap = "seter-minimal";
+    };
+    resources = {
+      memoryMiB = 2048;
+      cpuQuotaPercent = 200;
+    };
+    ssh = {
+      user = "seter";
+      authorizedKeys = [ ];
+      knownHostKey = null;
+    };
+    storage = {
+      project = {
+        image = "minimal-project.img";
+        sizeMiB = 512;
+      };
+      home = {
+        image = "minimal-home.img";
+        sizeMiB = 4096;
+      };
+      nixStore = {
+        image = "minimal-nix-store.img";
+        sizeMiB = 1024;
+      };
+    };
+    hostServices = [ ];
+    egress = {
+      httpHosts = [ ];
+      passthroughHosts = [ ];
+      tcp = [ ];
+    };
+    secrets = { };
+    secretVariables = { };
+  };
+
+  minimalDefinition = import ../nix/lib/mk-runner-definition.nix {
     name = "minimal";
-    runnerInstallable = ".#nixosConfigurations.minimal.config.microvm.declaredRunner";
-    ip = "10.100.0.10";
-    mac = "02:00:00:00:00:10";
-    tap = "seter-minimal";
-    nixStoreSizeMiB = 1024;
+    workspace = minimalWorkspace;
+    gateway = "10.100.0.1";
+    prefixLength = 24;
+    proxyPort = 18081;
   };
 
   mkMinimal =
@@ -28,7 +74,16 @@ let
 in
 {
   flake.nixosConfigurations = {
-    minimal = mkMinimal [ minimalWorkspace.guestModule ] [ ];
+    minimal =
+      mkMinimal
+        [
+          minimalDefinition.guestModule
+          # The host module supplies these from the same registry entry. Set them
+          # explicitly here so the example does not silently depend on the guest
+          # defaults happening to match the registered resources.
+          { seter.guest.memory = minimalWorkspace.resources.memoryMiB; }
+        ]
+        [ ];
     # The standalone boot verification deliberately has no host TAP. Keep it
     # identity-less so it can disable networking and use a disposable image.
     minimal-test =

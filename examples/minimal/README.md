@@ -1,29 +1,20 @@
 # Minimal guest
 
-This example is the smallest reference consumer of Seter's guest module and a generated `mkWorkspaceDefinition` identity. It demonstrates:
+This example is a standalone boot verification for Seter's low-level guest module. The normal product path does not ask repositories to export a NixOS guest: `seter.nixosModules.host` builds a trusted `default`-profile Runner directly from each `seter.host.workspaces` registry entry.
 
-- a Cloud Hypervisor runner;
-- an ephemeral tmpfs root;
-- a read-only virtiofs lower layer of the host Nix store;
-- a persistent, workspace-private writable Nix store overlay;
-- a persistent ext4 volume mounted at `/project`;
-- an optional static tap interface; and
-- an SSH service for the unprivileged `seter` user.
+The standalone example remains useful for testing:
 
-Build the runner from the repository root:
+- a Cloud Hypervisor Runner;
+- tmpfs root and persistent Project/private-Nix volumes;
+- the read-only VirtioFS lower store and writable overlay;
+- guest networking and SSH plumbing.
 
-```console
-nix build .#nixosConfigurations.minimal.config.microvm.declaredRunner
-```
-
-Run the hardware-assisted boot verification on an x86_64 Linux host with KVM:
+Run it with:
 
 ```console
 nix run .#test-minimal
 ```
 
-The verification boots a dedicated test variant twice and checks the boundary marker, tmpfs root, writable project volume, writable private Nix overlay, read-only host-store lower layer, persistent Nix state, active SSH service, and persistent SSH host identity. It runs outside the Nix build sandbox because it requires `/dev/kvm` and host-side virtiofs.
+Cloud Hypervisor requires a separately running `virtiofsd` for command-line Runners. The test application supplies that daemon. Real workspaces use host-owned `seter-runtime-<workspace>.target` plumbing.
 
-Cloud Hypervisor requires a separately running `virtiofsd` for command-line runners. Seter's host module manages it and the tap interface for registered workspaces. For manual experimentation outside that module, use the runner's `virtiofsd-run` helper before `microvm-run` and create/configure the `seter-minimal` tap interface.
-
-The example deliberately contains no authorized key, proxy CA, secrets, personal addresses, or host-specific paths. Configure identity and networking through `seter.lib.mkWorkspaceDefinition`; keep project-owned packages, services, and authorized login keys in the guest module. After the host proxy first starts, export its public CA with `seter proxy-ca`, review and commit the certificate in trusted configuration, and pass it as `proxyCaCertificate` to the workspace definition.
+The example deliberately contains no real authorized key, credential, repository, personal address, or host-specific path.

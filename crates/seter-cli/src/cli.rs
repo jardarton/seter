@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -16,7 +14,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Start a workspace using its last-built runner.
+    /// Start a workspace using its host-deployed Runner.
     Up { workspace: String },
     /// Gracefully stop a workspace.
     Down { workspace: String },
@@ -34,8 +32,6 @@ pub enum Command {
     List,
     /// Print a workspace's IP address.
     Ip { workspace: String },
-    /// Explicitly rebuild a workspace runner.
-    Update { workspace: String },
     /// Print the guest SSH host key from its offline project image.
     SshHostKey { workspace: String },
     /// Print the host proxy's public CA certificate for guest enrollment.
@@ -47,9 +43,6 @@ pub enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
-    /// Privileged half of `seter update`.
-    #[command(name = "__install-runner", hide = true)]
-    InstallRunner { workspace: String, runner: PathBuf },
     /// Privileged half of `seter ssh-host-key`.
     #[command(name = "__read-host-key", hide = true)]
     ReadHostKey { workspace: String },

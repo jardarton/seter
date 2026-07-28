@@ -10,7 +10,7 @@ The host module creates `seter.host.operatorGroup` (`seter-operators` by default
 users.users.alice.extraGroups = [ "seter-operators" ];
 ```
 
-Membership grants permission to start and stop every workspace registered on that host. It does not grant general sudo or systemd access. Registry changes, runner installation, and offline project-image access remain separately privileged operations.
+Membership grants permission to start and stop every workspace registered on that host. It does not grant general sudo or systemd access. Registry and Runner changes occur only through trusted NixOS deployment. Offline project-image access remains a separately privileged operation.
 
 ## Two-stage command
 
@@ -54,4 +54,4 @@ These commands remain unprivileged:
 - `seter status`
 - `seter shell`
 
-`seter update` builds as the invoking user, then separately elevates its narrowly scoped runner-install step. For generated workspace definitions, both halves parse a bounded, regular-file runner identity manifest and compare it with the registry without executing runner code. The privileged start path repeats that comparison before each cold start. The manifest is runner-controlled consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` separately elevates offline access to the host-owned project image. Those operations are not included in the lifecycle operator group's passwordless start/stop grant.
+There is no CLI Runner-install privilege. Before each cold start, the privileged path parses the deployed Runner's bounded regular-file identity manifest and compares it with the root-owned registry without executing Runner code or evaluating Nix. The manifest is consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` separately elevates offline access to the host-owned Project Volume. That operation is not included in the lifecycle operator group's passwordless start/stop grant.

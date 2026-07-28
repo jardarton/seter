@@ -4,14 +4,14 @@ use std::{
     fs::File,
     io::Read,
     net::Ipv4Addr,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 4;
+const REGISTRY_VERSION: u32 = 5;
 pub const RUNNER_IDENTITY_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
@@ -22,9 +22,11 @@ pub struct Registry {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workspace {
     pub hostname: String,
+    pub guest_profile: String,
+    pub repository: Repository,
     pub runner: Runner,
     pub network: Network,
     pub resources: Resources,
@@ -33,15 +35,23 @@ pub struct Workspace {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Repository {
+    pub url: String,
+    pub branch: Option<String>,
+    pub checkout_name: String,
+    pub credential: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runner {
-    pub installable: String,
-    #[serde(default)]
-    pub identity: Option<RunnerIdentity>,
+    pub path: PathBuf,
+    pub identity: RunnerIdentity,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunnerIdentity {
     pub version: u32,
     pub workspace: String,
@@ -49,6 +59,8 @@ pub struct RunnerIdentity {
     pub network: RunnerNetworkIdentity,
     pub proxy: RunnerProxyIdentity,
     pub ssh: RunnerSshIdentity,
+    pub guest_profile: String,
+    pub resources: RunnerResourcesIdentity,
     pub storage: Storage,
 }
 
@@ -74,6 +86,12 @@ pub struct RunnerSshIdentity {
     pub user: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunnerResourcesIdentity {
+    pub memory_mi_b: u64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Network {
@@ -97,12 +115,18 @@ pub struct Ssh {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Storage {
+    pub project: Volume,
+    pub home: Volume,
+    pub nix_store: Volume,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Volume {
     pub image: String,
-    pub nix_store_image: String,
-    pub nix_store_size_mi_b: u64,
+    pub size_mi_b: u64,
 }
 
 impl Registry {
@@ -147,51 +171,93 @@ impl Registry {
 
         for (name, workspace) in &self.workspaces {
             ensure!(
-                !workspace.runner.installable.trim().is_empty(),
-                "workspace {name:?} has an empty runner installable"
+                workspace.guest_profile == "default",
+                "workspace {name:?} uses unsupported Guest Profile {:?}",
+                workspace.guest_profile
             );
-            if let Some(identity) = &workspace.runner.identity {
+            ensure!(
+                workspace.repository.url.starts_with("https://"),
+                "workspace {name:?} repository must use HTTPS"
+            );
+            // Mirrors the host module's constraint. Requiring a leading
+            // alphanumeric rejects "." and ".." along with any separator, so a
+            // checkout name can never escape the project directory.
+            let checkout = &workspace.repository.checkout_name;
+            ensure!(
+                checkout
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphanumeric())
+                    && checkout
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')),
+                "workspace {name:?} has an invalid repository checkout name {checkout:?}"
+            );
+            if let Some(branch) = &workspace.repository.branch {
                 ensure!(
-                    identity.version == RUNNER_IDENTITY_VERSION,
-                    "workspace {name:?} requires unsupported runner identity version {}",
-                    identity.version
-                );
-                ensure!(
-                    identity.workspace == *name,
-                    "workspace {name:?} has a runner identity for {:?}",
-                    identity.workspace
-                );
-                ensure!(
-                    identity.hostname.eq_ignore_ascii_case(&workspace.hostname),
-                    "workspace {name:?} runner identity hostname does not match the registry"
-                );
-                ensure!(
-                    identity.network.address == workspace.network.address
-                        && identity
-                            .network
-                            .mac
-                            .eq_ignore_ascii_case(&workspace.network.mac)
-                        && identity.network.tap == workspace.network.tap,
-                    "workspace {name:?} runner network identity does not match the registry"
-                );
-                ensure!(
-                    identity.network.prefix_length <= 32,
-                    "workspace {name:?} runner identity has an invalid prefix length"
-                );
-                ensure!(
-                    identity.ssh.user == workspace.ssh.user,
-                    "workspace {name:?} runner SSH identity does not match the registry"
-                );
-                ensure!(
-                    identity.storage == workspace.storage,
-                    "workspace {name:?} runner storage identity does not match the registry"
-                );
-                ensure!(
-                    identity.proxy.url.starts_with("http://")
-                        && !identity.proxy.url["http://".len()..].is_empty(),
-                    "workspace {name:?} runner identity has an invalid proxy URL"
+                    !branch.trim().is_empty(),
+                    "workspace {name:?} has an empty repository branch"
                 );
             }
+            if let Some(credential) = &workspace.repository.credential {
+                ensure!(
+                    !credential.trim().is_empty(),
+                    "workspace {name:?} has an empty repository credential binding"
+                );
+            }
+            ensure!(
+                workspace.runner.path.is_absolute(),
+                "workspace {name:?} has a non-absolute deployed Runner path"
+            );
+            let identity = &workspace.runner.identity;
+            ensure!(
+                identity.version == RUNNER_IDENTITY_VERSION,
+                "workspace {name:?} requires unsupported runner identity version {}",
+                identity.version
+            );
+            ensure!(
+                identity.workspace == *name,
+                "workspace {name:?} has a runner identity for {:?}",
+                identity.workspace
+            );
+            ensure!(
+                identity.hostname.eq_ignore_ascii_case(&workspace.hostname),
+                "workspace {name:?} runner identity hostname does not match the registry"
+            );
+            ensure!(
+                identity.network.address == workspace.network.address
+                    && identity
+                        .network
+                        .mac
+                        .eq_ignore_ascii_case(&workspace.network.mac)
+                    && identity.network.tap == workspace.network.tap,
+                "workspace {name:?} runner network identity does not match the registry"
+            );
+            ensure!(
+                identity.network.prefix_length <= 32,
+                "workspace {name:?} runner identity has an invalid prefix length"
+            );
+            ensure!(
+                identity.ssh.user == workspace.ssh.user,
+                "workspace {name:?} runner SSH identity does not match the registry"
+            );
+            ensure!(
+                identity.guest_profile == workspace.guest_profile,
+                "workspace {name:?} Runner Guest Profile does not match the registry"
+            );
+            ensure!(
+                identity.resources.memory_mi_b == workspace.resources.memory_mi_b,
+                "workspace {name:?} Runner memory does not match the registry"
+            );
+            ensure!(
+                identity.storage == workspace.storage,
+                "workspace {name:?} runner storage identity does not match the registry"
+            );
+            ensure!(
+                identity.proxy.url.starts_with("http://")
+                    && !identity.proxy.url["http://".len()..].is_empty(),
+                "workspace {name:?} runner identity has an invalid proxy URL"
+            );
             ensure!(
                 workspace.resources.memory_mi_b > 0,
                 "workspace {name:?} has a zero memory limit"
@@ -204,28 +270,30 @@ impl Registry {
                 !workspace.ssh.user.trim().is_empty(),
                 "workspace {name:?} has an empty SSH user"
             );
-            ensure!(
-                !workspace.storage.image.trim().is_empty()
-                    && !workspace.storage.image.contains('/')
-                    && workspace.storage.image != "."
-                    && workspace.storage.image != "..",
-                "workspace {name:?} has an invalid project image name"
-            );
-            ensure!(
-                !workspace.storage.nix_store_image.trim().is_empty()
-                    && !workspace.storage.nix_store_image.contains('/')
-                    && workspace.storage.nix_store_image != "."
-                    && workspace.storage.nix_store_image != "..",
-                "workspace {name:?} has an invalid Nix store image name"
-            );
-            ensure!(
-                workspace.storage.image != workspace.storage.nix_store_image,
-                "workspace {name:?} reuses its project image for private Nix state"
-            );
-            ensure!(
-                workspace.storage.nix_store_size_mi_b > 0,
-                "workspace {name:?} has a zero Nix store volume size"
-            );
+            let volumes = [
+                ("Project", &workspace.storage.project),
+                ("Home", &workspace.storage.home),
+                ("Nix store", &workspace.storage.nix_store),
+            ];
+            let mut image_names = HashSet::new();
+            for (label, volume) in volumes {
+                ensure!(
+                    !volume.image.trim().is_empty()
+                        && !volume.image.contains('/')
+                        && volume.image != "."
+                        && volume.image != "..",
+                    "workspace {name:?} has an invalid {label} image name"
+                );
+                ensure!(
+                    volume.size_mi_b > 0,
+                    "workspace {name:?} has a zero-sized {label} volume"
+                );
+                ensure!(
+                    image_names.insert(&volume.image),
+                    "workspace {name:?} reuses volume image name {:?}",
+                    volume.image
+                );
+            }
             if let Some(host_key) = &workspace.ssh.known_host_key {
                 ensure!(
                     !host_key.trim().is_empty(),
@@ -265,45 +333,19 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 4,
+      "version": 5,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
-          "runner": { "installable": "github:owner/project#runner" },
-          "network": {
-            "address": "10.100.0.10",
-            "mac": "02:00:00:00:00:aa",
-            "tap": "seter-minimal"
+          "guestProfile": "default",
+          "repository": {
+            "url": "https://git.example/owner/project.git",
+            "branch": null,
+            "checkoutName": "project",
+            "credential": null
           },
-          "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
-          "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": {
-            "image": "minimal-project.img",
-            "nixStoreImage": "minimal-nix-store.img",
-            "nixStoreSizeMiB": 16384
-          }
-        }
-      }
-    }
-    "#;
-
-    #[test]
-    fn parses_version_four_registry() {
-        let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
-        let workspace = registry.workspace("minimal").unwrap();
-
-        assert_eq!(workspace.network.address.to_string(), "10.100.0.10");
-        assert_eq!(workspace.runner.installable, "github:owner/project#runner");
-        assert_eq!(workspace.resources.memory_mi_b, 4096);
-        assert_eq!(workspace.resources.cpu_quota_percent, 200);
-        assert_eq!(workspace.ssh.user, "seter");
-        assert!(workspace.ssh.known_host_key.is_none());
-    }
-
-    #[test]
-    fn parses_required_runner_identity() {
-        let runner = r#""runner": {
-            "installable": "github:owner/project#runner",
+          "runner": {
+            "path": "/nix/store/test-runner",
             "identity": {
               "version": 2,
               "workspace": "minimal",
@@ -317,33 +359,50 @@ mod tests {
               },
               "proxy": { "url": "http://10.100.0.1:18081" },
               "ssh": { "user": "seter" },
+              "guestProfile": "default",
+              "resources": { "memoryMiB": 4096 },
               "storage": {
-                "image": "minimal-project.img",
-                "nixStoreImage": "minimal-nix-store.img",
-                "nixStoreSizeMiB": 16384
+                "project": { "image": "minimal-project.img", "sizeMiB": 4096 },
+                "home": { "image": "minimal-home.img", "sizeMiB": 4096 },
+                "nixStore": { "image": "minimal-nix-store.img", "sizeMiB": 16384 }
               }
             }
-          }"#;
-        let input = VALID.replacen(
-            "\"runner\": { \"installable\": \"github:owner/project#runner\" }",
-            runner,
-            1,
+          },
+          "network": {
+            "address": "10.100.0.10",
+            "mac": "02:00:00:00:00:aa",
+            "tap": "seter-minimal"
+          },
+          "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
+          "ssh": { "user": "seter", "knownHostKey": null },
+          "storage": {
+            "project": { "image": "minimal-project.img", "sizeMiB": 4096 },
+            "home": { "image": "minimal-home.img", "sizeMiB": 4096 },
+            "nixStore": { "image": "minimal-nix-store.img", "sizeMiB": 16384 }
+          }
+        }
+      }
+    }
+    "#;
+
+    #[test]
+    fn parses_version_five_registry() {
+        let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
+        let workspace = registry.workspace("minimal").unwrap();
+
+        assert_eq!(workspace.network.address.to_string(), "10.100.0.10");
+        assert_eq!(
+            workspace.runner.path.to_string_lossy(),
+            "/nix/store/test-runner"
         );
-        let registry = Registry::from_reader(input.as_bytes()).unwrap();
-        let identity = registry
-            .workspace("minimal")
-            .unwrap()
-            .runner
-            .identity
-            .as_ref()
-            .unwrap();
-        assert_eq!(identity.workspace, "minimal");
-        assert_eq!(identity.network.prefix_length, 24);
+        assert_eq!(workspace.repository.checkout_name, "project");
+        assert_eq!(workspace.runner.identity.guest_profile, "default");
+        assert_eq!(workspace.storage.home.size_mi_b, 4096);
     }
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 4", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 5", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()
@@ -351,77 +410,46 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_https_repository() {
+        let input = VALID.replacen("https://git.example", "ssh://git.example", 1);
+        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("repository must use HTTPS"));
+    }
+
+    #[test]
+    fn rejects_traversing_checkout_name() {
+        for candidate in ["..", ".", "", "../escape", "a/b"] {
+            let input = VALID.replacen(
+                "\"checkoutName\": \"project\"",
+                &format!("\"checkoutName\": {candidate:?}"),
+                1,
+            );
+            let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid repository checkout name"),
+                "checkout name {candidate:?} was not rejected: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_runner_identity_drift() {
+        let input = VALID.replacen(
+            "\"memoryMiB\": 4096 },\n              \"storage\"",
+            "\"memoryMiB\": 2048 },\n              \"storage\"",
+            1,
+        );
+        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("Runner memory does not match"));
+    }
+
+    #[test]
     fn rejects_reused_storage_image() {
-        let input = VALID.replacen("minimal-nix-store.img", "minimal-project.img", 1);
+        let input = VALID.replacen("minimal-home.img", "minimal-project.img", 2);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("reuses its project image for private Nix state"));
-    }
-
-    #[test]
-    fn rejects_zero_nix_store_size() {
-        let input = VALID.replacen("\"nixStoreSizeMiB\": 16384", "\"nixStoreSizeMiB\": 0", 1);
-        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("zero Nix store volume size"));
-    }
-
-    #[test]
-    fn rejects_duplicate_addresses() {
-        let second = r#"
-        ,"other": {
-          "hostname": "other.vm",
-          "runner": { "installable": "github:owner/other#runner" },
-          "network": {
-            "address": "10.100.0.10",
-            "mac": "02:00:00:00:00:11",
-            "tap": "seter-other"
-          },
-          "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
-          "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": {
-            "image": "other-project.img",
-            "nixStoreImage": "other-nix-store.img",
-            "nixStoreSizeMiB": 8192
-          }
-        }
-        "#;
-        let input = VALID.replacen(
-            "\n      }\n    }",
-            &format!("{second}\n      }}\n    }}"),
-            1,
-        );
-        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("reuses IPv4 address"));
-    }
-
-    #[test]
-    fn rejects_duplicate_macs_case_insensitively() {
-        let second = r#"
-        ,"other": {
-          "hostname": "other.vm",
-          "runner": { "installable": "github:owner/other#runner" },
-          "network": {
-            "address": "10.100.0.11",
-            "mac": "02:00:00:00:00:AA",
-            "tap": "seter-other"
-          },
-          "resources": { "memoryMiB": 2048, "cpuQuotaPercent": 100 },
-          "ssh": { "user": "seter", "knownHostKey": null },
-          "storage": {
-            "image": "other-project.img",
-            "nixStoreImage": "other-nix-store.img",
-            "nixStoreSizeMiB": 8192
-          }
-        }
-        "#;
-        let input = VALID.replacen(
-            "\n      }\n    }",
-            &format!("{second}\n      }}\n    }}"),
-            1,
-        );
-        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("reuses MAC address"));
+        assert!(error.to_string().contains("reuses volume image name"));
     }
 
     #[test]

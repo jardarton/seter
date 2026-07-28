@@ -1,29 +1,21 @@
 {
   name,
-  runnerInstallable,
-  ip,
-  mac,
-  tap,
-  hostname ? "${name}.vm",
-  gateway ? "10.100.0.1",
-  prefixLength ? 24,
-  proxyPort ? 18081,
-  memoryMiB ? 4096,
-  cpuQuotaPercent ? 200,
-  sshUser ? "seter",
-  knownHostKey ? null,
-  projectImage ? "${name}-project.img",
-  nixStoreImage ? "${name}-nix-store.img",
-  nixStoreSizeMiB ? 16384,
-  allowedHTTPHosts ? [ ],
-  passthroughHosts ? [ ],
-  allowedTCP ? [ ],
-  hostServices ? [ ],
-  secrets ? { },
-  secretVariables ? { },
+  workspace,
+  gateway,
+  prefixLength,
+  proxyPort,
   proxyCaCertificate ? null,
 }:
 let
+  inherit (workspace) hostname secrets secretVariables;
+  inherit (workspace.network) mac tap;
+  ip = workspace.network.address;
+  sshUser = workspace.ssh.user;
+  projectImage = workspace.storage.project.image;
+  projectSizeMiB = workspace.storage.project.sizeMiB;
+  nixStoreImage = workspace.storage.nixStore.image;
+  nixStoreSizeMiB = workspace.storage.nixStore.sizeMiB;
+
   guestSecretPlaceholders = builtins.mapAttrs (
     variable: secretName:
     if builtins.hasAttr secretName secrets then
@@ -44,51 +36,14 @@ let
     };
     proxy.url = proxyUrl;
     ssh.user = sshUser;
-    storage = {
-      image = projectImage;
-      inherit nixStoreImage nixStoreSizeMiB;
-    };
+    guestProfile = workspace.guestProfile;
+    resources.memoryMiB = workspace.resources.memoryMiB;
+    storage = workspace.storage;
   };
   identityJson = builtins.toJSON identity;
 in
 {
   inherit identity identityJson;
-
-  # Host-only projection. In particular, secret source paths and egress policy
-  # never become part of the generated guest module below.
-  host = {
-    runner = {
-      installable = runnerInstallable;
-      requireIdentity = true;
-    };
-
-    inherit hostname hostServices secrets;
-
-    network = {
-      address = ip;
-      inherit mac tap;
-    };
-
-    resources = {
-      inherit memoryMiB cpuQuotaPercent;
-    };
-
-    ssh = {
-      user = sshUser;
-      inherit knownHostKey;
-    };
-
-    storage = {
-      image = projectImage;
-      inherit nixStoreImage nixStoreSizeMiB;
-    };
-
-    egress = {
-      httpHosts = allowedHTTPHosts;
-      inherit passthroughHosts;
-      tcp = allowedTCP;
-    };
-  };
 
   # Sanitized build-time projection. The assertions reject both direct option
   # overrides and drift in the standard lower-level NixOS/microvm wiring. The
@@ -109,8 +64,9 @@ in
         inherit tap gateway prefixLength;
         proxy = proxyUrl;
         image = projectImage;
-        inherit nixStoreImage nixStoreSizeMiB;
+        inherit projectSizeMiB nixStoreImage nixStoreSizeMiB;
         sshUser = sshUser;
+        memoryMiB = workspace.resources.memoryMiB;
       };
       effectiveInterfaceMatches =
         builtins.length config.microvm.interfaces == 1
@@ -133,6 +89,7 @@ in
         && (volume.mountPoint or null) == config.seter.guest.projectDirectory
         && (volume.label or null) == "seter-project"
         && (volume.fsType or null) == "ext4"
+        && (volume.size or null) == expected.projectSizeMiB
       ) config.microvm.volumes;
       effectiveNixStoreVolumePresent = lib.any (
         volume:
@@ -168,7 +125,10 @@ in
         proxy = proxyUrl;
         secretPlaceholders = guestSecretPlaceholders;
 
-        projectVolume.image = projectImage;
+        projectVolume = {
+          image = projectImage;
+          size = projectSizeMiB;
+        };
 
         nixStore = {
           enable = true;
@@ -270,6 +230,10 @@ in
           message = "generated Seter workspace identity forbids overriding the project image";
         }
         {
+          assertion = config.seter.guest.projectVolume.size == expected.projectSizeMiB;
+          message = "generated Seter workspace identity forbids overriding the project volume size";
+        }
+        {
           assertion = effectiveProjectVolumePresent;
           message = "generated Seter workspace identity requires its effective project volume definition";
         }
@@ -305,6 +269,11 @@ in
             && !config.nix.optimise.automatic
             && !config.nix.gc.automatic;
           message = "generated Seter workspace identity requires sandboxed Nix builds with overlay-safe optimisation and garbage-collection settings";
+        }
+        {
+          assertion =
+            config.seter.guest.memory == expected.memoryMiB && config.microvm.mem == expected.memoryMiB;
+          message = "generated Seter workspace identity forbids overriding the guest memory recorded in its manifest";
         }
         {
           assertion = config.seter.guest.ssh.enable && config.services.openssh.enable;

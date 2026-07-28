@@ -29,6 +29,8 @@ This proves an early security vertical slice, not a usable project onboarding wo
 
 ### 1. Replace the workspace and Runner model
 
+**Status: implemented.** The trusted registry, default-profile host deployment, closure rooting, version 5 lifecycle projection, and no-evaluation cold-start path are covered by evaluation and KVM checks.
+
 - Remove the compatibility `mkWorkspace` path and project-installable-based default workflow.
 - Define one trusted Workspace Registry schema containing:
   - one approved HTTPS repository URL;
