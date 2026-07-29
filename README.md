@@ -8,6 +8,8 @@ Seter runs development projects in isolated, Nix-managed micro-VMs. Shared host/
 
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
+Real-world incidents relevant to Seter's goals are recorded as [threat cases](./docs/threat-cases/). These source-based summaries preserve concrete attack chains, capabilities, and indicators for later analysis and testing; inclusion does not imply independent verification or that Seter currently protects against the threat.
+
 ## Core concepts
 
 The trusted NixOS configuration owns one typed **Workspace Registry**. For every entry, the host module builds a trusted `default`-profile **Runner**, includes it in the same NixOS generation, roots its closure, and writes the lifecycle registry consumed by `seter`.
