@@ -48,3 +48,21 @@ that provides it.
 Also ignore the `running 0 flake checks` line in the output. It counts only
 legacy-style checks; the per-system `checks` outputs are still evaluated and
 built.
+
+## Managing verbose command output
+
+Do not run Nix builds with `-L`, NixOS VM/KVM checks, or other commands expected
+to produce large amounts of output directly in an agent session. Use the
+checked-in capture helper instead:
+
+```sh
+scripts/run-captured --log-name lifecycle-e2e -- \
+  nix build .#checks.x86_64-linux.lifecycle-e2e -L
+```
+
+The helper retains the complete output in a temporary log. It prints only a
+short summary on success; on failure it prints selected diagnostics, the final
+100 lines, and the log path while preserving the command's exit status.
+
+Naturally quiet commands such as `cargo test`, `cargo clippy`,
+`nix build .#seter`, and plain `nix flake check` may still run directly.
