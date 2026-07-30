@@ -6,6 +6,8 @@
 
 Seter runs development projects in isolated, Nix-managed micro-VMs. Shared host/guest workspace identity, runner identity verification, guest and host lifecycle behavior, persistent private Nix store overlays, a fail-closed workspace network boundary, bounded Host Patterns, transparent HTTP/HTTPS policy enforcement, allowlisted direct-TCP egress, workspace-scoped policy review, approved host-daemon relays, declarative proxy trust, and destination-bound HTTP-header secret injection are implemented as an early vertical slice.
 
+Start with the [quickstart](./quickstart.md) to configure a host and launch your first workspace.
+
 See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
 Real-world incidents relevant to Seter's goals are recorded as [threat cases](./docs/threat-cases/). These source-based summaries preserve concrete attack chains, capabilities, and indicators for later analysis and testing; inclusion does not imply independent verification or that Seter currently protects against the threat.
