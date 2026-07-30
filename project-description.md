@@ -2,7 +2,7 @@
 
 ## Intention
 
-Run every development project inside its own on-demand Linux micro-VM, defined and managed entirely with Nix, on both NixOS hosts and macOS. Each VM is a hard isolation boundary with controlled network egress, no direct access to secrets, and explicit, minimal bridges back to the host. The same workspace serves command execution and interactive development. Both modes use the workspace's persistent working tree and caches, start the VM when needed, and leave it running until an explicit shutdown.
+Run every development project inside its own on-demand Linux micro-VM, defined and managed entirely with Nix, from both native NixOS Seter Hosts and macOS Clients. Each VM is a hard isolation boundary with controlled network egress, no direct access to secrets, and explicit, minimal bridges back to the Seter Host. The same workspace serves command execution and interactive development. Both modes use the workspace's persistent working tree and caches, start the VM when needed, and leave it running until an explicit shutdown.
 
 ## Motivation
 
@@ -16,7 +16,7 @@ The goal of this project is to limit the blast radius of a compromised dependenc
 - **Nix everywhere.** Guest images, dev environments, network policy, and secret bindings are all declarative, reproducible, and reviewed in version control. Dependency management inside the VMs is plain Nix flakes with direnv, same as on a bare host.
 - **Cheap enough to actually use.** VMs boot in seconds by sharing the host Nix store, so isolation does not compete with convenience.
 
-Existing tools cover parts of this (micro-VM runners, agent sandboxes with egress control, general-purpose VM managers), but none combine Nix-native guest definitions, per-project network policy with secret injection, host-store sharing, and a uniform experience across NixOS and macOS hosts. This project is the glue that combines mature components into that whole.
+Existing tools cover parts of this (micro-VM runners, agent sandboxes with egress control, general-purpose VM managers), but none combine Nix-native guest definitions, per-project network policy with secret injection, host-store sharing, and a uniform experience across native NixOS Seter Hosts and macOS Clients. This project is the glue that combines mature components into that whole.
 
 ## Solution Outline
 
@@ -28,7 +28,7 @@ Existing tools cover parts of this (micro-VM runners, agent sandboxes with egres
 
 ### macOS support via nested virtualization
 
-macOS hosts do not run micro-VMs directly. Instead, one large, long-lived NixOS VM runs under Lima using the `vz` backend with `nestedVirtualization: true` (requires Apple Silicon M3 or newer and macOS 15+). Inside it, the exact same stack runs as on native NixOS hosts: same launcher, same microvm.nix definitions, same proxy, same policy. The outer VM is pure infrastructure — projects run in inner micro-VMs, working trees live on the outer VM's disk (never on macOS-shared paths), and the outer VM joins the tailnet as a first-class node. This trades a modest nested-virtualization performance cost for having exactly one boot path and one policy implementation across all machines.
+macOS Clients do not run Workspace micro-VMs directly. Instead, one large, long-lived Seter Host runs as NixOS under Lima using the `vz` backend with `nestedVirtualization: true` (requires Apple Silicon M3 or newer and macOS 15+). Inside it, the exact same stack runs as on native NixOS Seter Hosts: same launcher, same microvm.nix definitions, same proxy, same policy. The Seter Host is pure infrastructure — projects run in inner micro-VMs, working trees live on its disk (never on macOS-shared paths), and it joins the tailnet as a first-class node. This trades a modest nested-virtualization performance cost for having exactly one boot path and one policy implementation across all machines. See the [macOS integration roadmap](./macos-roadmap.md) for the narrower first implementation milestone.
 
 ### Configuration ownership
 
@@ -52,7 +52,7 @@ Ordinary repositories need no Seter-specific NixOS configuration. Specialized gu
 - `seter shell <name>` and `seter run <name> -- <cmd>` start the workspace when needed and leave it running until explicit shutdown.
 - `seter ls`, `seter status`, `seter ip`, and `seter gc` provide inspection and non-working-tree cleanup.
 - Cold starts never evaluate Nix. Guest Profile and identity changes arrive through trusted host deployment; repository environment changes are built inside the guest.
-- On macOS, the launcher transparently starts the outer Lima VM if needed and proxies commands into it.
+- On a macOS Client, the finished launcher transparently starts the Seter Host if needed and proxies commands into it.
 
 Starting and stopping host system units requires authorization, but project code must not run as host root. On NixOS, an explicit Seter operator group receives passwordless sudo permission only for exact hidden lifecycle and workspace-scoped observation commands generated for registered workspaces. The privileged half reloads host-owned state and constructs fixed unit names itself; it does not accept arbitrary units or commands. Runner installation belongs to trusted NixOS deployment rather than a privileged CLI operation.
 
@@ -76,12 +76,12 @@ Starting and stopping host system units requires authorization, but project code
 
 ### Tailscale
 
-- **Hosts are tailnet nodes.** Every physical NixOS host — and on macOS, the outer Lima VM — runs tailscaled and is a first-class node. This is also how macOS reaches its own inner VMs in the simplest configuration.
+- **Seter Hosts are tailnet nodes.** Every native NixOS Seter Host — and the NixOS Seter Host serving a macOS Client — runs tailscaled and is a first-class node. This is also how a macOS Client reaches its own Workspaces in the simplest configuration.
 - **Exposing guest services to the tailnet** goes via the host, with two tiers:
   - `tailscale serve` proxying to `vm-ip:port` — named, TLS-terminated, per-service, and the tighter default.
   - Advertising the VM bridge subnet as a subnet route — zero per-service configuration, direct addressing of all VMs, gated only by tailnet ACLs. Use deliberately: it exposes the whole bridge to whatever the ACLs permit.
 - **Per-VM tailnet identity** is available when a workspace genuinely needs it: run tailscaled inside that guest with an ephemeral, tagged node key, and scope its access with tag-based ACLs. Ephemeral keys mean discarded VMs clean up after themselves.
-- **Remote builds ride the tailnet:** the macOS outer VM uses the NixOS machines as remote builders over Tailscale, and a tailnet-reachable binary cache can substitute builds for all hosts.
+- **Remote builds ride the tailnet:** a Seter Host serving a macOS Client uses native NixOS machines as remote builders over Tailscale, and a tailnet-reachable binary cache can substitute builds for all hosts.
 
 ### Proxy and secrets
 
@@ -120,14 +120,14 @@ For split or dependent repositories that are developed together, one workspace V
 - No user-mode/slirp networking and no per-port forward configuration — routable per-VM IPs instead.
 - No writable host-store share and no guest build access to the physical host's Nix daemon. Each workspace instead has a private writable overlay above the shared read-only host store.
 - No auto-start of VMs from shell hooks; lifecycle is explicit.
-- No always-on project VMs; the fleet's idle cost is near zero (the outer macOS VM being the accepted exception).
+- No always-on Workspace VMs; the fleet's idle cost is near zero (a Seter Host serving a macOS Client being the accepted exception).
 - No in-guest hardening layers (gVisor, AppArmor profiles, etc.) — the VM boundary is the security boundary; further layers add friction without addressing a realistic residual threat.
 - No pretense of containing a motivated attacker holding a VM-escape zero-day: the design targets malicious dependencies, hostile repos, and misbehaving agents. Host kernel and VMM stay updated; known-hostile samples still don't get run intentionally.
 
 ## Known Limitations
 
 - **macOS requires M3+ and macOS 15+** for nested virtualization; older Apple Silicon has no viable path in this design.
-- Nested virtualization taxes I/O-heavy workloads (container builds) more than CPU-bound ones; the outer VM also holds a standing resource reservation.
+- Nested virtualization taxes I/O-heavy workloads (container builds) more than CPU-bound ones; a Seter Host serving a macOS Client also holds a standing resource reservation.
 - TLS interception produces a recurring trickle of per-tool trust-store fixes; passthrough is the escape hatch.
 - The placeholder mechanism covers HTTP(S) only; non-HTTP credentials need other handling (see below).
 - Response redaction recognizes exact credential values, not encoded, split, transformed, or indirect disclosures by an authorized service. Guests are not provisioned credentials, but bound services remain trusted and credentials must be narrowly scoped.

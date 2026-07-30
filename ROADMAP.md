@@ -177,7 +177,7 @@ After automated success, perform a private real-project trial involving normal d
 
 ## Explicitly deferred
 
-- macOS/Lima and nested host deployment;
+- macOS/Lima and nested host deployment (see the separate [macOS integration roadmap](./macos-roadmap.md));
 - Docker and additional public Guest Profiles;
 - arbitrary project-owned NixOS modules or a specialized capability schema;
 - multi-repository workspaces;

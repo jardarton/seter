@@ -25,7 +25,7 @@ These are canonical project repositories, but Seter should generally consume the
 | sops-nix | [Mic92/sops-nix](https://github.com/Mic92/sops-nix) | Optional consumer-provided host secret management |
 | agenix | [ryantm/agenix](https://github.com/ryantm/agenix) | Alternative optional consumer-provided host secret management |
 | nix-direnv | [nix-community/nix-direnv](https://github.com/nix-community/nix-direnv) | Cached flake development environment activation inside guests |
-| Lima | [lima-vm/lima](https://github.com/lima-vm/lima) | Future outer Linux VM on supported macOS hosts |
+| Lima | [lima-vm/lima](https://github.com/lima-vm/lima) | Future NixOS Seter Host runtime for supported macOS Clients |
 
 Seter should not require either sops-nix or agenix directly. Its module interface should accept runtime secret-file paths supplied by the consumer's chosen secret manager.
 
