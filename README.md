@@ -36,6 +36,30 @@ Not there yet: macOS support ([roadmap](./macos-roadmap.md)), guest profiles oth
 
 Start with the [quickstart](./quickstart.md) to configure a host and launch your first workspace. See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
+## How Seter compares
+
+Most of these tools solve a different problem, and solve it well. The columns below are the four properties Seter is built for, so the table shows where Seter differs — not which tool is better.
+
+| Tool / normal mode | Isolation boundary | Built-in egress control per workspace | Declarative environment or policy | Credential kept outside the workload |
+|---|---|---|---|---|
+| `nix develop` | none — dependencies only | none | yes, Nix | no |
+| devenv shell | none; optional OCI container mode shares its runtime's kernel | none | yes, Nix | no |
+| bubblewrap | same kernel | network namespace on or off; finer policy requires external setup | command-line construction | no |
+| Firejail | same kernel | network namespaces and custom IPv4/IPv6 firewall rules | yes, security profiles | no |
+| Docker, devcontainers | same kernel | unrestricted by default; none/internal networks, but no destination-aware policy | yes, Dockerfile, Compose, or `devcontainer.json` | no |
+| Codespaces | dedicated VM containing a dev container | depends on organization networking | yes, `devcontainer.json` | no — repository token is in the environment |
+| Ona (formerly Gitpod) | VM | depends on runner/VPC policy | yes, Dev Container and project configuration | no — secrets are injected into the environment |
+| Coder | template-defined VM or Kubernetes pod | depends on deployment and template | yes, Terraform templates | no by default |
+| microvm.nix | VM | network interfaces, but no policy layer | yes, Nix | no |
+| Qubes OS | VM per qube | per-qube firewall | optionally through Salt | yes for selected split services, such as Split GPG |
+| **Seter** | **VM** | **default-deny with hostname grants** | **yes, Nix** | **yes, for configured destination-bound HTTP credentials** |
+
+The table describes each tool's normal execution mode and built-in supported mechanisms, not every customization that can be built around it. “Declarative” means that the environment or policy has a supported configuration-as-code representation. The credential column asks whether a supported mechanism can use a runtime credential without making its private value available inside the workload.
+
+Seter is built **on** microvm.nix. It adds the policy layer, the lifecycle, and the credential boundary that a VM alone does not give you.
+
+Seter is not a replacement for Qubes OS. Qubes isolates your whole computing life, across every application you run. Seter isolates one development project, and makes that isolation a reviewable part of your system configuration.
+
 ## Core concepts
 
 The trusted NixOS configuration owns one typed **Workspace Registry**. For every entry, the host module builds a trusted `default`-profile **Runner**, includes it in the same NixOS generation, roots its closure, and writes the lifecycle registry consumed by `seter`.
