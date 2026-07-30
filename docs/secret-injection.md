@@ -40,16 +40,33 @@ Authorization: seter-placeholder-github-0123456789abcdef
 Authorization: Bearer seter-placeholder-github-0123456789abcdef
 ```
 
-Export the same public value in the guest:
+Map the guest's environment variables to secret names in the same registry entry. `secretVariables` refers to a secret by name, so the placeholder is never written twice:
 
 ```nix
-seter.guest.secretPlaceholders.GITHUB_TOKEN =
-  "seter-placeholder-github-0123456789abcdef";
+seter.host.workspaces.project = {
+  # repository, identity, and resource fields omitted here
+
+  secrets.githubToken = {
+    placeholder = "seter-placeholder-github-0123456789abcdef";
+    sourceFile = "/run/secrets/github-token";
+    hosts = [ "api.github.com" ];
+    headers = [ "authorization" ];
+  };
+
+  secretVariables = {
+    GITHUB_TOKEN = "githubToken";
+    GH_TOKEN = "githubToken";
+  };
+};
 ```
 
-`secretPlaceholders` configures login-session variables. NixOS systemd services do not inherit them; pass the same public placeholder explicitly in the service's environment when needed. Placeholders are intentionally stored in the guest configuration and Nix store and must never be real credentials.
+Evaluation fails if a variable names a secret that the workspace does not define. The host-deployed Runner then exports each matching non-secret placeholder to the guest's login sessions.
 
-Keep shared host and guest placeholder declarations in one trusted Nix value where possible. A placeholder that matches no eligible host-side binding is forwarded unchanged and authenticates with a useless public value. A cross-wired placeholder that matches another eligible binding injects that binding's credential, so shared declarations also prevent accidentally selecting the wrong credential.
+Prefer `secretVariables` over the low-level guest option `seter.guest.secretPlaceholders`, which takes a literal placeholder string. Repeating a placeholder by hand risks two failures. A placeholder that matches no eligible host-side binding is forwarded unchanged and authenticates with a useless public value. A cross-wired placeholder that matches another eligible binding injects that binding's credential.
+
+NixOS systemd services do not inherit login-session variables. Pass the same public placeholder explicitly in the service's environment when it is needed.
+
+Placeholders are intentionally stored in the guest configuration and the Nix store. Never assign a real credential to a placeholder.
 
 ## Runtime credential format
 
