@@ -8,6 +8,18 @@ Seter limits the authority of development workloads by placing each workspace be
 An isolated development environment with one working tree, its persistent state, and granted capabilities. It is the unit whose blast radius Seter limits.
 _Avoid_: Project VM, sandbox
 
+**macOS Client**:
+The physical Mac from which an operator accesses Seter. It is outside the Seter Host's workspace isolation and policy boundary.
+_Avoid_: macOS host, Mac host
+
+**Client Exchange Directory**:
+One explicitly selected directory belonging to the macOS Client that the Seter Host may read and write for deliberate file exchange. It is never directly available to a Workspace.
+_Avoid_: Shared home, host home mount
+
+**Seter Host**:
+The trusted operating environment that owns the Workspace Registry, enforces policy, and runs Workspace Runners. On macOS deployments, it is distinct from the macOS Client.
+_Avoid_: Outer VM, Lima VM
+
 **Workspace Registry**:
 The trusted catalog of workspace identities, approved repository sources, resource limits, and granted capabilities.
 _Avoid_: Project list, VM registry
