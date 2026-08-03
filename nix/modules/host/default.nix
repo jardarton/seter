@@ -13,6 +13,7 @@ let
     mapAttrs
     mapAttrs'
     mapAttrsToList
+    optionalAttrs
     mkEnableOption
     mkIf
     mkAfter
@@ -174,6 +175,7 @@ let
       prefixLength = subnetPrefix;
       proxyPort = cfg.proxy.explicitPort;
       proxyCaCertificate = cfg.proxyCaCertificate;
+      hypervisor = cfg.runner.hypervisor;
     }
   ) cfg.workspaces;
 
@@ -189,8 +191,21 @@ let
         {
           seter.guest = {
             memory = workspace.resources.memoryMiB;
+            vcpu = workspace.resources.vcpu;
             ssh.authorizedKeys = workspace.ssh.authorizedKeys;
           };
+          boot.kernelPackages = mkIf (
+            cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
+          ) pkgs.linuxPackages_6_12;
+          microvm.qemu.machineOpts =
+            mkIf (cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64)
+              {
+                accel = "kvm";
+                gic-version = "max";
+              };
+          # Workspaces are headless. The physical-Mac probe showed that
+          # virtual-console initialization can stall under nested ARM KVM.
+          console.enable = mkIf (cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64) false;
           # Derive the vsock context ID from the already-unique workspace
           # address so two workspaces can never collide. The values are large
           # and unmemorable by construction; they are host-internal identifiers
@@ -204,7 +219,7 @@ let
   workspaceRunners = mapAttrs (_: system: system.config.microvm.declaredRunner) workspaceSystems;
 
   lifecycleRegistry = {
-    version = 5;
+    version = 6;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace)
         hostname
@@ -227,7 +242,7 @@ let
       # hostOverheadMiB sizes the host systemd limit only. It is not guest
       # identity and the CLI has no use for it, so it stays out of the registry.
       resources = {
-        inherit (workspace.resources) memoryMiB cpuQuotaPercent;
+        inherit (workspace.resources) memoryMiB vcpu cpuQuotaPercent;
       };
       ssh = {
         inherit (workspace.ssh) user;
@@ -447,15 +462,22 @@ let
         ReadOnlyPaths = [ identityDirectory ];
       };
     }
-  ) workspaceRuntime;
+  ) (if cfg.runner.hypervisor == "cloud-hypervisor" then workspaceRuntime else { });
 
   runtimeTargets = mapAttrs' (
     name: _:
+    let
+      identityUnit =
+        if cfg.runner.hypervisor == "cloud-hypervisor" then
+          "seter-identity-virtiofsd-${name}.service"
+        else
+          "seter-tap-${name}.service";
+    in
     nameValuePair "seter-runtime-${name}" {
       description = "Host runtime plumbing for Seter workspace ${name}";
-      requires = [ "seter-identity-virtiofsd-${name}.service" ];
-      bindsTo = [ "seter-identity-virtiofsd-${name}.service" ];
-      after = [ "seter-identity-virtiofsd-${name}.service" ];
+      requires = [ identityUnit ];
+      bindsTo = [ identityUnit ];
+      after = [ identityUnit ];
       # Stopping either half of the lifecycle tears down the other. The VM
       # service also has PartOf= on this target so operators may still stop
       # the plumbing target directly.
@@ -510,6 +532,11 @@ let
           "/dev/net/tun rw"
           "/dev/vhost-net rw"
           "/dev/vhost-vsock rw"
+        ];
+      }
+      // optionalAttrs (cfg.runner.hypervisor == "qemu") {
+        LoadCredential = [
+          "ssh_host_ed25519_key:${runtime.identityDirectory}/ssh_host_ed25519_key"
         ];
       };
     }
@@ -592,6 +619,19 @@ in
       description = "Seter CLI package installed on the host and authorized for lifecycle helpers.";
     };
 
+    runner.hypervisor = mkOption {
+      type = types.enum [
+        "cloud-hypervisor"
+        "qemu"
+      ];
+      default = "cloud-hypervisor";
+      description = ''
+        VMM used for trusted Workspace Runners. QEMU selects the fw_cfg SSH
+        identity channel and, on aarch64-linux, the validated Linux 6.12 LTS
+        guest kernel. Cloud Hypervisor remains the native-Linux default.
+      '';
+    };
+
     operatorGroup = mkOption {
       type = types.strMatching "[a-z_][a-z0-9_-]*";
       default = "seter-operators";
@@ -614,7 +654,20 @@ in
   config = mkIf cfg.enable {
     seter.host.workspaces = policyWorkspaceDefinitions;
 
+    # The physical-Mac gate isolated nested-KVM hangs to the bootstrap Host's
+    # latest kernel. Keep both ARM virtualization layers on the accepted LTS.
+    boot.kernelPackages = mkIf (
+      cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
+    ) pkgs.linuxPackages_6_12;
+
     assertions = [
+      {
+        assertion =
+          cfg.runner.hypervisor != "qemu"
+          || !pkgs.stdenv.hostPlatform.isAarch64
+          || config.boot.kernelPackages.kernel == pkgs.linuxPackages_6_12.kernel;
+        message = "the aarch64-linux QEMU Seter Host requires the validated Linux 6.12 LTS kernel";
+      }
       {
         assertion = (policyRaw.version or null) == 1;
         message = "seter.host.policyFile must use Policy File version 1";

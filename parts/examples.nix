@@ -20,6 +20,7 @@ let
     };
     resources = {
       memoryMiB = 2048;
+      vcpu = 2;
       cpuQuotaPercent = 200;
     };
     ssh = {

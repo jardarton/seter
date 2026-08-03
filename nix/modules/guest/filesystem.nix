@@ -239,7 +239,7 @@ in
     # microvm.nix builds the Runner closure into a read-only EROFS store disk.
     # In particular, do not add a /nix/store share here: doing so would make
     # the whole host store enumerable and disable the closure-filtered disk.
-    microvm.shares = [
+    microvm.shares = optionals (cfg.ssh.identityTransport == "virtiofs") [
       {
         proto = "virtiofs";
         tag = "seter-identity";

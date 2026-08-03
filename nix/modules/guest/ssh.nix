@@ -35,7 +35,20 @@ in
     hostKeyPath = mkOption {
       type = types.str;
       default = "/run/seter-identity/ssh_host_ed25519_key";
-      description = "Read-only host-supplied Workspace SSH Identity private-key path.";
+      description = "Root-only host-supplied Workspace SSH Identity private-key path.";
+    };
+
+    identityTransport = mkOption {
+      type = types.enum [
+        "virtiofs"
+        "fw_cfg"
+      ];
+      default = "virtiofs";
+      description = ''
+        Trusted transport used to deliver the host-created Workspace SSH
+        Identity. fw_cfg is used by the nested ARM QEMU Runner to avoid its
+        slow virtiofs and shared-memory path.
+      '';
     };
   };
 
@@ -63,6 +76,24 @@ in
       home = "/home/${ssh.user}";
       extraGroups = [ "wheel" ];
       openssh.authorizedKeys.keys = ssh.authorizedKeys;
+    };
+
+    systemd.services.seter-ssh-identity = mkIf (ssh.enable && ssh.identityTransport == "fw_cfg") {
+      description = "Stage the fw_cfg Workspace SSH Identity";
+      before = [ "sshd.service" ];
+      requiredBy = [ "sshd.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ImportCredential = [ "seter.ssh-host-key" ];
+      };
+      path = [ pkgs.coreutils ];
+      script = ''
+        install -d -m 0700 /run/seter-identity
+        install -m 0600 \
+          "$CREDENTIALS_DIRECTORY/seter.ssh-host-key" \
+          ${lib.escapeShellArg ssh.hostKeyPath}
+      '';
     };
   };
 }
