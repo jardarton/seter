@@ -113,6 +113,11 @@ in
         default = 4096;
         description = "Workspace guest memory in MiB.";
       };
+      vcpu = mkOption {
+        type = types.ints.positive;
+        default = 2;
+        description = "Number of virtual CPUs exposed to the Workspace guest.";
+      };
       hostOverheadMiB = mkOption {
         type = types.ints.positive;
         default = 512;

@@ -5,12 +5,15 @@
   prefixLength,
   proxyPort,
   proxyCaCertificate ? null,
+  hypervisor ? "cloud-hypervisor",
 }:
 let
   inherit (workspace) hostname secrets secretVariables;
   inherit (workspace.network) mac tap;
   ip = workspace.network.address;
   sshUser = workspace.ssh.user;
+  vcpu = workspace.resources.vcpu;
+  identityTransport = if hypervisor == "qemu" then "fw_cfg" else "virtiofs";
   projectImage = workspace.storage.project.image;
   projectSizeMiB = workspace.storage.project.sizeMiB;
   homeImage = workspace.storage.home.image;
@@ -28,7 +31,7 @@ let
 
   proxyUrl = "http://${gateway}:${toString proxyPort}";
   identity = {
-    version = 2;
+    version = 3;
     workspace = name;
     inherit hostname;
     network = {
@@ -39,7 +42,10 @@ let
     proxy.url = proxyUrl;
     ssh.user = sshUser;
     guestProfile = workspace.guestProfile;
-    resources.memoryMiB = workspace.resources.memoryMiB;
+    resources = {
+      memoryMiB = workspace.resources.memoryMiB;
+      inherit vcpu;
+    };
     storage = workspace.storage;
   };
   identityJson = builtins.toJSON identity;
@@ -75,6 +81,7 @@ in
           ;
         sshUser = sshUser;
         memoryMiB = workspace.resources.memoryMiB;
+        inherit vcpu;
       };
       effectiveInterfaceMatches =
         builtins.length config.microvm.interfaces == 1
@@ -138,6 +145,8 @@ in
       seter.guest = {
         enable = true;
         name = name;
+        inherit hypervisor;
+        inherit vcpu;
         proxy = proxyUrl;
         secretPlaceholders = guestSecretPlaceholders;
 
@@ -169,14 +178,20 @@ in
           dns = [ gateway ];
         };
 
-        ssh.user = sshUser;
-        ssh.hostKeyPath = "/run/seter-identity/ssh_host_ed25519_key";
+        ssh = {
+          user = sshUser;
+          hostKeyPath = "/run/seter-identity/ssh_host_ed25519_key";
+          inherit identityTransport;
+        };
       }
       // lib.optionalAttrs (proxyCaCertificate != null) {
         inherit proxyCaCertificate;
       };
 
       environment.etc."seter/workspace.json".text = identityJson;
+      microvm.credentialFiles = lib.mkIf (identityTransport == "fw_cfg") {
+        "seter.ssh-host-key" = "/run/credentials/seter-vm-${name}.service/ssh_host_ed25519_key";
+      };
       microvm.declaredRunner = runner;
 
       assertions = [
@@ -314,6 +329,10 @@ in
           message = "generated Seter workspace identity forbids overriding the guest memory recorded in its manifest";
         }
         {
+          assertion = config.seter.guest.vcpu == expected.vcpu && config.microvm.vcpu == expected.vcpu;
+          message = "generated Seter workspace identity forbids overriding the guest vCPU count recorded in its manifest";
+        }
+        {
           assertion = config.seter.guest.ssh.enable && config.services.openssh.enable;
           message = "generated Seter workspace identity requires guest SSH lifecycle access";
         }
@@ -324,6 +343,41 @@ in
         {
           assertion = config.seter.guest.ssh.hostKeyPath == "/run/seter-identity/ssh_host_ed25519_key";
           message = "generated Seter workspace identity requires the host-created Workspace SSH Identity";
+        }
+        {
+          assertion = config.seter.guest.hypervisor == hypervisor;
+          message = "generated Seter workspace identity forbids overriding the selected hypervisor";
+        }
+        {
+          assertion = config.seter.guest.ssh.identityTransport == identityTransport;
+          message = "generated Seter workspace identity forbids overriding the Workspace SSH Identity transport";
+        }
+        {
+          assertion =
+            hypervisor != "qemu"
+            || !pkgs.stdenv.hostPlatform.isAarch64
+            || (
+              config.boot.kernelPackages.kernel == pkgs.linuxPackages_6_12.kernel
+              && !config.console.enable
+              &&
+                config.microvm.qemu.machineOpts == {
+                  accel = "kvm";
+                  gic-version = "max";
+                }
+            );
+          message = "the aarch64-linux QEMU Runner requires Linux 6.12 LTS, headless console setup, and KVM-only GIC configuration";
+        }
+        {
+          assertion =
+            if identityTransport == "fw_cfg" then
+              config.microvm.shares == [ ]
+              &&
+                config.microvm.credentialFiles == {
+                  "seter.ssh-host-key" = "/run/credentials/seter-vm-${name}.service/ssh_host_ed25519_key";
+                }
+            else
+              config.microvm.credentialFiles == { };
+          message = "generated Seter workspace identity requires the selected VMM-specific identity channel";
         }
         {
           assertion = builtins.hasAttr expected.sshUser config.users.users;

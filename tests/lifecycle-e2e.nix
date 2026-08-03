@@ -125,6 +125,7 @@ let
     };
     resources = {
       memoryMiB = 1024;
+      vcpu = 2;
       cpuQuotaPercent = 200;
     };
     ssh.authorizedKeys = [ testSshPublicKey ];
@@ -330,7 +331,7 @@ pkgs.testers.runNixOSTest {
     # The registry, lifecycle units, and immutable Runner are one NixOS
     # generation. No project installable or mutable current-runner link exists.
     machine.succeed("test $(readlink -f /etc/seter/runners/e2e) = ${runner}")
-    machine.succeed("jq -e '.version == 5 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repository.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repository.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
+    machine.succeed("jq -e '.version == 6 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repository.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repository.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
     machine.fail("test -e /var/lib/seter/workspaces/e2e/current")
     machine.fail("su - operator -c 'seter update e2e'")
 

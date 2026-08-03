@@ -28,6 +28,7 @@
           };
           resources = {
             memoryMiB = 4096;
+            vcpu = 2;
             cpuQuotaPercent = 200;
           };
           ssh = {
@@ -150,6 +151,45 @@
           }
         ];
       };
+      qemuIdentityHostConfiguration = mkHostWith {
+        runner.hypervisor = "qemu";
+        proxyCaCertificate = builtins.readFile proxyTrustCa;
+        workspaces.identity = identityWorkspaceEntry // {
+          resources = identityWorkspaceEntry.resources // {
+            vcpu = 4;
+          };
+        };
+      };
+      qemuIdentityWorkspace = import ../nix/lib/mk-runner-definition.nix {
+        name = "identity";
+        workspace = qemuIdentityHostConfiguration.config.seter.host.workspaces.identity;
+        gateway = "10.100.0.1";
+        prefixLength = 24;
+        proxyPort = 18081;
+        proxyCaCertificate = builtins.readFile proxyTrustCa;
+        hypervisor = "qemu";
+      };
+      qemuIdentityGuestConfiguration = inputs.nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.guest
+          qemuIdentityWorkspace.guestModule
+          (import ../nix/modules/guest/profiles/default.nix)
+          {
+            seter.guest = {
+              memory = qemuIdentityHostConfiguration.config.seter.host.workspaces.identity.resources.memoryMiB;
+              vcpu = qemuIdentityHostConfiguration.config.seter.host.workspaces.identity.resources.vcpu;
+            };
+            boot.kernelPackages = lib.mkIf pkgs.stdenv.hostPlatform.isAarch64 pkgs.linuxPackages_6_12;
+            microvm.qemu.machineOpts = lib.mkIf pkgs.stdenv.hostPlatform.isAarch64 {
+              accel = "kvm";
+              gic-version = "max";
+            };
+            console.enable = lib.mkIf pkgs.stdenv.hostPlatform.isAarch64 false;
+            system.stateVersion = "24.11";
+          }
+        ];
+      };
 
       dnsPortsFor = workspaces: import ../nix/modules/host/dns-ports.nix { inherit lib workspaces; };
       workspaceDnsPorts = dnsPortsFor validWorkspaces;
@@ -210,6 +250,18 @@
       secretPolicyCredentials = secretPolicyService.serviceConfig.LoadCredential;
 
       hostConfiguration = mkHost validWorkspaces;
+      qemuHostConfiguration = mkHostWith {
+        runner.hypervisor = "qemu";
+        workspaces = lib.mapAttrs (
+          _: workspace:
+          workspace
+          // {
+            resources = workspace.resources // {
+              vcpu = 4;
+            };
+          }
+        ) validWorkspaces;
+      };
       registryFile = hostConfiguration.config.environment.etc."seter/workspaces.json".source;
       minimalIdentityShare = builtins.head self.nixosConfigurations.minimal.config.microvm.shares;
       minimalIdentitySocket = minimalIdentityShare.socket;
@@ -236,6 +288,13 @@
         rule: if builtins.elem "seter-operators" (rule.groups or [ ]) then rule.commands else [ ]
       ) hostConfiguration.config.security.sudo.extraRules;
       lifecycleHelper = lib.getExe hostConfiguration.config.seter.host.package;
+      qemuGuestCredentials = qemuIdentityGuestConfiguration.config.microvm.credentialFiles;
+      qemuGuestShares = qemuIdentityGuestConfiguration.config.microvm.shares;
+      qemuGuestIdentityService =
+        qemuIdentityGuestConfiguration.config.systemd.services.seter-ssh-identity;
+      qemuVmService = qemuHostConfiguration.config.systemd.services.seter-vm-alpha;
+      qemuRuntimeTarget = qemuHostConfiguration.config.systemd.targets.seter-runtime-alpha;
+      qemuRunner = qemuIdentityGuestConfiguration.config.microvm.declaredRunner;
 
       proxyTestCertificate =
         pkgs.runCommand "seter-proxy-test-certificate"
@@ -1436,6 +1495,8 @@
           assert identityGuestConfiguration.config.seter.guest.homeVolume.size == 4096;
           assert identityGuestConfiguration.config.seter.guest.nixStore.image == "identity-nix-store.img";
           assert identityGuestConfiguration.config.seter.guest.nixStore.size == 16384;
+          assert identityGuestConfiguration.config.seter.guest.vcpu == 2;
+          assert identityGuestConfiguration.config.microvm.vcpu == 2;
           assert identityGuestConfiguration.config.microvm.writableStoreOverlay == "/nix/.rw-store";
           assert identityGuestConfiguration.config.microvm.storeOnDisk;
           assert
@@ -1459,6 +1520,23 @@
             secretPolicyCredentials == [
               "seter-alpha.githubToken:/run/secrets/github-token"
             ];
+          assert qemuIdentityGuestConfiguration.config.seter.guest.hypervisor == "qemu";
+          assert qemuIdentityGuestConfiguration.config.seter.guest.ssh.identityTransport == "fw_cfg";
+          assert qemuIdentityGuestConfiguration.config.seter.guest.vcpu == 4;
+          assert qemuIdentityGuestConfiguration.config.microvm.vcpu == 4;
+          assert qemuGuestShares == [ ];
+          assert
+            qemuGuestCredentials == {
+              "seter.ssh-host-key" = "/run/credentials/seter-vm-identity.service/ssh_host_ed25519_key";
+            };
+          assert qemuGuestIdentityService.serviceConfig.ImportCredential == [ "seter.ssh-host-key" ];
+          assert
+            qemuVmService.serviceConfig.LoadCredential == [
+              "ssh_host_ed25519_key:/var/lib/seter/identities/alpha/ssh_host_ed25519_key"
+            ];
+          assert qemuRuntimeTarget.requires == [ "seter-tap-alpha.service" ];
+          assert
+            !(builtins.hasAttr "seter-identity-virtiofsd-alpha" qemuHostConfiguration.config.systemd.services);
           pkgs.runCommand "seter-workspace-registry-check"
             {
               nativeBuildInputs = [
@@ -1469,12 +1547,13 @@
             }
             ''
               jq -e '
-                .version == 5 and
+                .version == 6 and
                 (.workspaces | keys == ["alpha", "beta"]) and
                 (.workspaces.alpha.hostname == "alpha.vm") and
                 (.workspaces.alpha.network.address == "10.100.0.10") and
                 (.workspaces.alpha.network.mac == "02:00:00:00:00:10") and
                 (.workspaces.alpha.resources.memoryMiB == 4096) and
+                (.workspaces.alpha.resources.vcpu == 2) and
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
                 (.workspaces.alpha.ssh == { user: "seter" }) and
                 (.workspaces.alpha.guestProfile == "default") and
@@ -1493,7 +1572,7 @@
               ' ${registryFile}
 
               jq -e '
-                .version == 5 and
+                .version == 6 and
                 .workspaces.identity.repository == {
                   url: "https://api.example.com/owner/workspace.git",
                   branch: null,
@@ -1503,7 +1582,7 @@
                     placeholder: "seter-placeholder-github-0123456789abcdef"
                   }
                 } and
-                .workspaces.identity.runner.identity.version == 2 and
+                .workspaces.identity.runner.identity.version == 3 and
                 .workspaces.identity.runner.identity.workspace == "identity" and
                 .workspaces.identity.runner.identity.hostname == "identity.vm" and
                 .workspaces.identity.runner.identity.network == {
@@ -1516,7 +1595,7 @@
                 .workspaces.identity.runner.identity.proxy.url == "http://10.100.0.1:18081" and
                 .workspaces.identity.runner.identity.ssh.user == "seter" and
                 .workspaces.identity.runner.identity.guestProfile == "default" and
-                .workspaces.identity.runner.identity.resources.memoryMiB == 4096 and
+                .workspaces.identity.runner.identity.resources == { memoryMiB: 4096, vcpu: 2 } and
                 .workspaces.identity.runner.identity.storage == {
                   project: { image: "identity-project.img", sizeMiB: 4096 },
                   home: { image: "identity-home.img", sizeMiB: 4096 },
@@ -1753,6 +1832,34 @@
           assert builtins.elem proxyCaCertificate guestConfiguration.config.security.pki.certificates;
           guestConfiguration.config.system.build.toplevel;
 
+      }
+      // lib.optionalAttrs (system == "aarch64-linux") {
+        arm-qemu-runner =
+          assert
+            qemuIdentityGuestConfiguration.config.boot.kernelPackages.kernel.version
+            == pkgs.linuxPackages_6_12.kernel.version;
+          assert !qemuIdentityGuestConfiguration.config.console.enable;
+          assert
+            qemuIdentityGuestConfiguration.config.microvm.qemu.machineOpts == {
+              accel = "kvm";
+              gic-version = "max";
+            };
+          assert qemuHostConfiguration.config.boot.kernelPackages.kernel == pkgs.linuxPackages_6_12.kernel;
+          pkgs.runCommand "seter-arm-qemu-runner-check"
+            {
+              nativeBuildInputs = [ pkgs.gnugrep ];
+            }
+            ''
+              runner=${qemuRunner}/bin/microvm-run
+              grep -F -- "qemu-system-aarch64" "$runner"
+              grep -F -- "-M 'virt,accel=kvm,gic-version=max'" "$runner"
+              grep -F -- "-smp 4" "$runner"
+              grep -F -- "linux-6.12" "$runner"
+              grep -F -- "-fw_cfg 'name=opt/io.systemd.credentials/seter.ssh-host-key,file=/run/credentials/seter-vm-identity.service/ssh_host_ed25519_key'" "$runner"
+              ! grep -F -- "vhost-user-fs" "$runner"
+              ! grep -F -- "memory-backend-memfd" "$runner"
+              touch "$out"
+            '';
       }
       // lib.optionalAttrs (system == "x86_64-linux") {
         minimal-runner = self.nixosConfigurations.minimal.config.microvm.declaredRunner;

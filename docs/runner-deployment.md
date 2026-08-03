@@ -25,6 +25,20 @@ Host deployment may realize VM closures and take longer, especially when many wo
 
 Optimization must preserve this contract. Future evaluation could avoid rebuilding unchanged Runner outputs or deploy selected runners lazily from trusted derivations, but must not reintroduce project-owned host builds or stale host/runner identity.
 
+## Platform VMM selection
+
+`seter.host.runner.hypervisor` selects the trusted Host-wide Runner backend.
+It defaults to `cloud-hypervisor`, preserving the native Linux path. The
+`qemu` backend is the nested `aarch64-linux` path validated for the initial
+macOS integration. On ARM it also enforces Linux 6.12 LTS on the Seter Host
+and Workspace, KVM-only acceleration, headless console setup, and the QEMU
+`fw_cfg` Workspace SSH Identity transport. The identity is loaded into each
+VMM unit as a private systemd credential and staged root-only before OpenSSH;
+the QEMU Runner has no identity virtiofs share.
+
+The option is trusted host configuration, not a project or Workspace setting.
+Changing it rebuilds and redeploys every Runner.
+
 ## Advanced runners
 
 Specialized guest composition is outside the first milestone. If a future explicitly untrusted project-owned runner path is added, it may require a separate update mechanism and identity consistency checks. That future mechanism must not complicate or weaken the default trusted-profile workflow.

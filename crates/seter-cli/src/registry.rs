@@ -11,8 +11,8 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 5;
-pub const RUNNER_IDENTITY_VERSION: u32 = 2;
+const REGISTRY_VERSION: u32 = 6;
+pub const RUNNER_IDENTITY_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +97,7 @@ pub struct RunnerSshIdentity {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunnerResourcesIdentity {
     pub memory_mi_b: u64,
+    pub vcpu: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +112,7 @@ pub struct Network {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Resources {
     pub memory_mi_b: u64,
+    pub vcpu: u32,
     pub cpu_quota_percent: u32,
 }
 
@@ -264,6 +266,10 @@ impl Registry {
                 "workspace {name:?} Runner memory does not match the registry"
             );
             ensure!(
+                identity.resources.vcpu == workspace.resources.vcpu,
+                "workspace {name:?} Runner vCPU count does not match the registry"
+            );
+            ensure!(
                 identity.storage == workspace.storage,
                 "workspace {name:?} runner storage identity does not match the registry"
             );
@@ -275,6 +281,10 @@ impl Registry {
             ensure!(
                 workspace.resources.memory_mi_b > 0,
                 "workspace {name:?} has a zero memory limit"
+            );
+            ensure!(
+                workspace.resources.vcpu > 0,
+                "workspace {name:?} has a zero vCPU count"
             );
             ensure!(
                 workspace.resources.cpu_quota_percent > 0,
@@ -383,7 +393,7 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 5,
+      "version": 6,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
@@ -397,7 +407,7 @@ mod tests {
           "runner": {
             "path": "/nix/store/test-runner",
             "identity": {
-              "version": 2,
+              "version": 3,
               "workspace": "minimal",
               "hostname": "minimal.vm",
               "network": {
@@ -410,7 +420,7 @@ mod tests {
               "proxy": { "url": "http://10.100.0.1:18081" },
               "ssh": { "user": "seter" },
               "guestProfile": "default",
-              "resources": { "memoryMiB": 4096 },
+              "resources": { "memoryMiB": 4096, "vcpu": 2 },
               "storage": {
                 "project": { "image": "minimal-project.img", "sizeMiB": 4096 },
                 "home": { "image": "minimal-home.img", "sizeMiB": 4096 },
@@ -423,7 +433,7 @@ mod tests {
             "mac": "02:00:00:00:00:aa",
             "tap": "seter-minimal"
           },
-          "resources": { "memoryMiB": 4096, "cpuQuotaPercent": 200 },
+          "resources": { "memoryMiB": 4096, "vcpu": 2, "cpuQuotaPercent": 200 },
           "ssh": { "user": "seter" },
           "storage": {
             "project": { "image": "minimal-project.img", "sizeMiB": 4096 },
@@ -436,7 +446,7 @@ mod tests {
     "#;
 
     #[test]
-    fn parses_version_five_registry() {
+    fn parses_version_six_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -452,7 +462,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 5", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 6", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()
@@ -505,12 +515,25 @@ mod tests {
     #[test]
     fn rejects_runner_identity_drift() {
         let input = VALID.replacen(
-            "\"memoryMiB\": 4096 },\n              \"storage\"",
-            "\"memoryMiB\": 2048 },\n              \"storage\"",
+            "\"memoryMiB\": 4096, \"vcpu\": 2 },\n              \"storage\"",
+            "\"memoryMiB\": 2048, \"vcpu\": 2 },\n              \"storage\"",
             1,
         );
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("Runner memory does not match"));
+    }
+
+    #[test]
+    fn rejects_runner_vcpu_identity_drift() {
+        let input = VALID.replacen(
+            "\"memoryMiB\": 4096, \"vcpu\": 2",
+            "\"memoryMiB\": 4096, \"vcpu\": 4",
+            1,
+        );
+        let error = Registry::from_reader(input.as_bytes()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Runner vCPU count does not match"));
     }
 
     #[test]

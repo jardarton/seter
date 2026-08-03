@@ -118,6 +118,7 @@ Create the workspace directly in trusted NixOS configuration:
       };
       resources = {
         memoryMiB = 4096;
+        vcpu = 2;
         cpuQuotaPercent = 200;
       };
       ssh.authorizedKeys = [ "ssh-ed25519 AAAA…" ];
@@ -178,7 +179,7 @@ The deployed Runner is available at `/etc/seter/runners/<workspace>` and is an e
 
 ## Host runtime plumbing
 
-When `seter.host.enable` is set, the host creates the configured bridge at boot and assigns `seter.host.gateway` to it (`10.100.0.1` by default). Workspace TAP interfaces and the Workspace SSH Identity service remain off while idle. Starting `seter-runtime-<workspace>.target` creates the registered TAP, attaches it to the bridge, stages the root-owned host-created SSH identity for the unprivileged workspace runtime account, and supplies it over a dedicated read-only VirtioFS mount:
+When `seter.host.enable` is set, the host creates the configured bridge at boot and assigns `seter.host.gateway` to it (`10.100.0.1` by default). Workspace TAP interfaces and the Workspace SSH Identity service remain off while idle. Starting `seter-runtime-<workspace>.target` creates the registered TAP and attaches it to the bridge. The native Cloud Hypervisor path supplies the root-owned, host-created SSH identity through a dedicated read-only VirtioFS mount. The nested ARM QEMU path instead loads it into the VM unit as a private systemd credential and delivers it through `fw_cfg`:
 
 ```console
 sudo systemctl start seter-runtime-project.target
