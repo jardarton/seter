@@ -238,10 +238,13 @@ cargo run -- --help
 nix flake check
 ```
 
+The default development shell is available on `x86_64-linux`, `aarch64-linux`, and Apple Silicon macOS (`aarch64-darwin`).
+
 On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that boots the host-deployed default Runner through the CLI, connects over SSH, and verifies project-volume persistence across a restart. It requires writable `/dev/kvm` and nested virtualization support.
 
 ## Flake outputs
 
+- `devShells.{x86_64-linux,aarch64-linux,aarch64-darwin}.default`: Rust development shell
 - `packages.<system>.seter`: Rust CLI
 - `apps.<system>.default`: Seter CLI application
 - `nixosModules.host`: host-side Seter module
