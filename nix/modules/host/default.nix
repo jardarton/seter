@@ -196,6 +196,7 @@ let
       inherit (workspace)
         hostname
         guestProfile
+        developmentPorts
         network
         storage
         ;

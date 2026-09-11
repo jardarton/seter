@@ -47,6 +47,14 @@ in
       description = "Trusted Guest Profile used to build the host-deployed Runner.";
     };
 
+    developmentPorts = mkOption {
+      type = types.addCheck (types.listOf (types.ints.between 1024 65535)) (
+        ports: builtins.length ports == builtins.length (lib.unique ports)
+      );
+      default = [ ];
+      description = "Trusted Guest Profile inbound TCP development ports. SSH remains independently available; no Client listener is created.";
+    };
+
     hostname = mkOption {
       type = hostNameType;
       default = "${name}.vm";

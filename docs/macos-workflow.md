@@ -111,8 +111,15 @@ workspace_ip=$(limactl shell seter -- seter ip example | tr -d '\r')
 instance_dir=$(limactl list seter --format '{{.Dir}}')
 ```
 
-If a development service listens on Workspace port 3000 and the trusted Guest
-Profile permits that inbound port, expose it only on macOS loopback:
+In the trusted consumer configuration, set
+`seter.host.workspaces.example.developmentPorts = [ 3000 ];`, redeploy,
+and stop/start the Workspace to boot the new Runner. The default is empty;
+only unique TCP ports 1024–65535 are accepted, and SSH remains available.
+This is inbound authority, not an outbound Policy Grant. Do not derive it
+from untrusted repository configuration.
+
+Start the development service on the Workspace address (or `0.0.0.0` inside
+the Workspace), not only Workspace loopback. Expose it only on macOS loopback:
 
 ```sh
 ssh -N \

@@ -26,6 +26,8 @@ pub struct Registry {
 pub struct Workspace {
     pub hostname: String,
     pub guest_profile: String,
+    #[serde(default)]
+    pub development_ports: Vec<u16>,
     pub repositories: BTreeMap<String, Repository>,
     pub default_repository: Option<String>,
     pub runner: Runner,
@@ -68,6 +70,8 @@ pub struct RunnerIdentity {
     pub proxy: RunnerProxyIdentity,
     pub ssh: RunnerSshIdentity,
     pub guest_profile: String,
+    #[serde(default)]
+    pub development_ports: Vec<u16>,
     pub resources: RunnerResourcesIdentity,
     pub storage: Storage,
 }
@@ -277,6 +281,20 @@ impl Registry {
             ensure!(
                 identity.guest_profile == workspace.guest_profile,
                 "workspace {name:?} Runner Guest Profile does not match the registry"
+            );
+            ensure!(
+                identity.development_ports == workspace.development_ports,
+                "workspace {name:?} runner development ports do not match the registry"
+            );
+            ensure!(
+                workspace.development_ports.iter().all(|port| *port >= 1024)
+                    && workspace
+                        .development_ports
+                        .iter()
+                        .collect::<HashSet<_>>()
+                        .len()
+                        == workspace.development_ports.len(),
+                "workspace {name:?} development ports must be unique and between 1024 and 65535"
             );
             ensure!(
                 identity.resources.memory_mi_b == workspace.resources.memory_mi_b,
@@ -600,6 +618,27 @@ mod tests {
         assert_eq!(workspace.repositories["project"].checkout_name, "project");
         assert_eq!(workspace.runner.identity.guest_profile, "default");
         assert_eq!(workspace.storage.home.size_mi_b, 4096);
+    }
+
+    #[test]
+    fn development_ports_are_validated_and_bound_to_runner() {
+        for ports in [serde_json::json!([3000]), serde_json::json!([1024, 65535])] {
+            let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+            input["workspaces"]["minimal"]["developmentPorts"] = ports.clone();
+            assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+            input["workspaces"]["minimal"]["runner"]["identity"]["developmentPorts"] = ports;
+            Registry::from_reader(input.to_string().as_bytes()).unwrap();
+        }
+        for ports in [
+            serde_json::json!([22]),
+            serde_json::json!([3000, 3000]),
+            serde_json::json!([65536]),
+        ] {
+            let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+            input["workspaces"]["minimal"]["developmentPorts"] = ports.clone();
+            input["workspaces"]["minimal"]["runner"]["identity"]["developmentPorts"] = ports;
+            assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+        }
     }
 
     #[test]

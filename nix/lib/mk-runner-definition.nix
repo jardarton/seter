@@ -42,6 +42,7 @@ let
     proxy.url = proxyUrl;
     ssh.user = sshUser;
     guestProfile = workspace.guestProfile;
+    developmentPorts = workspace.developmentPorts or [ ];
     resources = {
       memoryMiB = workspace.resources.memoryMiB;
       inherit vcpu;
@@ -189,12 +190,25 @@ in
       };
 
       environment.etc."seter/workspace.json".text = identityJson;
+      networking.firewall.allowedTCPPorts = identity.developmentPorts;
       microvm.credentialFiles = lib.mkIf (identityTransport == "fw_cfg") {
         "seter.ssh-host-key" = "/run/credentials/seter-vm-${name}.service/ssh_host_ed25519_key";
       };
       microvm.declaredRunner = runner;
 
       assertions = [
+        {
+          assertion =
+            config.networking.firewall.enable
+            &&
+              lib.sort builtins.lessThan config.networking.firewall.allowedTCPPorts
+              == lib.sort builtins.lessThan ([ 22 ] ++ identity.developmentPorts)
+            && config.networking.firewall.allowedTCPPortRanges == [ ]
+            && config.networking.firewall.allowedUDPPorts == [ ]
+            && config.networking.firewall.allowedUDPPortRanges == [ ]
+            && config.networking.firewall.interfaces == { };
+          message = "generated Seter Guest Profile requires exactly SSH and its trusted development ports";
+        }
         {
           assertion = config.seter.guest.name == expected.name;
           message = "generated Seter workspace identity forbids overriding seter.guest.name";
