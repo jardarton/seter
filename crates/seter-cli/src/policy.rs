@@ -520,39 +520,15 @@ fn render_workspace_preserving(
     let egress = &mut document["workspaces"][workspace]["egress"];
 
     if original_egress.http_hosts != policy.http_hosts {
-        let http_decor = egress
-            .get("http-hosts")
-            .and_then(Item::as_array)
-            .map(|array| array.decor().clone());
-        let mut http = Array::new();
-        for host in &policy.http_hosts {
-            http.push(host.as_str());
-        }
-        egress["http-hosts"] = value(http);
-        if let Some(decor) = http_decor {
-            *egress["http-hosts"]
-                .as_array_mut()
-                .expect("the inserted HTTP policy is an array")
-                .decor_mut() = decor;
-        }
+        replace_string_array_preserving_decor(egress, "http-hosts", &policy.http_hosts);
     }
 
     if original_egress.passthrough_hosts != policy.passthrough_hosts {
-        let passthrough_decor = egress
-            .get("passthrough-hosts")
-            .and_then(Item::as_array)
-            .map(|array| array.decor().clone());
-        let mut passthrough = Array::new();
-        for host in &policy.passthrough_hosts {
-            passthrough.push(host.as_str());
-        }
-        egress["passthrough-hosts"] = value(passthrough);
-        if let Some(decor) = passthrough_decor {
-            *egress["passthrough-hosts"]
-                .as_array_mut()
-                .expect("the inserted passthrough policy is an array")
-                .decor_mut() = decor;
-        }
+        replace_string_array_preserving_decor(
+            egress,
+            "passthrough-hosts",
+            &policy.passthrough_hosts,
+        );
     }
 
     if original_egress.tcp != policy.tcp {
@@ -577,6 +553,22 @@ fn render_workspace_preserving(
         egress["tcp"] = Item::ArrayOfTables(tcp);
     }
     Ok(document.to_string())
+}
+
+fn replace_string_array_preserving_decor(egress: &mut Item, key: &str, values: &[String]) {
+    let decor = egress
+        .get(key)
+        .and_then(Item::as_array)
+        .map(|array| array.decor().clone());
+    let mut replacement = Array::new();
+    replacement.extend(values.iter().map(String::as_str));
+    egress[key] = value(replacement);
+    if let Some(decor) = decor {
+        *egress[key]
+            .as_array_mut()
+            .expect("the inserted policy is an array")
+            .decor_mut() = decor;
+    }
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
@@ -631,6 +623,7 @@ mod tests {
 # consumer context stays here
 [workspaces.example.egress]
 http-hosts = ["old.example.com"] # reviewed manually
+passthrough-hosts = ["old-tls.example.com"] # TLS exception context
 
 [[workspaces.example.egress.tcp]]
 # required by the deployment service
@@ -639,17 +632,19 @@ port = 2222
 "#;
         let policy = EgressPolicy {
             http_hosts: vec!["new.example.com".to_owned()],
+            passthrough_hosts: vec!["new-tls.example.com".to_owned()],
             tcp: vec![TcpGrant {
                 host: "deploy.example.com".to_owned(),
                 port: 2222,
             }],
-            ..EgressPolicy::default()
         };
         let rendered = render_workspace_preserving(original, "example", &policy).unwrap();
         assert!(rendered.contains("# consumer context stays here"));
         assert!(rendered.contains("# reviewed manually"));
+        assert!(rendered.contains("# TLS exception context"));
         assert!(rendered.contains("# required by the deployment service"));
         assert!(rendered.contains("new.example.com"));
+        assert!(rendered.contains("new-tls.example.com"));
     }
 
     #[test]

@@ -57,16 +57,15 @@ ensure_marker() {
 
 clone_repository() {
     ensure_marker
+    set -- clone --origin origin
+    if test -n "$branch"; then
+        set -- "$@" --branch "$branch"
+    fi
+    set -- "$@" -- "$url" "$target"
     if test -n "$placeholder"; then
-        if test -n "$branch"; then
-            git -c "http.$url.extraHeader=Authorization: $placeholder" clone --origin origin --branch "$branch" -- "$url" "$target"
-        else
-            git -c "http.$url.extraHeader=Authorization: $placeholder" clone --origin origin -- "$url" "$target"
-        fi
-    elif test -n "$branch"; then
-        git clone --origin origin --branch "$branch" -- "$url" "$target"
+        git -c "http.$url.extraHeader=Authorization: $placeholder" "$@"
     else
-        git clone --origin origin -- "$url" "$target"
+        git "$@"
     fi
     rmdir -- "$marker"
     configure_credential
@@ -223,17 +222,12 @@ pub fn init(name: &str, requested: Option<&str>) -> Result<i32> {
     // fails so the operator can inspect a rejected partial checkout.
     up(name)?;
 
-    let host_key = workspace_host_key(name)?;
-    validate_public_key(&host_key)?;
-    wait_for_ssh(name, workspace)?;
-    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
-
-    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let ssh = SshSession::connect(name, workspace)?;
     let mut failed = false;
     for (repository_name, repository) in selected {
         eprintln!("seter init: {name}/{repository_name}");
-        let status = ssh_command(&known_hosts)
-            .arg(&destination)
+        let status = ssh
+            .command(false)
             .arg("--")
             .arg(bootstrap_remote_command(repository))
             .status()
@@ -409,17 +403,7 @@ pub fn reset_workspace(name: &str, home: bool, nix_store: bool) -> Result<i32> {
     let root = state_directory(name);
     fs::create_dir_all(&root)
         .with_context(|| format!("failed to open workspace state {}", root.display()))?;
-    let lock_path = lifecycle_lock(name);
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o640)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
-    lock.try_lock_exclusive()
-        .with_context(|| format!("workspace {name:?} lifecycle is busy"))?;
+    let _lock = acquire_lifecycle_lock(name)?;
     // Recheck under the same lock held for the VM lifetime, closing the start/reset race.
     ensure!(
         state_for(name, workspace)? == State::Stopped,
@@ -490,17 +474,7 @@ pub fn destroy_project_volume(name: &str) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
     let root = state_directory(name);
-    let lock_path = lifecycle_lock(name);
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o640)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
-    lock.try_lock_exclusive()
-        .with_context(|| format!("workspace {name:?} lifecycle is busy"))?;
+    let _lock = acquire_lifecycle_lock(name)?;
     ensure!(
         state_for(name, workspace)? == State::Stopped,
         "workspace {name:?} must be stopped before Project Volume destruction"
@@ -598,19 +572,11 @@ pub fn shell(name: &str, requested: Option<&str>, root: bool) -> Result<i32> {
         .unwrap_or_else(|| "/project".to_owned());
     ensure_running(name, workspace)?;
 
-    let host_key = workspace_host_key(name)?;
-    validate_public_key(&host_key)?;
-    wait_for_ssh(name, workspace)?;
-
-    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
-
-    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let ssh = SshSession::connect(name, workspace)?;
     if let Some((key, _)) = selected {
         explain_direnv(name, key);
     }
-    let status = ssh_command(&known_hosts)
-        .arg("-t")
-        .arg(&destination)
+    let status = ssh.command(true)
         .arg("--")
         .arg(format!(
             "cd {} || {{ printf 'seter shell: registered checkout is missing; run seter init %s\\n' {} >&2; exit 72; }}; exec \"${{SHELL:-/bin/sh}}\" -l",
@@ -631,16 +597,11 @@ pub fn run(name: &str, requested: Option<&str>, arguments: &[String]) -> Result<
     let (key, repository) = workspace.select_repository(requested)?;
     ensure_running(name, workspace)?;
 
-    let host_key = workspace_host_key(name)?;
-    validate_public_key(&host_key)?;
-    wait_for_ssh(name, workspace)?;
-    let known_hosts = temporary_known_hosts(workspace, &host_key)?;
-
-    let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+    let ssh = SshSession::connect(name, workspace)?;
     let remote_command = run_remote_command(name, &checkout_path(repository), arguments);
     explain_direnv(name, key);
-    let status = ssh_command(&known_hosts)
-        .arg(&destination)
+    let status = ssh
+        .command(false)
         .arg("--")
         .arg(remote_command)
         .status()
@@ -692,6 +653,34 @@ fn temporary_known_hosts(workspace: &Workspace, host_key: &str) -> Result<Tempor
     )
     .context("failed to write temporary known_hosts file")?;
     Ok(known_hosts)
+}
+
+struct SshSession {
+    known_hosts: TemporaryFile,
+    destination: String,
+}
+
+impl SshSession {
+    fn connect(name: &str, workspace: &Workspace) -> Result<Self> {
+        let host_key = workspace_host_key(name)?;
+        validate_public_key(&host_key)?;
+        wait_for_ssh(name, workspace)?;
+        let known_hosts = temporary_known_hosts(workspace, &host_key)?;
+        let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
+        Ok(Self {
+            known_hosts,
+            destination,
+        })
+    }
+
+    fn command(&self, tty: bool) -> Command {
+        let mut command = ssh_command(&self.known_hosts);
+        if tty {
+            command.arg("-t");
+        }
+        command.arg(&self.destination);
+        command
+    }
 }
 
 fn ssh_command(known_hosts: &TemporaryFile) -> Command {
@@ -1108,6 +1097,25 @@ fn lifecycle_lock(name: &str) -> PathBuf {
     }
 }
 
+fn acquire_lifecycle_lock(name: &str) -> Result<fs::File> {
+    let lock_path = lifecycle_lock(name);
+    acquire_lock(name, &lock_path)
+}
+
+fn acquire_lock(name: &str, lock_path: &Path) -> Result<fs::File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o640)
+        .open(lock_path)
+        .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
+    lock.try_lock_exclusive()
+        .with_context(|| format!("workspace {name:?} lifecycle is busy"))?;
+    Ok(lock)
+}
+
 // Unprivileged tests run the privileged halves in-process against a private
 // state directory. Both variables are required so that setting only a state
 // directory can never silently skip real privilege separation, and both are
@@ -1147,7 +1155,12 @@ impl Drop for TemporaryFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_state, run_remote_command, shell_quote, State};
+    use std::{fs, time::SystemTime};
+
+    use super::{
+        acquire_lock, classify_state, run_remote_command, shell_quote, SshSession, State,
+        TemporaryFile,
+    };
 
     #[test]
     fn classifies_systemd_and_build_state() {
@@ -1181,5 +1194,46 @@ mod tests {
             ),
             "cd '/project/project' || { printf 'seter run: registered checkout is missing; run seter init %s\\n' 'minimal' >&2; exit 72; }; exec direnv exec . 'printf' '%s\\n' 'a'\\''b; $(touch nope)'"
         );
+    }
+
+    #[test]
+    fn ssh_session_owns_host_file_and_places_destination_after_options() {
+        let known_hosts = TemporaryFile::new("ssh-session-test").unwrap();
+        let known_hosts_path = known_hosts.path().to_owned();
+        let session = SshSession {
+            known_hosts,
+            destination: "seter@192.0.2.2".to_owned(),
+        };
+        let command = session.command(true);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arguments[arguments.len() - 2..], ["-t", "seter@192.0.2.2"]);
+        assert!(arguments.contains(&format!(
+            "UserKnownHostsFile={}",
+            known_hosts_path.display()
+        )));
+        drop(session);
+        assert!(!known_hosts_path.exists());
+    }
+
+    #[test]
+    fn acquired_lifecycle_lock_is_held_by_returned_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "seter-lock-test-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("lifecycle.lock");
+
+        let held = acquire_lock("example", &path).unwrap();
+        assert!(acquire_lock("example", &path).is_err());
+        drop(held);
+        acquire_lock("example", &path).unwrap();
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -316,270 +316,16 @@
       proxyTrustServerCertificate = ../tests/fixtures/proxy-e2e-server-cert.pem;
       proxyTrustServerKey = ../tests/fixtures/proxy-e2e-server-key.pem;
 
-      explicitProxyRelay = pkgs.writeText "seter-explicit-proxy-relay.py" ''
-        import select
-        import socket
-        import threading
+      explicitProxyRelay = ../tests/helpers/explicit-proxy-relay.py;
 
-        def relay(client):
-            with client:
-                request = b""
-                while b"\r\n\r\n" not in request and len(request) < 16384:
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        return
-                    request += chunk
-                if not request.startswith(b"CONNECT proxy-e2e.example:443 HTTP/"):
-                    client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-                    return
-                with socket.create_connection(("127.0.0.1", 8443)) as upstream:
-                    client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                    sockets = [client, upstream]
-                    while True:
-                        readable, _, _ = select.select(sockets, [], [], 10)
-                        if not readable:
-                            return
-                        for source in readable:
-                            data = source.recv(65536)
-                            if not data:
-                                return
-                            destination = upstream if source is client else client
-                            destination.sendall(data)
+      proxyHttpServer = ../tests/helpers/proxy-test-http-server.py;
 
-        with socket.create_server(("0.0.0.0", 18081), reuse_port=True) as listener:
-            while True:
-                client, _ = listener.accept()
-                threading.Thread(target=relay, args=(client,), daemon=True).start()
-      '';
-
-      proxyHttpServer = pkgs.writeText "seter-proxy-test-http-server.py" ''
-        import gzip
-        import ssl
-        import sys
-        from functools import partial
-        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-        from pathlib import Path
-        from urllib.parse import urlsplit
-
-        class Handler(SimpleHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def send_secret_response(self):
-                request_path = urlsplit(self.path).path
-                if request_path in ("/secret", "/secret-gzip"):
-                    authorization = self.headers.get("Authorization", "")
-                    api_key = self.headers.get("X-Api-Key", "")
-                    unconfigured = self.headers.get("X-Unconfigured", "")
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                    request_body = self.rfile.read(content_length) if content_length else b""
-                    payload = (
-                        authorization.encode()
-                        + b"\n"
-                        + api_key.encode()
-                        + b"\n"
-                        + unconfigured.encode()
-                        + b"\n"
-                        + self.path.encode()
-                        + b"\n"
-                        + request_body
-                        + b"\n"
-                    )
-                    Path("/tmp/seter-secret-received").write_bytes(payload)
-                    encoded_payload = gzip.compress(payload) if request_path == "/secret-gzip" else payload
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain")
-                    self.send_header("X-Reflected-Authorization", authorization)
-                    if request_path == "/secret-gzip":
-                        self.send_header("Content-Encoding", "gzip")
-                    self.send_header("Content-Length", str(len(encoded_payload)))
-                    self.end_headers()
-                    self.wfile.write(encoded_payload)
-                    return True
-                return False
-
-            def do_GET(self):
-                if not self.send_secret_response():
-                    super().do_GET()
-
-            def do_POST(self):
-                if not self.send_secret_response():
-                    self.send_error(404)
-
-        handler = partial(Handler, directory="/tmp/seter-upstream")
-        port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
-        server = ThreadingHTTPServer(("11.0.0.2", port), handler)
-        if port == 443:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(sys.argv[2], sys.argv[3])
-
-            def record_server_name(_socket, server_name, _context):
-                if server_name == "bad-cert.example":
-                    Path("/tmp/seter-bad-cert-tls-seen").touch()
-
-            context.set_servername_callback(record_server_name)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
-        server.serve_forever()
-      '';
-
-      directTcpClient = pkgs.writeText "seter-direct-tcp-client.py" ''
-        import pathlib
-        import socket
-        import time
-
-        ready = pathlib.Path("/tmp/seter-direct-client-ready")
-        send = pathlib.Path("/tmp/seter-direct-client-send")
-        blocked = pathlib.Path("/tmp/seter-direct-client-blocked")
-        allowed = pathlib.Path("/tmp/seter-direct-client-allowed")
-
-        with socket.create_connection(("11.0.0.2", 2222), timeout=5) as connection:
-            ready.touch()
-            for _ in range(200):
-                if send.exists():
-                    break
-                time.sleep(0.05)
-            else:
-                raise SystemExit("timed out waiting for the revocation test")
-
-            connection.settimeout(2)
-            try:
-                connection.sendall(b"after revocation\n")
-                response = connection.recv(1024)
-                if response:
-                    allowed.write_bytes(response)
-                else:
-                    blocked.touch()
-            except (OSError, TimeoutError):
-                blocked.touch()
-      '';
+      directTcpClient = ../tests/helpers/direct-tcp-client.py;
 
       dnsTestPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.dnspython ]);
-      dnsAdversarialClient = pkgs.writeText "seter-dns-adversarial-client.py" ''
-        import socket
-        import struct
-        import sys
+      dnsAdversarialClient = ../tests/helpers/dns-adversarial-client.py;
 
-        import dns.edns
-        import dns.flags
-        import dns.message
-        import dns.name
-        import dns.opcode
-        import dns.query
-        import dns.rcode
-        import dns.rdataclass
-        import dns.rdatatype
-        import dns.rrset
-
-        server = sys.argv[1]
-
-        def udp(query):
-            return dns.query.udp(query, server, timeout=2)
-
-        def assert_refused(query):
-            response = udp(query)
-            assert response.rcode() == dns.rcode.REFUSED, response
-
-        def udp_unchecked(wire):
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(2)
-                sock.sendto(wire, (server, 53))
-                response, _ = sock.recvfrom(4096)
-            return dns.message.from_wire(response)
-
-        mixed_case = dns.message.make_query("AlLoWeD.ExAmPlE.", "A")
-        response = udp(mixed_case)
-        assert response.rcode() == dns.rcode.NOERROR
-        assert [item.address for rrset in response.answer for item in rrset if item.rdtype == dns.rdatatype.A] == ["11.0.0.2"]
-        assert response.question[0].name.to_text() == "AlLoWeD.ExAmPlE."
-
-        tcp_response = dns.query.tcp(mixed_case, server, timeout=2)
-        assert tcp_response.rcode() == dns.rcode.NOERROR
-
-        aaaa = udp(dns.message.make_query("allowed.example.", "AAAA"))
-        assert aaaa.rcode() == dns.rcode.NOERROR
-        assert not aaaa.answer
-
-        assert_refused(dns.message.make_query("child.allowed.example.", "A"))
-        assert_refused(dns.message.make_query("allowed.example.", "TXT"))
-        assert_refused(
-            dns.message.make_query(
-                "allowed.example.", "A", rdclass=dns.rdataclass.CH
-            )
-        )
-
-        multiple = dns.message.Message()
-        multiple.flags |= dns.flags.RD
-        multiple.question.append(
-            dns.rrset.RRset(
-                dns.name.from_text("allowed.example."),
-                dns.rdataclass.IN,
-                dns.rdatatype.A,
-            )
-        )
-        multiple.question.append(
-            dns.rrset.RRset(
-                dns.name.from_text("denied.example."),
-                dns.rdataclass.IN,
-                dns.rdatatype.A,
-            )
-        )
-        assert_refused(multiple)
-
-        additional = dns.message.make_query("allowed.example.", "A")
-        additional.additional.append(
-            dns.rrset.from_text(
-                "covert.example.", 60, "IN", "TXT", '"must-not-be-forwarded"'
-            )
-        )
-        assert_refused(additional)
-
-        # EDNS is accepted for client compatibility, but the frontend rebuilds
-        # the upstream request and emits a plain response with no reflected
-        # option or client-controlled payload.
-        edns = dns.message.make_query(
-            "allowed.example.",
-            "A",
-            use_edns=0,
-            payload=4096,
-            options=[dns.edns.GenericOption(65001, b"must-not-be-forwarded")],
-        )
-        edns_response = udp(edns)
-        assert edns_response.rcode() == dns.rcode.NOERROR
-        assert edns_response.edns < 0
-
-        update = dns.message.make_query("allowed.example.", "A")
-        update.set_opcode(dns.opcode.UPDATE)
-        assert udp_unchecked(update.to_wire()).rcode() in (
-            dns.rcode.FORMERR,
-            dns.rcode.REFUSED,
-        )
-
-        response_packet = dns.message.make_query("allowed.example.", "A")
-        response_packet.flags |= dns.flags.QR
-        assert udp_unchecked(response_packet.to_wire()).rcode() == dns.rcode.REFUSED
-
-        # A parseable header claiming one question but omitting it receives
-        # FORMERR and cannot reach the backend.
-        malformed = struct.pack("!HHHHHH", 0x5151, dns.flags.RD, 1, 0, 0, 0)
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(2)
-            sock.sendto(malformed, (server, 53))
-            wire, _ = sock.recvfrom(512)
-        malformed_response = dns.message.from_wire(wire)
-        assert malformed_response.id == 0x5151
-        assert malformed_response.rcode() == dns.rcode.FORMERR
-      '';
-
-      udpRecorder = pkgs.writeText "seter-udp-recorder.py" ''
-        import pathlib
-        import socket
-        import sys
-
-        address, port, marker = sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3])
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
-            listener.bind((address, port))
-            payload, peer = listener.recvfrom(65535)
-        marker.write_bytes(payload + b"\n" + repr(peer).encode())
-      '';
+      udpRecorder = ../tests/helpers/udp-recorder.py;
 
       # Force every option value the seter modules define, stopping at
       # derivations so evaluation does not descend into their build graph.
@@ -614,79 +360,58 @@
 
       hostConfigurationRejected = host: !(forceConfiguration (mkHostWith host)).success;
 
-      duplicateIpRejected = configurationRejected {
-        alpha = validWorkspaces.alpha;
-        beta = validWorkspaces.beta // {
-          network = validWorkspaces.beta.network // {
-            address = validWorkspaces.alpha.network.address;
+      # Named cases retain diagnostics without repeating whole fixtures.
+      networkRejections = {
+        duplicateIp = {
+          alpha = validWorkspaces.alpha;
+          beta = lib.recursiveUpdate validWorkspaces.beta {
+            network.address = validWorkspaces.alpha.network.address;
           };
         };
-      };
-
-      duplicateMacRejected = configurationRejected {
-        alpha = validWorkspaces.alpha;
-        beta = validWorkspaces.beta // {
-          network = validWorkspaces.beta.network // {
-            mac = validWorkspaces.alpha.network.mac;
+        duplicateMac = {
+          alpha = validWorkspaces.alpha;
+          beta = lib.recursiveUpdate validWorkspaces.beta {
+            network.mac = validWorkspaces.alpha.network.mac;
           };
         };
-      };
-
-      duplicateTapRejected = configurationRejected {
-        alpha = validWorkspaces.alpha;
-        beta = validWorkspaces.beta // {
-          network = validWorkspaces.beta.network // {
-            tap = validWorkspaces.alpha.network.tap;
+        duplicateTap = {
+          alpha = validWorkspaces.alpha;
+          beta = lib.recursiveUpdate validWorkspaces.beta {
+            network.tap = validWorkspaces.alpha.network.tap;
           };
         };
-      };
-
-      duplicateHostnameRejected = configurationRejected {
-        alpha = validWorkspaces.alpha;
-        beta = validWorkspaces.beta // {
-          hostname = "alpha.vm";
+        duplicateHostname = {
+          alpha = validWorkspaces.alpha;
+          beta = validWorkspaces.beta // {
+            hostname = "alpha.vm";
+          };
         };
-      };
-
-      invalidIpRejected = configurationRejected {
-        broken = mkTestWorkspace {
-          ip = "10.100.0.999";
-          mac = "02:00:00:00:00:12";
-          tap = "seter-broken";
-        };
-      };
-
-      outOfSubnetIpRejected = configurationRejected {
-        broken = mkTestWorkspace {
-          ip = "10.101.0.12";
-          mac = "02:00:00:00:00:12";
-          tap = "seter-broken";
-        };
-      };
-
-      gatewayIpRejected = configurationRejected {
-        broken = mkTestWorkspace {
-          ip = "10.100.0.1";
-          mac = "02:00:00:00:00:12";
-          tap = "seter-broken";
-        };
-      };
-
-      networkIpRejected = configurationRejected {
-        broken = mkTestWorkspace {
-          ip = "10.100.0.0";
-          mac = "02:00:00:00:00:12";
-          tap = "seter-broken";
-        };
-      };
-
-      bridgeTapRejected = configurationRejected {
-        broken = mkTestWorkspace {
-          ip = "10.100.0.12";
-          mac = "02:00:00:00:00:12";
-          tap = "seter0";
-        };
-      };
+      }
+      //
+        lib.mapAttrs
+          (_: overrides: {
+            broken = mkTestWorkspace (
+              {
+                ip = "10.100.0.12";
+                mac = "02:00:00:00:00:12";
+                tap = "seter-broken";
+              }
+              // overrides
+            );
+          })
+          {
+            invalidIp.ip = "10.100.0.999";
+            outOfSubnetIp.ip = "10.101.0.12";
+            gatewayIp.ip = "10.100.0.1";
+            networkIp.ip = "10.100.0.0";
+            bridgeTap.tap = "seter0";
+          };
+      networkRejectionsPass = lib.all (
+        name:
+        lib.assertMsg (configurationRejected
+          networkRejections.${name}
+        ) "Expected workspace configuration rejection: ${name}"
+      ) (builtins.attrNames networkRejections);
 
       outOfSubnetGatewayRejected =
         !(builtins.tryEval (
@@ -1752,15 +1477,7 @@
             '';
 
         workspace-uniqueness =
-          assert duplicateIpRejected;
-          assert duplicateMacRejected;
-          assert duplicateTapRejected;
-          assert duplicateHostnameRejected;
-          assert invalidIpRejected;
-          assert outOfSubnetIpRejected;
-          assert gatewayIpRejected;
-          assert networkIpRejected;
-          assert bridgeTapRejected;
+          assert networkRejectionsPass;
           assert outOfSubnetGatewayRejected;
           assert nonHttpsRepositoryRejected;
           assert invalidRepositoryHostRejected;
