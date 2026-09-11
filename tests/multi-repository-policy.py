@@ -90,9 +90,46 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_removed_association_never_becomes_host_wide(self):
         del self.workspace["repositories"]["frontend"]
         workspace = self.load()
+        self.assertEqual(workspace["secrets"]["frontend"]["repositoryScope"], frozenset())
         self.assertIsNotNone(self.inject(workspace, "frontend", "git.example", "/team/frontend.git/info/refs"))
         self.assertIsNotNone(self.inject(workspace, "frontend", "git.example", "/api"))
         self.assertIsNone(self.inject(workspace, "backend", "git.example", "/team/backend.git/info/refs"))
+
+    def test_compiles_shared_and_legacy_scopes(self):
+        # Legacy credentials are restricted when linked even without the flag.
+        del self.workspace["secrets"]["backend"]["repositoryOnly"]
+        workspace = self.load()
+        expected = frozenset(
+            (host, path + suffix)
+            for host, path in (
+                ("git.example", "/team/backend.git"),
+                ("second.example", "/team/shared.git"),
+            )
+            for suffix in ("", "/info/refs", "/git-upload-pack", "/git-receive-pack")
+        )
+        self.assertEqual(workspace["secrets"]["backend"]["repositoryScope"], expected)
+        self.assertNotIn("repositories", workspace)
+        self.assertIsNotNone(self.inject(workspace, "backend", "git.example", "/api"))
+
+    def test_generic_secret_retains_host_and_https_restrictions(self):
+        del self.workspace["repositories"]["frontend"]
+        self.workspace["secrets"]["frontend"]["repositoryOnly"] = False
+        workspace = self.load()
+        self.assertIsNone(workspace["secrets"]["frontend"]["repositoryScope"])
+        self.assertIsNone(self.inject(workspace, "frontend", "git.example", "/api"))
+        self.assertIsNotNone(self.inject(workspace, "frontend", "other.example", "/api"))
+        self.assertIsNotNone(self.inject(workspace, "frontend", "git.example", "/api", "http"))
+
+    def test_denied_scope_does_not_partially_rewrite_headers(self):
+        workspace = self.load()
+        placeholders = " ".join(secret["placeholder"] for secret in self.workspace["secrets"].values())
+        request = http.Request.make("GET", "https://git.example/team/frontend.git", headers={"Authorization": placeholders})
+        names, error = module.SeterPolicy._inject_request_secrets(
+            SimpleNamespace(request=request), workspace, "git.example", "https", "/team/frontend.git"
+        )
+        self.assertEqual(names, [])
+        self.assertIsNotNone(error)
+        self.assertEqual(request.headers["Authorization"], placeholders)
 
     def test_invalid_collections_fail_without_readiness(self):
         for repositories in ({}, [], {"bad": None}, {"../bad": self.workspace["repositories"]["frontend"]}):

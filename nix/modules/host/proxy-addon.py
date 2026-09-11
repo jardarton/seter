@@ -226,10 +226,11 @@ class SeterPolicy:
                         "hosts": normalized_hosts,
                         "headers": normalized_headers,
                         "value": credential_value,
-                        "repositoryOnly": repository_only,
+                        # None is host/header-scoped; an empty set denies all
+                        # repository paths, including after the last unlink.
+                        "repositoryScope": set() if repository_only else None,
                     }
 
-                parsed_repositories: dict[str, dict[str, object]] = {}
                 for repository_name, repository in repositories.items():
                     if (
                         not isinstance(repository_name, str)
@@ -276,16 +277,21 @@ class SeterPolicy:
                         )
                     ):
                         raise ValueError(f"invalid repository policy for {name!r}/{repository_name!r}")
-                    parsed_repositories[repository_name] = {
-                        "host": repository_host,
-                        "path": repository_path,
-                        "credential": repository_credential,
-                    }
+                    if repository_credential is not None:
+                        secret = parsed_secrets[repository_credential]
+                        if secret["repositoryScope"] is None:
+                            secret["repositoryScope"] = set()
+                        secret["repositoryScope"].update(
+                            (repository_host, repository_path + suffix)
+                            for suffix in ("", *self._REPOSITORY_SMART_HTTP_SUFFIXES)
+                        )
+                for secret in parsed_secrets.values():
+                    if secret["repositoryScope"] is not None:
+                        secret["repositoryScope"] = frozenset(secret["repositoryScope"])
                 parsed[address] = {
                     "name": name,
                     "httpHosts": normalized_http_hosts,
                     "passthroughHosts": normalized_passthrough_hosts,
-                    "repositories": parsed_repositories,
                     # Credential values came from systemd's private runtime
                     # credential directory, never from this Nix-store policy.
                     "secrets": parsed_secrets,
@@ -360,25 +366,10 @@ class SeterPolicy:
                 return [], f"secret {secret_name!r} may only be injected over HTTPS"
             if host not in secret["hosts"]:
                 return [], f"secret {secret_name!r} is not bound to host {host!r}"
-            bindings = [
-                repository
-                for repository in workspace["repositories"].values()
-                if secret_name == repository["credential"]
-            ]
-            if bindings or secret.get("repositoryOnly", False):
+            scope = secret["repositoryScope"]
+            if scope is not None:
                 request_path = path.partition("?")[0]
-                if not any(
-                    host == repository["host"]
-                    and (
-                        request_path == repository["path"]
-                        or (
-                            request_path.startswith(repository["path"] + "/")
-                            and request_path.removeprefix(repository["path"])
-                            in SeterPolicy._REPOSITORY_SMART_HTTP_SUFFIXES
-                        )
-                    )
-                    for repository in bindings
-                ):
+                if (host, request_path) not in scope:
                     return [], (
                         f"repository credential {secret_name!r} is not bound to "
                         f"path {request_path!r}"
