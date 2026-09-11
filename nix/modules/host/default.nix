@@ -499,6 +499,65 @@ let
         test -x ${runner}/bin/microvm-shutdown
         exec ${runner}/bin/microvm-run
       '';
+      stopVm = pkgs.writeShellScript "seter-vm-${name}-stop" ''
+        set -eu
+        shutdown=$1
+        ${
+          if cfg.runner.hypervisor == "qemu" then
+            ''
+              qmp_socket=$2
+              main_pid=''${3:-}
+            ''
+          else
+            ''
+              main_pid=''${2:-}
+            ''
+        }
+
+        # QEMU may have exited independently, in which case systemd expands
+        # $MAINPID to no argument while completing the service teardown.
+        if [ -z "$main_pid" ] || ! kill -0 "$main_pid" 2>/dev/null; then
+          exit 0
+        fi
+
+        ${
+          if cfg.runner.hypervisor == "qemu" then
+            ''
+              if [ ! -S "$qmp_socket" ]; then
+                echo "QMP socket $qmp_socket is unavailable" >&2
+                exit 1
+              fi
+
+              # microvm.nix sends Ctrl-Alt-Delete, but Seter's headless QEMU
+              # machine has no input handler. Request an ACPI powerdown over
+              # the Runner's private QMP socket instead.
+              if ! qmp_output=$(
+                {
+                  printf '%s\n' '{"execute":"qmp_capabilities"}'
+                  printf '%s\n' '{"execute":"system_powerdown"}'
+                } | ${pkgs.socat}/bin/socat STDIO "UNIX-CONNECT:$qmp_socket"
+              ); then
+                echo "failed to request guest powerdown over $qmp_socket" >&2
+                exit 1
+              fi
+              printf '%s\n' "$qmp_output"
+              if printf '%s\n' "$qmp_output" | ${pkgs.gnugrep}/bin/grep -q '"error"'; then
+                echo "QEMU rejected the guest powerdown request" >&2
+                exit 1
+              fi
+            ''
+          else
+            ''
+              "$shutdown"
+            ''
+        }
+
+        # Do not let systemd terminate the VMM while the guest is flushing and
+        # unmounting its persistent filesystems.
+        while kill -0 "$main_pid" 2>/dev/null; do
+          ${pkgs.coreutils}/bin/sleep 0.1
+        done
+      '';
     in
     nameValuePair "seter-vm-${name}" {
       description = "Seter microVM for workspace ${name}";
@@ -512,8 +571,12 @@ let
         Group = account;
         WorkingDirectory = stateDirectory;
         ExecStart = runVm;
-        ExecStop = "${runner}/bin/microvm-shutdown";
-        TimeoutStopSec = "30s";
+        ExecStop =
+          if cfg.runner.hypervisor == "qemu" then
+            "${stopVm} ${runner}/bin/microvm-shutdown ${stateDirectory}/seter-${name}.sock $MAINPID"
+          else
+            "${stopVm} ${runner}/bin/microvm-shutdown $MAINPID";
+        TimeoutStopSec = "60s";
         KillMode = "mixed";
         Restart = "no";
         MemoryMax = (workspace.resources.memoryMiB + workspace.resources.hostOverheadMiB) * 1024 * 1024;

@@ -1,0 +1,6 @@
+version = 1
+
+# Example consumer-owned grant. The approved repository host is added to the
+# intercepted HTTPS policy automatically and must not also be listed here.
+[workspaces.example.egress]
+http-hosts = ["crates.io"]

@@ -1,5 +1,11 @@
 /target
 /.direnv
 /result
+/.phase1-evidence
+/.phase2-evidence
+/.macos-evidence
+# Site identity belongs in consumer configuration, never in Lima source files.
+/lima/*.pub
+/lima/*.pem
 *.qcow2
 *.img

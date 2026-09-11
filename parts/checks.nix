@@ -1421,6 +1421,7 @@
           assert dnsUpstreamService.unitConfig.StopWhenUnneeded;
           assert builtins.elem "seter-bridge.service" proxyService.requires;
           assert builtins.elem "nftables.service" proxyService.requires;
+          assert proxyService.serviceConfig.MemoryMax == 1024 * 1024 * 1024;
           assert alphaDnsPort == alphaDnsPortWithEarlierWorkspace;
           assert alphaDnsPort != betaDnsPort;
           assert builtins.elem "alpha.vm" hostConfiguration.config.networking.hosts."10.100.0.10";
@@ -1474,6 +1475,19 @@
           assert
             !lib.hasInfix "/var/lib/seter/workspaces/alpha/current" (
               builtins.unsafeDiscardStringContext hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop
+            );
+          assert lib.hasInfix "seter-vm-alpha-stop"
+            hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop;
+          assert
+            hostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.TimeoutStopSec == "60s";
+          assert lib.hasInfix "/seter-alpha.sock"
+            qemuHostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop;
+          assert lib.hasInfix
+            (builtins.unsafeDiscardStringContext (
+              toString qemuHostConfiguration.config.environment.etc."seter/runners/alpha".source
+            ))
+            (
+              builtins.unsafeDiscardStringContext qemuHostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop
             );
           assert identityHostConfiguration.config.seter.host.workspaces.identity.guestProfile == "default";
           assert identityGuestConfiguration.config.seter.guest.name == "identity";

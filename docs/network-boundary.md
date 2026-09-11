@@ -50,6 +50,9 @@ DNS is the only generally permitted UDP protocol.
 ## HTTP and HTTPS interception
 
 A hardened, unprivileged mitmproxy service transparently intercepts registered workspace TCP traffic to ports 80 and 443.
+Its systemd memory cap defaults to 1024 MiB so parallel Nix binary-cache
+transfers fit without removing the cgroup boundary; trusted Host configuration
+may tune `seter.host.proxy.memoryMaxMiB` between 256 and 4096 MiB.
 
 The source IP selects the workspace policy. Only exact names, or bounded single-label Host Patterns in that workspace's HTTP grants, are accepted. The proxy requires the HTTPS SNI and the HTTP host to agree. It then resolves and pins the reviewed hostname, instead of trusting the packet's original destination or a later DNS answer.
 

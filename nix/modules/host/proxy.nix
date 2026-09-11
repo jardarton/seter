@@ -137,6 +137,16 @@ in
       '';
     };
 
+    memoryMaxMiB = mkOption {
+      type = types.ints.between 256 4096;
+      default = 1024;
+      description = ''
+        Host memory cap for the shared policy proxy. The default accommodates
+        parallel Nix binary-cache transfers while retaining a hard cgroup
+        boundary around the unprivileged service.
+      '';
+    };
+
     upstreamCaFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -230,7 +240,7 @@ in
         ExecStartPost = waitForProxy;
         Restart = "on-failure";
         RestartSec = "1s";
-        MemoryMax = 512 * 1024 * 1024;
+        MemoryMax = proxyCfg.memoryMaxMiB * 1024 * 1024;
         TasksMax = 256;
         LimitNOFILE = 8192;
         LogRateLimitIntervalSec = "1s";

@@ -18,7 +18,7 @@ Home state is persistent but reproducible enough to reset deliberately when conf
 
 ## Private Nix-store volume
 
-The private Nix-store volume contains the writable overlay above the shared read-only host store and the guest Nix database. It persists project-built and substituted derivations across clean-root reboots. Replacing the volume is the supported way to reclaim its capacity because stock guest garbage collection can create overlay whiteouts for shared lower-store paths.
+The private Nix-store volume contains the writable overlay above the Runner's closure-filtered read-only Store View and the guest Nix database. It persists project-built and substituted derivations across clean-root reboots. Replacing the volume is the supported way to reclaim its capacity because stock guest garbage collection can create overlay whiteouts for required lower-store paths.
 
 ## Reset
 

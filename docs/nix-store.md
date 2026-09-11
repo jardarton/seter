@@ -57,7 +57,7 @@ The image lives beside the project image under:
 /var/lib/seter/workspaces/<workspace>/
 ```
 
-It survives `seter down`, trusted host deployments, and clean-root reboots. Deploying a new Runner does not replace either persistent image.
+It survives `seter down`, trusted host deployments, and clean-root reboots. Deploying a new Runner does not replace the persistent volumes.
 
 Normal guest Nix commands work against the overlay:
 
@@ -72,9 +72,15 @@ Seter sets Nix's automatic free-space collection thresholds to zero, disables th
 
 To reclaim a full private store safely, stop the workspace and replace the whole Nix image. Seter does not yet compact only the private upper layer because stock Nix GC cannot distinguish it from the shared lower namespace.
 
-Runner-containing NixOS generations must remain available for as long as their closures are registered in the private Nix image. Removing an old system generation independently can make a lower path disappear beneath a still-valid guest registration. Safe retirement and reset handling remain roadmap work.
+Retained NixOS generations root their matching Runners and Store Views. On a
+change of Store View, guest boot reconciles persistent registrations with paths
+actually present in that view. See [Host-store visibility](./store-visibility.md).
 
-If the private Nix image is lost or corrupted, stop the workspace, preserve the old image for diagnosis, and move it out of the workspace state directory. The next boot creates an empty image, reloads the current guest system closure registration, and leaves the separate project volume untouched. Development dependencies then need to be realized again.
+If the private Nix image is corrupted or full, stop the Workspace and preserve
+the image privately if diagnosis is needed. Use `seter reset <workspace>
+--nix-store` to replace this cache without touching Project data. The next boot
+loads the current guest system closure; development dependencies must be
+realized again. See [storage lifecycle](./storage-lifecycle.md).
 
 Back up this image only if avoiding dependency rebuilds matters. The project volume remains the higher-value backup target.
 

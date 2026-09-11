@@ -15,6 +15,11 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    nixos-lima = {
+      url = "github:nixos-lima/nixos-lima/v0.2.1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -29,6 +34,7 @@
         ./parts/devshells.nix
         ./parts/formatter.nix
         ./parts/examples.nix
+        ./parts/macos-checks.nix
       ];
     };
 }

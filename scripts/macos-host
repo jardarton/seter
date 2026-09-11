@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+instance=${SETER_LIMA_INSTANCE:-seter}
+repo=${SETER_SOURCE:-$(cd "$(dirname "$0")/.." && pwd)}
+template="$repo/lima/seter.yaml"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: macos-host COMMAND [ARGUMENTS]
+
+Commands:
+  check
+      Verify Client eligibility and validate the pinned Lima template.
+  create EXCHANGE_DIRECTORY
+      Create and start the persistent Seter Host.
+  deploy CONSUMER_FLAKE [CONFIGURATION]
+      Evaluate on macOS, build on the Seter Host, and switch it in place.
+      CONFIGURATION defaults to seter-host.
+  status
+      Show the Lima instance.
+  stop
+      Stop the instance without deleting its disk.
+  start
+      Start an existing instance without replacing its disk.
+
+Environment:
+  SETER_LIMA_INSTANCE  Lima instance name (default: seter)
+  SETER_LIMA_CPUS      Seter Host CPUs (default: 8)
+  SETER_LIMA_MEMORY    Seter Host memory in GiB (default: 16)
+  SETER_LIMA_DISK      Persistent disk capacity in GiB (default: 120)
+EOF
+}
+
+require_client() {
+  [[ $(uname -s) == Darwin ]] || {
+    echo "macos-host: run this command on the macOS Client" >&2
+    exit 1
+  }
+  [[ $(uname -m) == arm64 ]] || {
+    echo "macos-host: Apple Silicon is required" >&2
+    exit 1
+  }
+  command -v limactl >/dev/null || {
+    echo "macos-host: limactl is not installed" >&2
+    exit 1
+  }
+  command -v nix >/dev/null || {
+    echo "macos-host: Nix is not installed" >&2
+    exit 1
+  }
+}
+
+check_client() {
+  require_client
+  version=$(sw_vers -productVersion)
+  major=${version%%.*}
+  (( major >= 15 )) || {
+    echo "macos-host: macOS 15 or newer is required (found $version)" >&2
+    exit 1
+  }
+  chip=$(system_profiler SPHardwareDataType | awk -F': ' '/Chip:/ {print $2; exit}')
+  case "$chip" in
+    "Apple M3"*|"Apple M4"*|"Apple M5"*) ;;
+    *)
+      echo "macos-host: Apple M3 or newer is required (found ${chip:-unknown})" >&2
+      exit 1
+      ;;
+  esac
+  limactl validate "$template"
+  echo "Eligible macOS Client: $chip, macOS $version, $(limactl --version)"
+}
+
+require_instance() {
+  if ! limactl list --format '{{.Name}}' | grep -Fxq "$instance"; then
+    echo "macos-host: Lima instance does not exist: $instance" >&2
+    exit 1
+  fi
+}
+
+case "${1:-}" in
+  check)
+    check_client
+    ;;
+  create)
+    check_client
+    exchange=${2:-}
+    [[ -n $exchange ]] || { usage; exit 2; }
+    exchange=$(cd "$exchange" 2>/dev/null && pwd) || {
+      echo "macos-host: exchange directory does not exist: $exchange" >&2
+      exit 1
+    }
+    if limactl list --format '{{.Name}}' | grep -Fxq "$instance"; then
+      echo "macos-host: refusing to replace existing Lima instance: $instance" >&2
+      exit 1
+    fi
+    limactl start \
+      --name "$instance" \
+      --param "exchangeDir=$exchange" \
+      --cpus "${SETER_LIMA_CPUS:-8}" \
+      --memory "${SETER_LIMA_MEMORY:-16}" \
+      --disk "${SETER_LIMA_DISK:-120}" \
+      "$template"
+    ;;
+  deploy)
+    require_client
+    command -v nixos-rebuild >/dev/null || {
+      echo "macos-host: nixos-rebuild is unavailable; invoke the packaged app with 'nix run path:.#macos-host'" >&2
+      exit 1
+    }
+    require_instance
+    flake=${2:-}
+    configuration=${3:-seter-host}
+    [[ -n $flake ]] || { usage; exit 2; }
+    status=$(limactl list "$instance" --format '{{.Status}}')
+    [[ $status == Running ]] || {
+      echo "macos-host: instance $instance is not running (status: $status)" >&2
+      exit 1
+    }
+    instance_directory=$(limactl list "$instance" --format '{{.Dir}}')
+    ssh_config="$instance_directory/ssh.config"
+    [[ -f $ssh_config ]] || {
+      echo "macos-host: Lima SSH configuration is missing: $ssh_config" >&2
+      exit 1
+    }
+
+    # nixos-rebuild performs flake evaluation in this macOS process. Both the
+    # derivation build and activation target use the Lima SSH endpoint, so no
+    # aarch64-linux builder is required on the Client.
+    export NIX_SSHOPTS="-F $ssh_config"
+    exec nixos-rebuild --no-reexec switch \
+      --flake "$flake#$configuration" \
+      --build-host "lima-$instance" \
+      --target-host "lima-$instance" \
+      --elevate sudo
+    ;;
+  status)
+    require_client
+    limactl list "$instance"
+    ;;
+  stop)
+    require_client
+    require_instance
+    limactl stop "$instance"
+    ;;
+  start)
+    require_client
+    require_instance
+    limactl start "$instance"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

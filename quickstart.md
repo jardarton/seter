@@ -2,6 +2,9 @@
 
 This guide adds Seter to a flake-based NixOS host and starts one workspace. Seter currently requires a Linux host with Nix flakes and working KVM (`/dev/kvm`).
 
+On macOS, first create the Linux Seter Host using the
+[macOS deployment guide](./docs/macos-deployment.md).
+
 ## 1. Add Seter to the host flake
 
 Add the Seter input and host module to your NixOS flake. Adapt the existing `nixosConfigurations` rather than copying this whole example if your flake is already structured differently.

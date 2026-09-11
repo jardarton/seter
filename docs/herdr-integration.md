@@ -245,7 +245,7 @@ The guest needs a local endpoint that reaches the host gateway. Possible transpo
 
 The transport must preserve the workspace or pane capability and must not expose the real Herdr socket path. A per-connection, pane-bound endpoint is the strongest default for lifecycle reporting. A separate workspace-bound credential can be used for orchestration.
 
-The final transport must be reviewed alongside Seter's unfinished host network policy. This design note does not claim that the current host networking implementation enforces the proposed gateway boundary.
+The final transport must integrate with Seter's Host-owned network policy. The existing network boundary does not implement or authorize the proposed Herdr gateway.
 
 ## Agent state and session identity
 
@@ -380,7 +380,7 @@ Any implementation should preserve these invariants:
 - What is the expected behavior when SSH drops but the VM-side agent is still running?
 - Which Herdr read, prompt, wait, and event methods can be safely exposed after resource filtering?
 - Should workspace-scoped agents be able to coordinate every agent in the VM, or only agents they created?
-- Which transport best fits both NixOS and the planned nested macOS deployment?
+- Which transport best fits both native NixOS and the manual nested macOS deployment?
 - Should remote session restoration be implemented locally or proposed as a configurable launcher feature upstream in Herdr?
 - How should multi-repo Seter workspaces choose initial cwd and display labels for individual panes?
 
