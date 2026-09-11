@@ -1,4 +1,9 @@
-{ name, lib, ... }:
+{
+  name,
+  lib,
+  config,
+  ...
+}:
 let
   inherit (lib) mkOption types;
 
@@ -10,30 +15,30 @@ let
 in
 {
   options = {
-    repository = {
-      url = mkOption {
-        type = types.strMatching "https://([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])(:443)?/[^?#[:space:]]+";
-        description = "Approved HTTPS Git repository URL for this workspace.";
-        example = "https://git.example/owner/project.git";
-      };
+    repository = mkOption {
+      type = types.nullOr (types.submodule (import ./repository.nix));
+      default = null;
+      description = "Legacy single repository; use repositories instead. Cannot be combined with repositories.";
+    };
 
-      branch = mkOption {
-        type = types.nullOr (types.strMatching "[^[:space:]]+");
-        default = null;
-        description = "Optional initial branch; null uses the remote default branch.";
-      };
+    repositories = mkOption {
+      type = types.attrsOf (types.submodule (import ./repository.nix));
+      default = { };
+      description = "Named approved HTTPS repositories sharing this workspace's authority and storage. Keys default to checkout directory names.";
+    };
 
-      checkoutName = mkOption {
-        type = types.nullOr (types.strMatching "[a-zA-Z0-9][a-zA-Z0-9_.-]*");
-        default = null;
-        description = "Optional checkout directory override. By default it is derived from the repository URL.";
-      };
+    defaultRepository = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Repository selected by shell and run when --repo is omitted. A sole repository is selected automatically.";
+    };
 
-      credential = mkOption {
-        type = types.nullOr (types.strMatching "[a-zA-Z][a-zA-Z0-9_-]{0,62}");
-        default = null;
-        description = "Optional repository-scoped HTTP Authorization binding in this workspace's secrets.";
-      };
+    resolvedRepositories = mkOption {
+      internal = true;
+      readOnly = true;
+      type = types.attrsOf (types.submodule (import ./repository.nix));
+      default = (import ../../lib/repositories.nix { inherit lib; }).resolve config;
+      description = "Normalized repository collection, including legacy configuration.";
     };
 
     guestProfile = mkOption {
@@ -199,6 +204,11 @@ in
       type = types.attrsOf (
         types.submodule {
           options = {
+            repositoryOnly = mkOption {
+              type = types.bool;
+              default = false;
+              description = "Restrict this binding to explicitly associated repositories even when none remain. Set for repository credentials to prevent host-wide fallback after repository removal.";
+            };
             placeholder = mkOption {
               type = types.str;
               example = "seter-placeholder-github-0123456789abcdef";

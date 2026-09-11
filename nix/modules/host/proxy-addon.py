@@ -105,7 +105,7 @@ class SeterPolicy:
         try:
             Path(ready_path).unlink(missing_ok=True)
             policy = json.loads(Path(policy_path).read_text())
-            if policy.get("version") != 3:
+            if policy.get("version") != 4:
                 raise ValueError("unsupported policy version")
             workspaces = policy["workspaces"]
             if not isinstance(workspaces, dict):
@@ -118,7 +118,7 @@ class SeterPolicy:
                 name = workspace["name"]
                 http_hosts = workspace["httpHosts"]
                 passthrough_hosts = workspace["passthroughHosts"]
-                repository = workspace["repository"]
+                repositories = workspace["repositories"]
                 secrets = workspace["secrets"]
                 if (
                     not isinstance(name, str)
@@ -135,7 +135,8 @@ class SeterPolicy:
                         for host in passthrough_hosts
                     )
                     or not isinstance(secrets, dict)
-                    or not isinstance(repository, dict)
+                    or not isinstance(repositories, dict)
+                    or not repositories
                 ):
                     raise ValueError("invalid workspace policy")
 
@@ -163,10 +164,12 @@ class SeterPolicy:
                         raise ValueError(f"invalid secret policy for {secret_name!r}")
                     credential = secret.get("credential")
                     placeholder = secret.get("placeholder")
+                    repository_only = secret.get("repositoryOnly", False)
                     hosts = secret.get("hosts")
                     headers = secret.get("headers")
                     if (
-                        not isinstance(secret_name, str)
+                        not isinstance(repository_only, bool)
+                        or not isinstance(secret_name, str)
                         or self._SECRET_NAME.fullmatch(secret_name) is None
                         or not isinstance(credential, str)
                         or self._CREDENTIAL_NAME.fullmatch(credential) is None
@@ -223,54 +226,66 @@ class SeterPolicy:
                         "hosts": normalized_hosts,
                         "headers": normalized_headers,
                         "value": credential_value,
+                        "repositoryOnly": repository_only,
                     }
 
-                repository_host = self._normalize(repository.get("host"))
-                repository_path = repository.get("path")
-                repository_credential = repository.get("credential")
-                repository_path_lower = (
-                    repository_path.lower()
-                    if isinstance(repository_path, str)
-                    else ""
-                )
-                if (
-                    self._HOST_NAME.fullmatch(repository_host) is None
-                    or repository_host not in normalized_http_hosts
-                    or not isinstance(repository_path, str)
-                    or not repository_path.startswith("/")
-                    or "?" in repository_path
-                    or "#" in repository_path
-                    or repository_path.rstrip("/") == ""
-                    or any(
-                        component in ("", ".", "..")
-                        for component in repository_path.split("/")[1:]
+                parsed_repositories: dict[str, dict[str, object]] = {}
+                for repository_name, repository in repositories.items():
+                    if (
+                        not isinstance(repository_name, str)
+                        or re.fullmatch(
+                            r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", repository_name
+                        ) is None
+                        or not isinstance(repository, dict)
+                    ):
+                        raise ValueError(f"invalid repository policy for {name!r}/{repository_name!r}")
+                    repository_host = self._normalize(repository.get("host"))
+                    repository_path = repository.get("path")
+                    repository_credential = repository.get("credential")
+                    repository_path_lower = (
+                        repository_path.lower()
+                        if isinstance(repository_path, str)
+                        else ""
                     )
-                    or any(
-                        encoded in repository_path_lower
-                        for encoded in ("%2e", "%2f", "%5c")
-                    )
-                    or (
-                        repository_credential is not None
-                        and (
-                            not isinstance(repository_credential, str)
-                            or repository_credential not in parsed_secrets
-                            or repository_host
-                            not in parsed_secrets[repository_credential]["hosts"]
-                            or "authorization"
-                            not in parsed_secrets[repository_credential]["headers"]
+                    if (
+                        self._HOST_NAME.fullmatch(repository_host) is None
+                        or repository_host not in normalized_http_hosts
+                        or not isinstance(repository_path, str)
+                        or not repository_path.startswith("/")
+                        or "?" in repository_path
+                        or "#" in repository_path
+                        or repository_path.rstrip("/") == ""
+                        or any(
+                            component in ("", ".", "..")
+                            for component in repository_path.split("/")[1:]
                         )
-                    )
-                ):
-                    raise ValueError(f"invalid repository policy for {name!r}")
+                        or any(
+                            encoded in repository_path_lower
+                            for encoded in ("%2e", "%2f", "%5c")
+                        )
+                        or (
+                            repository_credential is not None
+                            and (
+                                not isinstance(repository_credential, str)
+                                or repository_credential not in parsed_secrets
+                                or repository_host
+                                not in parsed_secrets[repository_credential]["hosts"]
+                                or "authorization"
+                                not in parsed_secrets[repository_credential]["headers"]
+                            )
+                        )
+                    ):
+                        raise ValueError(f"invalid repository policy for {name!r}/{repository_name!r}")
+                    parsed_repositories[repository_name] = {
+                        "host": repository_host,
+                        "path": repository_path,
+                        "credential": repository_credential,
+                    }
                 parsed[address] = {
                     "name": name,
                     "httpHosts": normalized_http_hosts,
                     "passthroughHosts": normalized_passthrough_hosts,
-                    "repository": {
-                        "host": repository_host,
-                        "path": repository_path.rstrip("/"),
-                        "credential": repository_credential,
-                    },
+                    "repositories": parsed_repositories,
                     # Credential values came from systemd's private runtime
                     # credential directory, never from this Nix-store policy.
                     "secrets": parsed_secrets,
@@ -345,17 +360,24 @@ class SeterPolicy:
                 return [], f"secret {secret_name!r} may only be injected over HTTPS"
             if host not in secret["hosts"]:
                 return [], f"secret {secret_name!r} is not bound to host {host!r}"
-            repository = workspace["repository"]
-            if secret_name == repository["credential"]:
+            bindings = [
+                repository
+                for repository in workspace["repositories"].values()
+                if secret_name == repository["credential"]
+            ]
+            if bindings or secret.get("repositoryOnly", False):
                 request_path = path.partition("?")[0]
-                repository_path = repository["path"]
-                suffix = request_path.removeprefix(repository_path)
-                if host != repository["host"] or not (
-                    request_path == repository_path
-                    or (
-                        request_path.startswith(repository_path + "/")
-                        and suffix in SeterPolicy._REPOSITORY_SMART_HTTP_SUFFIXES
+                if not any(
+                    host == repository["host"]
+                    and (
+                        request_path == repository["path"]
+                        or (
+                            request_path.startswith(repository["path"] + "/")
+                            and request_path.removeprefix(repository["path"])
+                            in SeterPolicy._REPOSITORY_SMART_HTTP_SUFFIXES
+                        )
                     )
+                    for repository in bindings
                 ):
                     return [], (
                         f"repository credential {secret_name!r} is not bound to "

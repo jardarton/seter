@@ -5,7 +5,7 @@ Seter limits the authority of development workloads by placing each workspace be
 ## Language
 
 **Workspace**:
-An isolated development environment with one working tree, its persistent state, and granted capabilities. It is the unit whose blast radius Seter limits.
+An isolated development environment with one or more approved repository working trees, shared persistent state, and granted capabilities. Repositories inside it share authority; they are not isolated from each other. It is the unit whose blast radius Seter limits.
 _Avoid_: Project VM, sandbox
 
 **macOS Client**:
@@ -25,7 +25,7 @@ The trusted catalog of workspace identities, approved repository sources, resour
 _Avoid_: Project list, VM registry
 
 **Workspace Bootstrap**:
-The creation of a workspace's initial working tree and persistent development state from its approved repository source.
+The creation of a workspace's initial working trees and persistent development state from its approved repository sources.
 _Avoid_: Setup, provisioning, initialization
 
 **Runner**:
@@ -41,7 +41,7 @@ The server identity used to verify that an SSH connection terminates at the inte
 _Avoid_: User key, login key
 
 **Repository Authority**:
-A workspace's permission to read from and write to its single approved repository without receiving the repository credential itself.
+A workspace's permission to read from and write to its explicitly approved repositories without receiving the repository credential itself.
 _Avoid_: Git access, repository secret
 
 **Guest Profile**:
@@ -73,7 +73,7 @@ The removal of a workspace from active use while retaining its Project Volume un
 _Avoid_: Garbage collection, deletion
 
 **Project Volume**:
-The persistent workspace storage containing its approved repository working tree. Reset and garbage collection never remove it.
+The persistent workspace storage containing all of its approved repository working trees. Reset and garbage collection never remove it.
 _Avoid_: Workspace state, home disk
 
 **Home Volume**:

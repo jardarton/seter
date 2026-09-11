@@ -47,12 +47,20 @@ fn run() -> Result<i32> {
             PolicyCommand::Review { workspace, file } => policy::review(&workspace, &file),
             PolicyCommand::Status { workspace, file } => policy::status(&workspace, &file),
         },
-        Command::Init { workspace } => lifecycle::init(&workspace),
+        Command::Init { workspace, repo } => lifecycle::init(&workspace, repo.as_deref()),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
-        Command::Run { workspace, command } => lifecycle::run(&workspace, &command),
+        Command::Run {
+            workspace,
+            repo,
+            command,
+        } => lifecycle::run(&workspace, repo.as_deref(), &command),
         Command::Status { workspace } => lifecycle::status(workspace.as_deref()),
-        Command::Shell { workspace } => lifecycle::shell(&workspace),
+        Command::Shell {
+            workspace,
+            repo,
+            root,
+        } => lifecycle::shell(&workspace, repo.as_deref(), root),
         Command::SshHostKey { workspace } => lifecycle::ssh_host_key(&workspace),
         Command::ProxyCa => lifecycle::proxy_ca(),
         Command::Reset {

@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 6;
+const REGISTRY_VERSION: u32 = 7;
 pub const RUNNER_IDENTITY_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +26,8 @@ pub struct Registry {
 pub struct Workspace {
     pub hostname: String,
     pub guest_profile: String,
-    pub repository: Repository,
+    pub repositories: BTreeMap<String, Repository>,
+    pub default_repository: Option<String>,
     pub runner: Runner,
     pub network: Network,
     pub resources: Resources,
@@ -183,43 +184,59 @@ impl Registry {
                 "workspace {name:?} uses unsupported Guest Profile {:?}",
                 workspace.guest_profile
             );
-            if let Err(error) = validate_repository_url(&workspace.repository.url) {
-                bail!("workspace {name:?} has an invalid repository URL: {error}");
-            }
-            // Mirrors the host module's constraint. Requiring a leading
-            // alphanumeric rejects "." and ".." along with any separator, so a
-            // checkout name can never escape the project directory.
-            let checkout = &workspace.repository.checkout_name;
             ensure!(
-                checkout
-                    .chars()
-                    .next()
-                    .is_some_and(|first| first.is_ascii_alphanumeric())
-                    && checkout
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')),
-                "workspace {name:?} has an invalid repository checkout name {checkout:?}"
+                !workspace.repositories.is_empty(),
+                "workspace {name:?} requires at least one repository"
             );
-            if let Some(branch) = &workspace.repository.branch {
+            if let Some(default) = &workspace.default_repository {
                 ensure!(
-                    !branch.trim().is_empty(),
-                    "workspace {name:?} has an empty repository branch"
+                    workspace.repositories.contains_key(default),
+                    "workspace {name:?} defaultRepository {default:?} is not registered"
                 );
             }
-            if let Some(credential) = &workspace.repository.credential {
+            let mut checkouts = HashSet::new();
+            for (repository_name, repository) in &workspace.repositories {
                 ensure!(
-                    !credential.name.trim().is_empty(),
-                    "workspace {name:?} has an empty repository credential binding"
+                    valid_repository_name(repository_name),
+                    "workspace {name:?} has an invalid repository name {repository_name:?}"
                 );
                 ensure!(
-                    credential.placeholder.starts_with("seter-placeholder-")
-                        && credential.placeholder["seter-placeholder-".len()..].len() >= 16
-                        && credential.placeholder["seter-placeholder-".len()..]
-                            .chars()
-                            .all(|character| character.is_ascii_alphanumeric()
-                                || matches!(character, '_' | '-')),
-                    "workspace {name:?} has an invalid repository credential placeholder"
+                    checkouts.insert(&repository.checkout_name),
+                    "workspace {name:?} repository {repository_name:?} duplicates checkout {:?}",
+                    repository.checkout_name
                 );
+                if let Err(error) = validate_repository_url(&repository.url) {
+                    bail!("workspace {name:?} repository {repository_name:?} has an invalid repository URL: {error}");
+                }
+                // Mirrors the host module's constraint. Requiring a leading
+                // alphanumeric rejects "." and ".." along with any separator, so a
+                // checkout name can never escape the project directory.
+                let checkout = &repository.checkout_name;
+                ensure!(
+                    valid_repository_name(checkout),
+                    "workspace {name:?} has an invalid repository checkout name {checkout:?} for {repository_name:?}"
+                );
+                if let Some(branch) = &repository.branch {
+                    ensure!(
+                        !branch.trim().is_empty(),
+                        "workspace {name:?} repository {repository_name:?} has an empty repository branch"
+                    );
+                }
+                if let Some(credential) = &repository.credential {
+                    ensure!(
+                        !credential.name.trim().is_empty(),
+                        "workspace {name:?} repository {repository_name:?} has an empty repository credential binding"
+                    );
+                    ensure!(
+                        credential.placeholder.starts_with("seter-placeholder-")
+                            && credential.placeholder["seter-placeholder-".len()..].len() >= 16
+                            && credential.placeholder["seter-placeholder-".len()..]
+                                .chars()
+                                .all(|character| character.is_ascii_alphanumeric()
+                                    || matches!(character, '_' | '-')),
+                        "workspace {name:?} repository {repository_name:?} has an invalid repository credential placeholder"
+                    );
+                }
             }
             ensure!(
                 workspace.runner.path.is_absolute(),
@@ -344,6 +361,49 @@ impl Registry {
     }
 }
 
+fn valid_repository_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+impl Workspace {
+    pub fn select_repository(&self, requested: Option<&str>) -> Result<(&str, &Repository)> {
+        let selected = requested.or(self.default_repository.as_deref());
+        if let Some(name) = selected {
+            return self
+                .repositories
+                .get_key_value(name)
+                .map(|(key, repository)| (key.as_str(), repository))
+                .with_context(|| {
+                    format!(
+                        "repository {name:?} is not registered; available: {}",
+                        self.repositories
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+        }
+        if self.repositories.len() == 1 {
+            let (name, repository) = self.repositories.first_key_value().unwrap();
+            return Ok((name, repository));
+        }
+        bail!(
+            "select a repository with --repo or configure defaultRepository; available: {}",
+            self.repositories
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 fn validate_repository_url(url: &str) -> Result<()> {
     let remainder = url
         .strip_prefix("https://")
@@ -393,17 +453,18 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 6,
+      "version": 7,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
           "guestProfile": "default",
-          "repository": {
+          "defaultRepository": null,
+          "repositories": { "project": {
             "url": "https://git.example/owner/project.git",
             "branch": null,
             "checkoutName": "project",
             "credential": null
-          },
+          }},
           "runner": {
             "path": "/nix/store/test-runner",
             "identity": {
@@ -446,7 +507,88 @@ mod tests {
     "#;
 
     #[test]
-    fn parses_version_six_registry() {
+    fn selects_named_default_and_sole_repositories() {
+        let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
+        assert_eq!(
+            registry
+                .workspace("minimal")
+                .unwrap()
+                .select_repository(None)
+                .unwrap()
+                .0,
+            "project"
+        );
+        let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        let workspace = &mut input["workspaces"]["minimal"];
+        let mut second = workspace["repositories"]["project"].clone();
+        second["checkoutName"] = "backend".into();
+        second["url"] = "https://second.example/team/backend.git".into();
+        workspace["repositories"]["backend"] = second;
+        let registry = Registry::from_reader(input.to_string().as_bytes()).unwrap();
+        let workspace = registry.workspace("minimal").unwrap();
+        assert!(workspace
+            .select_repository(None)
+            .unwrap_err()
+            .to_string()
+            .contains("--repo"));
+        assert_eq!(
+            workspace
+                .select_repository(Some("backend"))
+                .unwrap()
+                .1
+                .checkout_name,
+            "backend"
+        );
+        assert!(workspace.select_repository(Some("unknown")).is_err());
+        input["workspaces"]["minimal"]["defaultRepository"] = "backend".into();
+        let registry = Registry::from_reader(input.to_string().as_bytes()).unwrap();
+        let workspace = registry.workspace("minimal").unwrap();
+        assert_eq!(workspace.select_repository(None).unwrap().0, "backend");
+        assert_eq!(
+            workspace.select_repository(Some("project")).unwrap().0,
+            "project"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_repository_collections() {
+        let original: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        for (field, value, expected) in [
+            (
+                "repositories",
+                serde_json::json!({}),
+                "at least one repository",
+            ),
+            (
+                "defaultRepository",
+                serde_json::json!("missing"),
+                "defaultRepository",
+            ),
+        ] {
+            let mut input = original.clone();
+            input["workspaces"]["minimal"][field] = value;
+            assert!(Registry::from_reader(input.to_string().as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains(expected));
+        }
+        for key in ["second", "../escape", ".", "-option"] {
+            let mut input = original.clone();
+            input["workspaces"]["minimal"]["repositories"][key] =
+                original["workspaces"]["minimal"]["repositories"]["project"].clone();
+            assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+        }
+        let mut input = original.clone();
+        input["workspaces"]["minimal"]["repositories"]["second"] =
+            original["workspaces"]["minimal"]["repositories"]["project"].clone();
+        input["workspaces"]["minimal"]["repositories"]["second"]["checkoutName"] = "second".into();
+        input["workspaces"]["minimal"]["repositories"]["second"]["url"] =
+            "ssh://git.example/project".into();
+        assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn parses_version_seven_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -455,14 +597,14 @@ mod tests {
             workspace.runner.path.to_string_lossy(),
             "/nix/store/test-runner"
         );
-        assert_eq!(workspace.repository.checkout_name, "project");
+        assert_eq!(workspace.repositories["project"].checkout_name, "project");
         assert_eq!(workspace.runner.identity.guest_profile, "default");
         assert_eq!(workspace.storage.home.size_mi_b, 4096);
     }
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 6", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 7", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()

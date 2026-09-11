@@ -4,7 +4,7 @@ Seter treats guest DNS as part of the egress boundary, not merely as a name-reso
 
 ## Allowed names
 
-The listener derives its allowlist from the workspace's intercepted HTTP hosts, TLS-passthrough hosts, and named direct-TCP destinations. Literal IPv4 direct-TCP destinations are omitted because they require no DNS.
+The listener derives its allowlist from the workspace's approved repository hosts, intercepted HTTP hosts, TLS-passthrough hosts, and named direct-TCP destinations. Literal IPv4 direct-TCP destinations are omitted because they require no DNS.
 
 Matching is case-insensitive and insensitive to one final DNS root dot. Exact grants match only that name. A reviewed single-label Host Pattern such as `*.example.com` matches `api.example.com`, but excludes both `example.com` and `deep.api.example.com`.
 

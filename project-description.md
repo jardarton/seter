@@ -1,14 +1,13 @@
 # Seter architecture and threat model
 
-Seter limits development workloads to one Workspace: one approved repository,
-its persistent state, and explicitly granted authority. It aims to contain a
+Seter limits development workloads to one Workspace: one or more approved repositories,
+shared persistent state, and explicitly granted authority. It aims to contain a
 compromised dependency, hostile repository, or misbehaving coding agent without
 requiring ordinary repositories to define their own guest operating system.
 
 See the [README](./README.md) for current interfaces and the
 [roadmap](./ROADMAP.md) for remaining product acceptance. This document describes
-the implemented boundary, not speculative transparent macOS or multi-repository
-features.
+the implemented boundary, not speculative transparent macOS features.
 
 ## Trusted control plane
 
@@ -30,7 +29,9 @@ Workspace, with explicit direnv approval. See
 
 ## Workspace boundary
 
-- Each Workspace has its own Linux kernel and KVM VM.
+- Each Workspace has its own Linux kernel and KVM VM. Repositories inside it
+  share user state and the union of its authority; there is no intra-Workspace
+  repository isolation.
 - Root is ephemeral. Separate Project, Home, and private Nix-store volumes
   retain working data, user configuration, and dependencies respectively.
 - The lower store is an immutable EROFS image of the Runner's closure, not an
@@ -101,5 +102,5 @@ launcher, or transparent routing is required. See
 - TLS interception needs application trust-store integration; passthrough is
   destination-checked but opaque. Non-HTTP credential brokering is not provided.
 - Broad macOS hardware coverage, unattended identity, automatic Host/tunnel
-  management, multi-repository Workspaces, and additional Guest Profiles remain
+  management and additional Guest Profiles remain
   outside the current supported workflow.

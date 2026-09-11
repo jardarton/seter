@@ -25,7 +25,7 @@ The nftables policy is installed before any TAP can start. A policy-loading fail
 
 ## DNS
 
-A separate unprivileged policy resolver runs on demand for each active workspace behind the bridge gateway. Workspaces may query the gateway over TCP or UDP, but the resolver accepts only names derived from that workspace's configured HTTP, passthrough, and direct-TCP destinations.
+A separate unprivileged policy resolver runs on demand for each active workspace behind the bridge gateway. Workspaces may query the gateway over TCP or UDP, but the resolver accepts only names derived from that workspace's approved repository hosts and configured HTTP, passthrough, and direct-TCP destinations.
 
 Exact grants match only one name. A `*.example.com` pattern matches exactly one subordinate label, and excludes both the apex and deeper names. nftables redirects each registered source address to its own listener, and the listener independently verifies the registered source address. One workspace's destinations therefore do not broaden another workspace's DNS policy.
 

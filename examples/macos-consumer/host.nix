@@ -25,7 +25,7 @@ in
     # proxyCaCertificate = builtins.readFile ./proxy-ca-cert.pem;
 
     workspaces.example = {
-      repository.url = "https://github.com/owner/project.git";
+      repositories.project.url = "https://github.com/owner/project.git";
       network = {
         address = "10.100.0.10";
         mac = "02:00:00:00:00:10";

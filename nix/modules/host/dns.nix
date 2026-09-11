@@ -36,17 +36,13 @@ let
     builtins.length parts == 4 && lib.all (part: part != null && part <= 255) parts;
 
   normalizeHosts = map lib.toLower;
-  repositoryHostFor =
-    workspace:
-    lib.toLower (
-      builtins.elemAt (builtins.match "https://([^/:]+)(:443)?(/.*)" workspace.repository.url) 0
-    );
+  repositories = import ../../lib/repositories.nix { inherit lib; };
   namesFor =
     workspace:
     unique (
       lib.filter (name: !parseIpv4 name) (
         normalizeHosts (
-          [ (repositoryHostFor workspace) ]
+          (repositories.hosts workspace)
           ++ workspace.egress.httpHosts
           ++ workspace.egress.passthroughHosts
           ++ map (destination: destination.host) workspace.egress.tcp

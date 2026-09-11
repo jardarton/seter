@@ -25,6 +25,7 @@ let
   bootstrapGitServerCertificate = ./fixtures/bootstrap-git-server-cert.pem;
   bootstrapGitServerPrivateKey = ./fixtures/bootstrap-git-server-key.pem;
   repositoryToken = "seter-bootstrap-test-token-0123456789";
+  backendToken = "seter-backend-test-token-0123456789";
 
   gitHttpServer = pkgs.writeText "seter-bootstrap-git-http-server.py" ''
     import os
@@ -33,7 +34,7 @@ let
     import sys
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    token, certificate, private_key = sys.argv[1:4]
+    token, backend_token, certificate, private_key = sys.argv[1:5]
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -46,7 +47,8 @@ let
 
         def serve_git(self):
             authorization = self.headers.get("Authorization", "")
-            if authorization != f"Bearer {token}":
+            expected = backend_token if self.path.startswith("/owner/backend.git/") else token
+            if authorization != f"Bearer {expected}":
                 body = b"repository authentication required\n"
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", "Bearer")
@@ -114,9 +116,15 @@ let
   '';
 
   workspace = {
-    repository = {
+    defaultRepository = "e2e";
+    repositories.e2e = {
       url = "https://git.fixture/owner/e2e.git";
       credential = "repositoryToken";
+    };
+    repositories.backend = {
+      url = "https://git.fixture/owner/backend.git";
+      credential = "backendToken";
+      branch = "main";
     };
     network = {
       address = "10.100.0.20";
@@ -135,8 +143,16 @@ let
       nixStore.sizeMiB = 1024;
     };
     secrets.repositoryToken = {
+      repositoryOnly = true;
       placeholder = "seter-placeholder-repository-0123456789abcdef";
       sourceFile = "/run/secrets/seter-repository-token";
+      hosts = [ "git.fixture" ];
+      headers = [ "authorization" ];
+    };
+    secrets.backendToken = {
+      repositoryOnly = true;
+      placeholder = "seter-placeholder-backend-0123456789abcdef";
+      sourceFile = "/run/secrets/seter-backend-token";
       hosts = [ "git.fixture" ];
       headers = [ "authorization" ];
     };
@@ -233,11 +249,13 @@ pkgs.testers.runNixOSTest {
               ${pkgs.git}/bin/git -C "$work" commit -m initial
               ${pkgs.git}/bin/git -C "$work" remote add origin /srv/git/owner/e2e.git
               ${pkgs.git}/bin/git -C "$work" push origin main
+              ${pkgs.git}/bin/git clone --bare /srv/git/owner/e2e.git /srv/git/owner/backend.git
+              ${pkgs.git}/bin/git -C /srv/git/owner/backend.git config http.receivepack true
               rm -rf "$work"
               chown -R gitfixture:gitfixture /srv/git
             fi
           '';
-          ExecStart = "${pkgs.python3}/bin/python ${gitHttpServer} ${repositoryToken} ${bootstrapGitServerCertificate} ${bootstrapGitServerPrivateKey}";
+          ExecStart = "${pkgs.python3}/bin/python ${gitHttpServer} ${repositoryToken} ${backendToken} ${bootstrapGitServerCertificate} ${bootstrapGitServerPrivateKey}";
           AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
           CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
           Restart = "on-failure";
@@ -281,6 +299,7 @@ pkgs.testers.runNixOSTest {
         systemd.tmpfiles.rules = [
           "d /run/secrets 0700 root root -"
           "f /run/secrets/seter-repository-token 0400 root root - Bearer\\x20${repositoryToken}"
+          "f /run/secrets/seter-backend-token 0400 root root - Bearer\\x20${backendToken}"
         ];
 
         system.activationScripts.seterBootstrapTestCa = lib.stringAfter [ "users" ] ''
@@ -331,7 +350,7 @@ pkgs.testers.runNixOSTest {
     # The registry, lifecycle units, and immutable Runner are one NixOS
     # generation. No project installable or mutable current-runner link exists.
     machine.succeed("test $(readlink -f /etc/seter/runners/e2e) = ${runner}")
-    machine.succeed("jq -e '.version == 6 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repository.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repository.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
+    machine.succeed("jq -e '.version == 7 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repositories.e2e.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repositories.e2e.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
     machine.fail("test -e /var/lib/seter/workspaces/e2e/current")
     machine.fail("su - operator -c 'seter update e2e'")
 
@@ -348,6 +367,25 @@ pkgs.testers.runNixOSTest {
     machine.succeed("su - operator -c 'seter init e2e' | grep -F 'already initialized'")
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/e2e/bootstrap-sentinel) = sentinel'")
 
+    # Both private repositories are initialized, with independent credential
+    # bindings on the same Git host. Unknown selectors fail before SSH work.
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(git -C /project/backend remote get-url origin) = https://git.fixture/owner/backend.git; test $(git -C /project/backend branch --show-current) = main; printf backend-persistent > /project/backend/sentinel'")
+    gitserver.succeed("grep -F 'GET /owner/backend.git/info/refs?service=git-upload-pack' /tmp/git-authorized-requests")
+    machine.fail("su - operator -c 'seter init e2e --repo unknown'")
+    machine.fail("su - operator -c 'seter run e2e --repo unknown -- true'")
+    machine.succeed("printf 'pwd\\nexit\\n' | su - operator -c \"timeout 120s script -qec 'seter shell e2e --root' /dev/null\" > /tmp/root-shell; tr -d '\\r' < /tmp/root-shell | grep -Fx /project")
+
+    # A failure in the first repository does not roll back or prevent checking
+    # the second. Selected initialization ignores unrelated failed checkouts.
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'git -C /project/backend remote set-url origin https://git.fixture/owner/unrelated.git'")
+    machine.succeed("su - operator -c 'seter init e2e --repo e2e' > /tmp/selected-init 2>&1; grep -F 'already initialized' /tmp/selected-init; ! grep -F 'e2e/backend' /tmp/selected-init")
+    machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/partial-init 2>&1; code=$?; set -e; test $code = 1; grep -F 'e2e/backend failed' /tmp/partial-init; grep -F 'already initialized at /project/e2e' /tmp/partial-init")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/backend/sentinel) = backend-persistent; test $(cat /project/e2e/bootstrap-sentinel) = sentinel; git -C /project/backend remote set-url origin https://git.fixture/owner/backend.git'")
+    machine.succeed("su - operator -c 'seter init e2e'")
+
+    for credential, other in [("repository", "backend"), ("backend", "e2e")]:
+        machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(curl --silent --output /tmp/cross-repository --write-out %{{http_code}} -H \"Authorization: seter-placeholder-{credential}-0123456789abcdef\" https://git.fixture/owner/{other}.git/info/refs?service=git-upload-pack) = 403; grep -F \"not bound to path\" /tmp/cross-repository'")
+
     # The non-secret placeholder can be observed in the guest, but the real
     # credential cannot. Even a manually constructed request cannot use it on
     # a sibling repository path.
@@ -356,7 +394,7 @@ pkgs.testers.runNixOSTest {
     # A complete checkout is never reset or overwritten, and a mismatched
     # remote receives a direct explanation without changing working data.
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'git -C /project/e2e remote set-url origin https://git.fixture/owner/other.git'")
-    machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/mismatch 2>&1; code=$?; set -e; test $code = 20; grep -F 'has origin https://git.fixture/owner/other.git, expected https://git.fixture/owner/e2e.git' /tmp/mismatch")
+    machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/mismatch 2>&1; code=$?; set -e; test $code = 1; grep -F 'has origin https://git.fixture/owner/other.git, expected https://git.fixture/owner/e2e.git' /tmp/mismatch")
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/e2e/bootstrap-sentinel) = sentinel; git -C /project/e2e remote set-url origin https://git.fixture/owner/e2e.git; git -C /project/e2e config user.name Seter; git -C /project/e2e config user.email seter@example.invalid; printf pushed > /project/e2e/pushed; git -C /project/e2e add pushed; git -C /project/e2e commit -m pushed; git -C /project/e2e push origin main'")
     gitserver.succeed("${pkgs.git}/bin/git --git-dir=/srv/git/owner/e2e.git show main:pushed | grep -Fx pushed")
 
@@ -377,7 +415,7 @@ pkgs.testers.runNixOSTest {
     # A linked Git directory is unrelated content, even when the linked
     # repository happens to have the approved origin.
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'mv /project/e2e /project/e2e-before-symlink-check; mkdir /project/e2e; ln -s /project/e2e-before-symlink-check/.git /project/e2e/.git'")
-    machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/git-symlink 2>&1; code=$?; set -e; test $code = 20; grep -F 'symbolic-link .git directory' /tmp/git-symlink")
+    machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/git-symlink 2>&1; code=$?; set -e; test $code = 1; grep -F 'symbolic-link .git directory' /tmp/git-symlink")
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'rm /project/e2e/.git; rmdir /project/e2e; mv /project/e2e-before-symlink-check /project/e2e'")
 
     machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
@@ -421,6 +459,13 @@ pkgs.testers.runNixOSTest {
     # argument exit status, and retains Project and Home changes.
     machine.succeed("su - operator -c 'seter run e2e -- pwd' | grep -Fx /project/e2e")
     machine.succeed("su - operator -c 'seter run e2e -- env' | grep -Fx SETER_LIFECYCLE_DIRENV=approved")
+    # Approval in the default checkout does not approve or load the backend's
+    # environment. Repository selection controls both cwd and direnv.
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- \"printf '%s\\n' 'export BACKEND_ENV=approved' > /project/backend/.envrc\"")
+    machine.fail("su - operator -c 'seter run e2e --repo backend -- true'")
+    machine.succeed("printf 'pwd\\ndirenv allow .\\nexit\\n' | su - operator -c \"timeout 120s script -qec 'seter shell e2e --repo backend' /dev/null\" > /tmp/backend-shell; grep -F /project/backend /tmp/backend-shell")
+    machine.succeed("su - operator -c 'seter run e2e --repo backend -- pwd' | grep -Fx /project/backend")
+    machine.succeed("su - operator -c 'seter run e2e --repo backend -- env' > /tmp/backend-env; grep -Fx BACKEND_ENV=approved /tmp/backend-env; ! grep -F SETER_LIFECYCLE_DIRENV= /tmp/backend-env")
     machine.succeed("su - operator -c 'seter run e2e -- touch run-persistent'")
     machine.succeed("su - operator -c 'seter run e2e -- touch /home/seter/.run-home-persistent'")
     machine.succeed("set +e; su - operator -c \"seter run e2e -- sh -c 'exit 42'\" > /tmp/run-42 2>&1; code=$?; set -e; test $code = 42")
@@ -449,6 +494,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("su - operator -c 'seter up e2e' | grep -F 'Started e2e at 10.100.0.20'")
     machine.wait_for_unit("seter-vm-e2e.service")
     machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test -e /project/e2e/run-persistent && test ! -e ~/.seter-home-marker && test ! -e ~/.run-home-persistent'", timeout=300)
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/backend/sentinel) = backend-persistent'")
+    machine.fail("su - operator -c 'seter run e2e --repo backend -- true'")
     machine.fail("su - operator -c 'seter reset e2e --home --yes'")
     machine.succeed("su - operator -c 'seter down e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")

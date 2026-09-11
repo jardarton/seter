@@ -1401,6 +1401,15 @@
       checks = {
         inherit (self.packages.${system}) seter;
 
+        multi-repository = import ../tests/multi-repository.nix {
+          inherit
+            inputs
+            self
+            pkgs
+            system
+            ;
+        };
+
         nixos-host-module = hostConfiguration.config.system.build.toplevel;
 
         workspace-registry =
@@ -1561,7 +1570,7 @@
             }
             ''
               jq -e '
-                .version == 6 and
+                .version == 7 and
                 (.workspaces | keys == ["alpha", "beta"]) and
                 (.workspaces.alpha.hostname == "alpha.vm") and
                 (.workspaces.alpha.network.address == "10.100.0.10") and
@@ -1571,8 +1580,8 @@
                 (.workspaces.alpha.resources.cpuQuotaPercent == 200) and
                 (.workspaces.alpha.ssh == { user: "seter" }) and
                 (.workspaces.alpha.guestProfile == "default") and
-                (.workspaces.alpha.repository.url == "https://example.invalid/owner/workspace.git") and
-                (.workspaces.alpha.repository.checkoutName == "workspace") and
+                (.workspaces.alpha.repositories.workspace.url == "https://example.invalid/owner/workspace.git") and
+                (.workspaces.alpha.repositories.workspace.checkoutName == "workspace") and
                 (.workspaces.alpha.runner.path | startswith("/nix/store/")) and
                 (.workspaces.alpha.storage == {
                   project: { image: "alpha-project.img", sizeMiB: 4096 },
@@ -1586,8 +1595,8 @@
               ' ${registryFile}
 
               jq -e '
-                .version == 6 and
-                .workspaces.identity.repository == {
+                .version == 7 and
+                .workspaces.identity.repositories.workspace == {
                   url: "https://api.example.com/owner/workspace.git",
                   branch: null,
                   checkoutName: "workspace",
@@ -1631,17 +1640,18 @@
               ' ${dnsPolicyFile}
 
               jq -e '
-                .version == 3 and
+                .version == 4 and
                 (.workspaces["10.100.0.10"].name == "alpha") and
                 (.workspaces["10.100.0.10"].httpHosts == ["example.invalid", "api.example.com"]) and
                 (.workspaces["10.100.0.10"].passthroughHosts == []) and
-                (.workspaces["10.100.0.10"].repository == {
+                (.workspaces["10.100.0.10"].repositories.workspace == {
                   host: "example.invalid",
                   path: "/owner/workspace.git",
                   credential: null
                 }) and
                 (.workspaces["10.100.0.10"].secrets.githubToken == {
                   credential: "seter-alpha.githubToken",
+                  repositoryOnly: false,
                   placeholder: "seter-placeholder-0123456789abcdef",
                   hosts: ["api.example.com"],
                   headers: ["authorization", "x-api-key"]

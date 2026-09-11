@@ -1,11 +1,11 @@
 # Workspace and Runner identity
 
-The trusted `seter.host.workspaces` option is the single Workspace Registry schema. A registry entry contains the approved HTTPS repository, selected Guest Profile, network identity, resource limits, SSH settings, persistent-volume settings, credential bindings, and effective host policy.
+The trusted `seter.host.workspaces` option is the single Workspace Registry schema. A registry entry contains the named collection of approved HTTPS repositories and optional default repository, selected Guest Profile, network identity, resource limits, SSH settings, persistent-volume settings, credential bindings, and effective host policy.
 
 The host module derives three artifacts from the same evaluated entry:
 
 1. host enforcement and lifecycle units;
-2. the versioned registry at `/etc/seter/workspaces.json`;
+2. the version-7 registry at `/etc/seter/workspaces.json`;
 3. a trusted default-profile Runner at `/etc/seter/runners/<workspace>`.
 
 There is no public workspace constructor, project Runner installable, or `seter update` path. Repository code is not evaluated while building the Runner.
@@ -27,6 +27,11 @@ The generated guest module also asserts the effective microVM interface, network
 Before every cold start, `seter` parses the bounded regular-file manifest without executing Runner code and compares it with the root-owned registry. A mismatch fails before systemd starts the VM. This check performs no Nix evaluation or build.
 
 The manifest is consistency metadata, not cryptographic attestation. Host-owned TAP, nftables, resource controls, and lifecycle privilege separation remain authoritative.
+
+Repository collection and default-selection changes belong to the lifecycle
+registry, not the Runner identity manifest. They do not inherently require new
+VM identity or storage. The manifest remains version 3; the lifecycle registry
+uses version 7. See [multi-repository workspaces](./multi-repository-workspaces.md).
 
 ## Deployment and rooting
 

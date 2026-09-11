@@ -44,7 +44,7 @@ Map the guest's environment variables to secret names in the same registry entry
 
 ```nix
 seter.host.workspaces.project = {
-  # repository, identity, and resource fields omitted here
+  # repositories, identity, and resource fields omitted here
 
   secrets.githubToken = {
     placeholder = "seter-placeholder-github-0123456789abcdef";
@@ -74,15 +74,24 @@ A secret source must produce an ASCII value between 8 bytes and 16 KiB after rem
 
 The source file may be supplied by sops-nix, agenix, or another host secret manager. Seter consumes only its runtime path and does not require a particular manager.
 
-When a secret is selected by `repository.credential`, its runtime value is the
+When a secret is selected by `repositories.<name>.credential`, its runtime value is the
 complete HTTP Authorization field value, such as `Bearer <token>` or
 `Basic <base64-user-and-token>`. `seter init` writes only
 `Authorization: <placeholder>` to the checkout's local Git configuration. In
 addition to the normal secret rules below, the proxy limits that binding to
-the repository URL's exact host
+an explicitly associated repository URL's exact host
 and path plus the `info/refs`, `git-upload-pack`, and `git-receive-pack`
-smart-HTTP endpoints. A sibling repository, traversal-like subpath, or other
+smart-HTTP endpoints. An unassociated sibling repository, traversal-like subpath, or other
 endpoint on the same host cannot receive the credential.
+
+Named repository credentials require `repositoryOnly = true` on the secret.
+This preserves path-only authority even after the final repository association
+is removed. Generic API secrets default to `false`; legacy singular
+`repository` input remains compatible, but should be migrated with this flag.
+A binding shared by several repositories authorizes only their explicitly
+associated host/path pairs. All code in the workspace can exercise this union
+of authority; repository selection in the CLI does not narrow it. See
+[multi-repository workspaces](./multi-repository-workspaces.md).
 
 `LoadCredential=` is a start-time snapshot. Restart the proxy after rotation. For sops-nix:
 
@@ -97,11 +106,12 @@ For another manager, arrange the equivalent restart only after the new source fi
 A request is eligible for injection only when all of the following hold:
 
 - the source address belongs to the workspace that owns the binding;
-- the destination is in that workspace's intercepted `egress.httpHosts`;
+- the destination is in that workspace's intercepted HTTP hosts (including
+  automatically granted repository hosts);
 - the request uses HTTPS;
 - TLS SNI and HTTP authority match;
 - the secret is bound to that exact normalized hostname;
-- for a repository credential, the request path is the exact approved
+- for a repository credential, the request path is an explicitly associated
   repository path or one of its three supported smart-HTTP endpoints;
 - the placeholder occurs in one of the secret's configured header values; and
 - normal public-address pinning succeeds.
