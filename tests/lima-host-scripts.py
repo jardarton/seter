@@ -136,7 +136,15 @@ class LimaHelpers(unittest.TestCase):
         self.assertEqual(state["OPTIONS"], "rw,relatime")
         self.run_helper(EXCHANGE)
 
-    def test_mount_rejects_missing_or_invalid_tag(self):
+    def test_activation_recovers_missing_mount(self):
+        self.run_helper(EXCHANGE)
+        # Simulate activation removing the mount while the oneshot remains
+        # active-exited. The activation restart must run the helper again.
+        self.state.write_text(json.dumps({"mounted": False}))
+        self.run_helper(EXCHANGE)
+        self.assertTrue(json.loads(self.state.read_text())["mounted"])
+
+    def test_mount_rejects_invalid_cidata(self):
         for tag in (None, "../bad", "bad;command"):
             with self.subTest(tag=tag):
                 data = "mounts: []\n" if tag is None else (

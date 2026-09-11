@@ -127,6 +127,14 @@ in
   # switch removes the generated mount unit as obsolete. Re-establish the one
   # explicit exchange mount from the immutable cidata description so policy
   # review continues to edit the consumer-owned file after deployment.
+  # switch-to-configuration consumes this restart request after obsolete
+  # generated mount units have been stopped. Starting an active oneshot is
+  # insufficient; explicitly restart it on every switch, even unchanged ones.
+  system.activationScripts.seterLimaExchange.text = ''
+    mkdir -p /run/nixos
+    echo seter-lima-exchange.service >> /run/nixos/activation-restart-list
+  '';
+
   systemd.services.seter-lima-exchange = {
     description = "Mount the Lima Client Exchange Directory";
     requires = [ "lima-init.service" ];

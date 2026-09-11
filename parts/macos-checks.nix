@@ -31,6 +31,34 @@ in
         nativeLimaHost.config.systemd.services.seter-lima-bootstrap-key.serviceConfig.ExecStart;
     in
     lib.optionalAttrs (system == "x86_64-linux") {
+      checks.macos-exchange-activation = pkgs.testers.runNixOSTest {
+        name = "seter-exchange-activation";
+        nodes.machine = {
+          system.switch.enable = true;
+          system.activationScripts.seterLimaExchange =
+            nativeLimaHost.config.system.activationScripts.seterLimaExchange;
+          systemd.services.seter-lima-exchange = {
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+            };
+            # Synthetic mount state: helper parsing and mount validation are
+            # exercised separately by lima-host-scripts.py.
+            script = "touch /run/synthetic-exchange-mounted";
+          };
+        };
+        testScript = ''
+          machine.start()
+          machine.wait_for_unit("seter-lima-exchange.service")
+          for _ in range(2):
+              machine.succeed("rm /run/synthetic-exchange-mounted")
+              machine.succeed("systemctl is-active seter-lima-exchange.service")
+              machine.succeed("/run/current-system/bin/switch-to-configuration test")
+              machine.succeed("test -f /run/synthetic-exchange-mounted")
+        '';
+      };
+
       checks.macos-lima-host = pkgs.runCommand "seter-macos-lima-host-check" { } ''
         test ${lib.escapeShellArg limaHost.config.seter.host.runner.hypervisor} = qemu
         test ${lib.escapeShellArg limaHost.config.fileSystems."/".device} = /dev/disk/by-label/nixos
@@ -43,6 +71,7 @@ in
         test ${lib.escapeShellArg (builtins.unsafeDiscardStringContext limaHost.config.system.activationScripts.seterLimaAuthorizedKeysDirectory.text)} != ""
         test ${lib.escapeShellArg limaHost.config.systemd.services.seter-lima-bootstrap-key.serviceConfig.Type} = oneshot
         test ${lib.escapeShellArg limaHost.config.systemd.services.seter-lima-exchange.serviceConfig.Type} = oneshot
+        test ${lib.escapeShellArg (lib.hasInfix "echo seter-lima-exchange.service >> /run/nixos/activation-restart-list" limaHost.config.system.activationScripts.seterLimaExchange.text)} = 1
         test ${lib.escapeShellArg (builtins.elem "multi-user.target" limaHost.config.systemd.services.seter-lima-exchange.wantedBy)} = 1
         grep -F '/workspace/seter-exchange' ${exchangeScript}
         grep -F 'mount -t virtiofs -o rw' ${exchangeScript}
