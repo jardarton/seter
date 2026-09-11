@@ -1,5 +1,16 @@
 # Agent instructions
 
+## Public documentation and test data
+
+Keep only general product guidance, architectural decisions, and sanitized
+validation outcomes. Raw investigation logs and consumer configurations belong
+outside the repository. Do not commit actual host/user names, IP/MAC addresses,
+private paths, disk UUIDs, mount tags, key material, certificates, fingerprints,
+or machine inventories from test environments. The only tested-machine
+description retained publicly is **M5 Mac**. Clearly synthetic examples, product
+defaults, upstream/project URLs, and deliberate test fixtures are not live
+machine evidence.
+
 ## Project context
 
 `CONTEXT.md` contains project domain terminology,

@@ -1,0 +1,56 @@
+# Seter Host bootstrap template for supported Apple Silicon Macs.
+#
+# The image URL and SHA-512 digest are immutable inputs. Change them only in a
+# reviewed update that boots and redeploys successfully on supported hardware.
+images:
+  - location: "https://github.com/nixos-lima/nixos-lima/releases/download/v0.2.1/nixos-lima-v0.2.1-aarch64.qcow2"
+    arch: "aarch64"
+    digest: "sha512:748c723b69dbdec40a9acaf78cc9070ae784dcb64b0856ab906efdac822d9abcc65565b8f8dfa4cf8b49cc6c12c372072e83bb5ed9247330a7c22675d9e141ce"
+
+vmType: "vz"
+arch: "aarch64"
+nestedVirtualization: true
+
+# Operators may override these documented defaults with limactl's --cpus,
+# --memory, and --disk flags (the checked-in wrapper exposes environment knobs).
+cpus: 8
+memory: "16GiB"
+disk: "120GiB"
+
+mountType: "virtiofs"
+mounts:
+  # scripts/macos-host requires this parameter. No home-directory mount is
+  # enabled implicitly or as a fallback.
+  - location: "{{.Param.exchangeDir}}"
+    mountPoint: "/workspace/seter-exchange"
+    writable: true
+
+ssh:
+  # Agent forwarding is enabled per explicit operator connection. Disabling
+  # Lima's instance-wide forwarding avoids a persistent guest-side socket.
+  forwardAgent: false
+
+containerd:
+  system: false
+  user: false
+
+hostResolver:
+  enabled: true
+  ipv6: false
+
+propagateProxyEnv: false
+
+portForwards:
+  # Do not let Lima intercept the guest DHCP client traffic.
+  - proto: udp
+    guestPort: 68
+    guestIP: "0.0.0.0"
+    ignore: true
+
+param:
+  # The wrapper always overrides exchangeDir and rejects an absent directory.
+  exchangeDir: "/tmp/seter-exchange-not-configured"
+
+message: |
+  The bootstrap Seter Host is running. Deploy a consumer configuration with:
+    scripts/macos-host deploy /absolute/path/to/consumer-flake

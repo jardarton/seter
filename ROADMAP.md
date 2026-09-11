@@ -23,13 +23,15 @@ The existing implementation provides substantial machinery worth preserving and 
 - strict SSH client behavior;
 - Nix evaluation checks, adversarial network tests, and nested-KVM lifecycle coverage.
 
-This proves an early security vertical slice, not a usable project onboarding workflow. No real project has yet been initialized or used by the intended user.
+The implementation now includes repository bootstrap and daily lifecycle use.
+Component and manual integration results do not replace the complete product
+scenario and private real-project trial required below.
 
 ## First usable milestone
 
 ### 1. Replace the workspace and Runner model
 
-**Status: implemented.** The trusted registry, default-profile host deployment, closure rooting, version 5 lifecycle projection, and no-evaluation cold-start path are covered by evaluation and KVM checks.
+**Status: implemented.** The trusted registry, default-profile host deployment, closure rooting, versioned lifecycle projection, and no-evaluation cold-start path are covered by evaluation and KVM checks.
 
 - Remove the compatibility `mkWorkspace` path and project-installable-based default workflow.
 - Define one trusted Workspace Registry schema containing:
@@ -177,7 +179,7 @@ After automated success, perform a private real-project trial involving normal d
 
 ## Explicitly deferred
 
-- macOS/Lima and nested host deployment (see the separate [macOS integration roadmap](./macos-roadmap.md));
+- macOS acceptance is tracked separately in the [macOS integration roadmap](./macos-roadmap.md);
 - Docker and additional public Guest Profiles;
 - arbitrary project-owned NixOS modules or a specialized capability schema;
 - multi-repository workspaces;

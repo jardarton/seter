@@ -43,7 +43,7 @@ The privileged operation must:
 5. construct the fixed systemd unit name itself; and
 6. invoke systemd without a shell.
 
-Checks performed before elevation are never treated as authorization. The generated systemd service launches `microvm-run` and `microvm-shutdown` as the workspace's dedicated `seter-*` account. Root authorizes orchestration but does not execute project runner code.
+Checks performed before elevation are never treated as authorization. The generated systemd service launches `microvm-run` as the workspace's dedicated `seter-*` account. Cloud Hypervisor shutdown uses the Runner's `microvm-shutdown`; QEMU shutdown uses the Runner's private QMP socket to request `system_powerdown` and waits for the VMM to exit. Root authorizes orchestration but does not execute project runner code.
 
 ## Scope
 
@@ -55,4 +55,4 @@ These commands remain unprivileged:
 - `seter shell`
 - `seter run`
 
-There is no CLI Runner-install privilege. Before each cold start, the privileged path parses the deployed Runner's bounded regular-file identity manifest and compares it with the root-owned registry without executing Runner code or evaluating Nix. The manifest is consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` separately elevates offline access to the host-owned Project Volume. That operation is not included in the lifecycle operator group's passwordless start/stop grant.
+There is no CLI Runner-install privilege. Before each cold start, the privileged path parses the deployed Runner's bounded regular-file identity manifest and compares it with the root-owned registry without executing Runner code or evaluating Nix. The manifest is consistency metadata, not attestation; host-side isolation does not trust it. `seter ssh-host-key` reads the Host-published public key without elevating or mounting the Project Volume; the private identity remains in root-owned Host state.

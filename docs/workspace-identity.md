@@ -5,21 +5,21 @@ The trusted `seter.host.workspaces` option is the single Workspace Registry sche
 The host module derives three artifacts from the same evaluated entry:
 
 1. host enforcement and lifecycle units;
-2. registry version 5 at `/etc/seter/workspaces.json`;
+2. the versioned registry at `/etc/seter/workspaces.json`;
 3. a trusted default-profile Runner at `/etc/seter/runners/<workspace>`.
 
 There is no public workspace constructor, project Runner installable, or `seter update` path. Repository code is not evaluated while building the Runner.
 
 ## Runner identity manifest
 
-Each Runner contains a regular immutable `share/seter/identity.json` file. Registry version 5 requires Runner identity version 2 and records the same expected manifest. It covers:
+Each Runner contains a regular immutable `share/seter/identity.json` file. The registry records the expected manifest and its schema version; the CLI rejects unsupported versions. It covers:
 
 - workspace name and hostname;
 - IPv4 address, MAC address, TAP, gateway, and prefix;
 - explicit proxy URL;
 - SSH user;
 - selected Guest Profile;
-- guest memory;
+- guest memory and vCPU count;
 - Project, Home, and private Nix-store volume names and capacities.
 
 The generated guest module also asserts the effective microVM interface, networkd wiring, proxy variables, project and Nix-store volumes, writable-store overlay, Nix safety settings, SSH service, public proxy CA, and non-secret placeholders. This catches accidental lower-level drift during trusted evaluation.

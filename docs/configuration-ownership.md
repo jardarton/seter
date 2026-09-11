@@ -1,6 +1,6 @@
 # Configuration ownership
 
-**Status:** the trusted `default` Guest Profile and host-deployed Runner path are implemented. Workspace Bootstrap is not yet implemented, and the future specialized-workload model remains unresolved.
+**Status:** the trusted `default` Guest Profile, host-deployed Runner path, and Workspace Bootstrap are implemented. The future specialized-workload model remains unresolved.
 
 Seter separates configuration by authority. A repository's development environment is not the same thing as the host policy that contains it or the guest operating system that runs it.
 

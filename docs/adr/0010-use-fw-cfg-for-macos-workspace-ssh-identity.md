@@ -1,0 +1,3 @@
+# Use fw_cfg for the macOS Workspace SSH Identity
+
+The QEMU-based macOS Runner delivers the Host-created Workspace SSH Identity through QEMU `fw_cfg` as a systemd boot credential, then a required guest service stages it root-only in `/run` before OpenSSH starts. The identity virtiofs device caused excessive startup latency on the tested nested ARM device path; fw_cfg avoids that share and its associated PCI/shared-memory configuration. Credential bytes stay out of the Nix store and command line, and the unprivileged Workspace user cannot read the raw or staged key. The native-Linux Cloud Hypervisor path retains its existing read-only virtiofs transport. See the [boundary review](../macos-qemu-equivalence.md) for the trade-offs.

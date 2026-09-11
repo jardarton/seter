@@ -1,145 +1,105 @@
-# Seter - Project VMs — Isolated, Nix-Managed Development Environments
+# Seter architecture and threat model
 
-## Intention
+Seter limits development workloads to one Workspace: one approved repository,
+its persistent state, and explicitly granted authority. It aims to contain a
+compromised dependency, hostile repository, or misbehaving coding agent without
+requiring ordinary repositories to define their own guest operating system.
 
-Run every development project inside its own on-demand Linux micro-VM, defined and managed entirely with Nix, from both native NixOS Seter Hosts and macOS Clients. Each VM is a hard isolation boundary with controlled network egress, no direct access to secrets, and explicit, minimal bridges back to the Seter Host. The same workspace serves command execution and interactive development. Both modes use the workspace's persistent working tree and caches, start the VM when needed, and leave it running until an explicit shutdown.
+See the [README](./README.md) for current interfaces and the
+[roadmap](./ROADMAP.md) for remaining product acceptance. This document describes
+the implemented boundary, not speculative transparent macOS or multi-repository
+features.
 
-## Motivation
+## Trusted control plane
 
-Modern development runs large amounts of code the developer never reviews: dependency install scripts, build plugins, and increasingly, code written and executed by AI agents. That code typically runs with the developer's full user privileges — able to read SSH keys, cloud credentials, browser data, and every other project on the machine, and to send anything it finds anywhere on the internet.
+The NixOS Seter Host owns the Workspace Registry, Guest Profile, network policy,
+credentials, storage, and lifecycle units. Trusted deployment builds and roots
+an immutable Runner for every registered Workspace. Project code enters later
+through HTTPS Workspace Bootstrap; it is not evaluated during Host deployment.
 
-The goal of this project is to limit the blast radius of a compromised dependency, a malicious repo, or a misbehaving agent to the single project it runs in:
+Cold starts validate the deployed identity manifest and start that Runner
+without evaluating Nix. A narrow privileged CLI operation reloads Host-owned
+state and controls a fixed unit; the VMM executes as a dedicated unprivileged
+account with cgroup, device, and filesystem restrictions.
 
-- **Isolation by default.** A project VM can see its own working tree and its own persistent state. Nothing else.
-- **No real secrets provisioned to the guest.** Credentials are injected at the network edge by the host, bound to specific destinations. Guests are configured with placeholders, and exact reflected credential values are redacted from responses. The authorized service remains trusted not to transform or deliberately disclose the credential.
-- **Egress is allowlisted, per project.** Code in a VM can reach the hosts its project legitimately needs, and nothing else. All traffic is observable.
-- **Nix everywhere.** Guest images, dev environments, network policy, and secret bindings are all declarative, reproducible, and reviewed in version control. Dependency management inside the VMs is plain Nix flakes with direnv, same as on a bare host.
-- **Cheap enough to actually use.** VMs boot in seconds by sharing the host Nix store, so isolation does not compete with convenience.
+Consumer configuration owns users, repository sources, resource choices,
+Policy Grants, and runtime secret sources. Repository development flakes and
+`.envrc` files are untrusted workload input. They execute only inside the
+Workspace, with explicit direnv approval. See
+[configuration ownership](./docs/configuration-ownership.md).
 
-Existing tools cover parts of this (micro-VM runners, agent sandboxes with egress control, general-purpose VM managers), but none combine Nix-native guest definitions, per-project network policy with secret injection, host-store sharing, and a uniform experience across native NixOS Seter Hosts and macOS Clients. This project is the glue that combines mature components into that whole.
+## Workspace boundary
 
-## Solution Outline
+- Each Workspace has its own Linux kernel and KVM VM.
+- Root is ephemeral. Separate Project, Home, and private Nix-store volumes
+  retain working data, user configuration, and dependencies respectively.
+- The lower store is an immutable EROFS image of the Runner's closure, not an
+  ambient Host `/nix/store` export. Guest builds write only to the private
+  upper store and their traffic crosses Workspace policy.
+- No Host home, browser data, operator keys, SSH agent, X11 session, or other
+  Workspace state is shared ambiently.
+- The Host creates the Workspace SSH Identity. Client connections verify it
+  strictly rather than trusting the first network-provided key.
 
-### Layers
+`init`, `shell`, and `run` leave the Workspace running. `down` requests graceful
+shutdown and waits for VMM exit, with bounded forced termination as a fallback.
+Reset requires a stopped Workspace and can replace Home/private Store, never
+Project data. Retirement retains Project data; destruction is separate and
+strongly confirmed. See [storage lifecycle](./docs/storage-lifecycle.md).
 
-1. **VM layer** — [microvm.nix](https://github.com/microvm-nix/microvm.nix) with cloud-hypervisor (or QEMU) on NixOS hosts. Trusted Guest Profiles produce NixOS workspace Runners. A workspace-specific read-only Store View containing only its deployed and retained Runner closures is exported through VirtioFS as the lower layer of a private writable overlay, so boot paths are shared while unrelated host-store contents remain hidden and project-controlled builds stay inside the VM.
-2. **Policy layer** — all guest egress is default-denied by nftables on the host bridge and forced through a host-side mitmproxy running a Python policy addon: per-workspace exact or single-label-wildcard Host Patterns, exact-host and exact-path placeholder→real secret injection for bound destinations, SNI passthrough for cert-pinned or bulk hosts, and full request audit logging.
-3. **Host integration layer** — trusted NixOS deployment builds and installs workspace Runners, while the `seter` CLI bootstraps, starts, stops, and executes into VMs; generated host DNS entries; forwarded host-side device daemons (e.g. an adb server) instead of USB passthrough; direnv integration inside the workspace boundary.
+## Network and credential authority
 
-### macOS support via nested virtualization
+Host-owned nftables rules bind each Workspace to its registered TAP, IPv4, and
+MAC identity. Cross-Workspace, ungranted Host/LAN, IPv6, and arbitrary UDP/ICMP
+traffic are denied. A per-Workspace DNS frontend forwards canonical queries
+only for granted names. Intercepted HTTP/HTTPS, TLS passthrough, exact direct
+TCP, and explicit Host service relays have distinct policies.
 
-macOS Clients do not run Workspace micro-VMs directly. Instead, one large, long-lived Seter Host runs as NixOS under Lima using the `vz` backend with `nestedVirtualization: true` (requires Apple Silicon M3 or newer and macOS 15+). Inside it, the exact same stack runs as on native NixOS Seter Hosts: same launcher, same microvm.nix definitions, same proxy, same policy. The Seter Host is pure infrastructure — projects run in inner micro-VMs, working trees live on its disk (never on macOS-shared paths), and it joins the tailnet as a first-class node. This trades a modest nested-virtualization performance cost for having exactly one boot path and one policy implementation across all machines. See the [macOS integration roadmap](./macos-roadmap.md) for the narrower first implementation milestone.
+Consumer-owned Policy Files are reviewed and deployed declaratively.
+Observations never grant authority automatically. Wildcards match one DNS label
+only, exclude the apex, and cannot bind credentials. See the
+[network boundary](./docs/network-boundary.md).
 
-### Configuration ownership
+For configured HTTP credentials, the guest holds a public placeholder. The
+Host proxy loads real values from runtime credentials and substitutes them
+only for the exact destination/header binding over verified HTTPS. Repository
+credentials are additionally restricted to the approved Git smart-HTTP paths.
 
-The initial unit of isolation is a **workspace** containing one repository checkout. Configuration is separated by authority rather than described collectively as a “workspace flake”:
+This keeps credential bytes outside the workload; it does not prevent malicious
+code from exercising granted authority. Exact response redaction is hygiene,
+not protection against a cooperating service encoding or disclosing secrets.
+The shared proxy is trusted and holds the configured credentials for all
+Workspaces. See [secret injection](./docs/secret-injection.md).
 
-- The trusted **Workspace Registry** approves the repository source and defines identity, resources, credential bindings, selected Guest Profile, and effective Policy Grants. Consumer-owned grants live in a dedicated TOML Policy File that trusted Nix configuration merges into the registry.
-- A trusted **Guest Profile** supplies reusable guest operating-system capabilities and Seter's mandatory bootstrap baseline. The first usable milestone provides only a minimal `default` profile.
-- The repository's ordinary development flake defines its development shell and dependencies; it executes only after checkout and explicit direnv approval.
+## macOS deployment
 
-Ordinary repositories need no Seter-specific NixOS configuration. Specialized guest composition is deferred: arbitrary repository-owned NixOS modules cannot truthfully be constrained to “extension only,” so future work must choose between restricted capability requests, trusted custom profiles, and an explicitly untrusted advanced runner path. See [Configuration ownership](./docs/configuration-ownership.md) for the trust boundaries and current implementation status.
+On macOS, a trusted aarch64-linux Seter Host runs under Lima/vz; Workspaces run
+inside it through nested QEMU/KVM. The validated path uses Linux 6.12 LTS in
+both Linux layers and fw_cfg/systemd credentials for Workspace SSH Identity.
+Native Linux retains Cloud Hypervisor as its default.
 
-## How the Finished Project Works
+The only Client share is an explicitly selected exchange directory available
+to the Host, never the Workspace. All Workspace volumes live on the Host's
+retained virtual disk. Operators enter the Host explicitly; attended agent
+forwarding stops there. Client service access uses explicit loopback tunnels,
+subject to the Workspace firewall. No tailnet, remote builder, automatic
+launcher, or transparent routing is required. See
+[macOS deployment](./docs/macos-deployment.md).
 
-### VM lifecycle
+## Limits
 
-- Trusted NixOS host deployment builds, installs, and roots each workspace Runner from its selected Guest Profile and registered identity. Project code is not part of the Runner.
-- `seter init <name>` — requires the deployed Runner, creates the host-owned Workspace SSH Identity, starts the VM, and safely bootstraps the approved HTTPS repository into `/project/<repository>`. It never evaluates `.envrc` and leaves the VM running.
-- `seter up <name>` — starts the deployed Runner through a fixed, host-declared per-workspace systemd unit with `MemoryMax`/`CPUQuota` from the registry. Runner code executes as the dedicated workspace account, never as root.
-- `seter run <name> -- <cmd>` — starts the deployed Runner when needed, waits for strictly verified SSH, runs the command from the registered repository checkout through direnv, and propagates its exit code. It preserves working-tree and cache changes and leaves the VM running until an explicit `seter down`.
-- `seter down <name>` — asks the matching Runner to send an ACPI power-button event, then lets the fixed systemd unit terminate the VMM after a timeout as the hammer.
-- `seter shell <name>` and `seter run <name> -- <cmd>` start the workspace when needed and leave it running until explicit shutdown.
-- `seter ls`, `seter status`, `seter ip`, and `seter gc` provide inspection and non-working-tree cleanup.
-- Cold starts never evaluate Nix. Guest Profile and identity changes arrive through trusted host deployment; repository environment changes are built inside the guest.
-- On a macOS Client, the finished launcher transparently starts the Seter Host if needed and proxies commands into it.
-
-Starting and stopping host system units requires authorization, but project code must not run as host root. On NixOS, an explicit Seter operator group receives passwordless sudo permission only for exact hidden lifecycle and workspace-scoped observation commands generated for registered workspaces. The privileged half reloads host-owned state and constructs fixed unit names itself; it does not accept arbitrary units or commands. Runner installation belongs to trusted NixOS deployment rather than a privileged CLI operation.
-
-### Filesystem
-
-- **Root:** ephemeral tmpfs. Every boot is clean; VM state cannot rot.
-- **`/nix/store`:** an overlay whose lower layer is a workspace-specific, read-only Store View of its deployed and retained Runner closures and whose persistent upper layer is a bounded workspace-private ext4 image. Runner closures are shared without duplication; unrelated host-store paths are absent, while project paths are built or substituted by the guest Nix daemon into its private layer, keeping project-controlled derivations and fetch traffic inside the VM boundary. See [Host-store visibility](./docs/store-visibility.md). The same image retains `/nix/var/nix`, so registrations survive the tmpfs-root reboot. Host runner-history roots and matching guest closure roots keep prior generations available for upgrades and rollbacks. Guest store GC is disabled because stock Nix scans the merged lower namespace and would persist whiteouts for unrelated host paths; reclaiming private capacity currently replaces the image as a dependency cache.
-- **Project Volume:** a persistent block-device-backed volume containing the single approved checkout under `/project/<repository>`. Reset and garbage collection never remove it.
-- **Home Volume:** a separate persistent workspace-private user home containing shell history, editor state, direnv approvals, configuration, and non-Nix caches. It is resettable and never shares the host home.
-- **Private Nix-store volume:** the persistent writable store overlay and guest Nix database described above. Replacing it is the supported reclamation mechanism.
-- `seter reset` can replace Home, private Nix-store state, or both while the workspace is stopped; even `--all-state` excludes the Project Volume. See [Workspace storage lifecycle](./docs/storage-lifecycle.md).
-- **No host home mounts, no broad host shares.** Working trees are cloned into the VM from the approved HTTPS remote. File movement between host and guest is deliberate (scp/git), not ambient.
-- **GC safety:** current and historical per-project runner roots prevent host garbage collection from removing lower-store closures still registered by the persistent guest Nix database; matching guest roots retain prior boot closures, while guest store GC is disabled to avoid whiteouts elsewhere in the merged lower namespace.
-
-### Networking
-
-- Each host runs a bridge (e.g. `10.100.0.0/24`); every project has a **static IP and hostname from the registry**, rendered into host DNS (`<name>.vm`) so "reachable from host" means "reachable by name."
-- **Inbound (host → guest):** direct to the VM IP — no per-port forwarding. Services, dev web servers, and Docker-published ports inside a VM are simply addressable.
-- **Outbound (guest → world):** default-deny in nftables on the bridge. Allowed: policy-matched IPv4 DNS through a host resolver, and traffic redirected (transparent DNAT of TCP ports 80/443) into mitmproxy. Exact names and explicit leading wildcards are supported for intercepted HTTP and TLS passthrough; a wildcard matches one subordinate label only, excludes its apex, and is rejected at public or shared-hosting suffix boundaries. Explicit `HTTP(S)_PROXY` env vars are additionally set in guests as a convenience; **transparent redirection is the enforcement**, so software ignoring proxy variables is still caught. Other UDP, including QUIC, remains blocked.
-- **Non-HTTP egress** (ssh to the git remote, databases): explicit per-destination nftables allow rules from the registry. Nothing else passes.
-
-### Tailscale
-
-- **Seter Hosts are tailnet nodes.** Every native NixOS Seter Host — and the NixOS Seter Host serving a macOS Client — runs tailscaled and is a first-class node. This is also how a macOS Client reaches its own Workspaces in the simplest configuration.
-- **Exposing guest services to the tailnet** goes via the host, with two tiers:
-  - `tailscale serve` proxying to `vm-ip:port` — named, TLS-terminated, per-service, and the tighter default.
-  - Advertising the VM bridge subnet as a subnet route — zero per-service configuration, direct addressing of all VMs, gated only by tailnet ACLs. Use deliberately: it exposes the whole bridge to whatever the ACLs permit.
-- **Per-VM tailnet identity** is available when a workspace genuinely needs it: run tailscaled inside that guest with an ephemeral, tagged node key, and scope its access with tag-based ACLs. Ephemeral keys mean discarded VMs clean up after themselves.
-- **Remote builds ride the tailnet:** a Seter Host serving a macOS Client uses native NixOS machines as remote builders over Tailscale, and a tailnet-reachable binary cache can substitute builds for all hosts.
-
-### Proxy and secrets
-
-- One mitmproxy instance per host, as a NixOS systemd service, with a Python addon configured by a Nix-rendered `policy.json` (project IPs, allowlists, and secret bindings). Real values are staged privately at service start from consumer-managed agenix/sops-nix paths with systemd credentials — **secrets never enter the Nix store, process arguments, or environment variables**.
-- Guests receive placeholder values (`TOKEN=placeholder-…`); the addon rewrites them to real credentials only when the destination host matches that secret's binding. A leaked placeholder is worthless.
-- Exact credential values reflected in response headers or decoded bodies are changed back to placeholders. This prevents straightforward reflection, not deliberate disclosure through transformed values or credential-derived information; bound services and least-privilege credential scopes remain part of the security boundary.
-- Denials return a synthesized 403 with a human-readable reason — failures in guests are self-explanatory, not mysterious timeouts.
-- **SNI passthrough** (no decryption, still allowlisted) for cert-pinned tooling and bulk endpoints such as container registries and `cache.nixos.org`. The initial mitmproxy implementation avoids TLS and HTTP processing but still relays encrypted bytes in userspace; a dedicated stream engine remains an optimization if that path becomes a bottleneck.
-- Every request is logged with workspace, method, host, and path. `seter audit` will summarize workspace-scoped observations, while `seter policy review` will turn only explicitly approved observations into edits to a consumer-owned declarative Policy File; deployment remains a separate trusted NixOS operation. See [Policy observation and review](./docs/policy-workflow.md).
-- The proxy CA certificate is generated once per site, kept host-side, and baked into guest images declaratively (`security.pki.certificates`); tools with private trust stores are fixed case by case or routed via passthrough.
-- The `policy.json` schema is the **stable contract**: the enforcement engine (mitmproxy today) can be replaced later without touching flakes, images, or nftables.
-
-### Devices
-
-- No USB passthrough. Host-side daemons are forwarded as sockets: the adb server runs on the physical host (where the USB is) and guests use `ADB_SERVER_SOCKET=tcp:<host>:5037`. The pattern generalizes to any device with a host daemon, and works identically through the macOS nesting layers.
-
-### direnv
-
-- **Inside the guest:** standard `use flake`. Persistent workspace state keeps direnv approval and nix-direnv caches. The first activation builds or substitutes project dependencies into the workspace-private store; later activation reuses that persistent cache.
-- **On the host:** the same `.envrc` detects the side of the boundary (marker file `/etc/vm-guest` baked into images) and, on the host, exports control-plane variables instead: `VM_IP`, `DOCKER_HOST=ssh://dev@<vm-ip>` (host Docker CLI drives the daemon **inside** the VM), service URLs. It prints VM status but **never** starts VMs as a side effect of `cd`.
-
-### Multi-repo workspaces
-
-For split or dependent repositories that are developed together, one workspace VM hosts several repos:
-
-- **Layout:** `/project/{repo-a,repo-b,repo-c}`, each cloned from the git remote into the persistent volume. The workspace flake declares the member repos; `vm init` (or first boot) clones any that are missing, after which git owns the working trees.
-- **Per-repo direnv still applies:** each repo keeps its own `.envrc`/`use flake` exactly as if standalone. Repos don't need to know they're co-tenants, and the same repo can be a member of other workspaces without modification. The launcher pre-builds all member devShells and registers a GC root per repo under the workspace's name.
-- **Dependent development is the point:** path-based references between repos (local package links, flake inputs overridden to `path:../repo-b`), and compose setups spanning services from several repos, work naturally because the trees share one filesystem — the thing separate VMs would make painful.
-- **Shared fate is the trade:** co-tenant repos share the VM's blast radius — a compromised dependency in one can touch the others' trees and use the workspace's credentials. That is acceptable precisely when repos are genuinely coupled (they share fate at integration time anyway). Keep workspaces cohesive: repos that merely happen to share an owner do not belong in one VM for convenience.
-- **Registry impact:** still one entry — the workspace's egress allowlist and secret bindings are the union of what its member repos need.
-
-### What the system deliberately does not do
-
-- No ambient sharing of the host home directory, host credentials, or host dotfiles into guests.
-- No real secrets in guest filesystems, env vars, or images — placeholders only.
-- No user-mode/slirp networking and no per-port forward configuration — routable per-VM IPs instead.
-- No writable host-store share and no guest build access to the physical host's Nix daemon. Each workspace instead has a private writable overlay above the shared read-only host store.
-- No auto-start of VMs from shell hooks; lifecycle is explicit.
-- No always-on Workspace VMs; the fleet's idle cost is near zero (a Seter Host serving a macOS Client being the accepted exception).
-- No in-guest hardening layers (gVisor, AppArmor profiles, etc.) — the VM boundary is the security boundary; further layers add friction without addressing a realistic residual threat.
-- No pretense of containing a motivated attacker holding a VM-escape zero-day: the design targets malicious dependencies, hostile repos, and misbehaving agents. Host kernel and VMM stay updated; known-hostile samples still don't get run intentionally.
-
-## Known Limitations
-
-- **macOS requires M3+ and macOS 15+** for nested virtualization; older Apple Silicon has no viable path in this design.
-- Nested virtualization taxes I/O-heavy workloads (container builds) more than CPU-bound ones; a Seter Host serving a macOS Client also holds a standing resource reservation.
-- TLS interception produces a recurring trickle of per-tool trust-store fixes; passthrough is the escape hatch.
-- The placeholder mechanism covers HTTP(S) only; non-HTTP credentials need other handling (see below).
-- Response redaction recognizes exact credential values, not encoded, split, transformed, or indirect disclosures by an authorized service. Guests are not provisioned credentials, but bound services remain trusted and credentials must be narrowly scoped.
-- mitmproxy is a userspace Python proxy — adequate for API/package traffic, not for sustained bulk transfers (mitigated by passthrough).
-- Subnet-routing the bridge to the tailnet exposes all VMs to whatever the ACLs permit; `tailscale serve` per service is the tighter alternative.
-- Snapshot/resume of running VMs is not a goal; fast clean boots plus persistent volumes replace it.
-
-## Future Improvements
-
-- **Per-project SSH deploy keys.** Replace agent forwarding with per-project keys scoped in the git server to that project's repositories, so a compromised VM can at most damage its own project's history.
-- **Infra-repo protection.** The registry is the root of trust: require signed commits, never run agents against the infra repo from inside an environment it configures, and have the proxy log a policy diff summary whenever `policy.json` changes so silent widening is visible.
-- **Guest-output hygiene.** Sanitize terminal escape sequences where guest output crosses to the host; keep deliberate conventions for clipboard and file movement.
-- **Tighter egress tiers for agent workloads.** Agent-heavy projects get a stricter registry tier (package registries and the LLM API endpoint only), since agents are the workload most likely to attempt unexpected destinations.
-- **Persistent-volume snapshots.** Nightly host-side btrfs/zfs snapshots or restic backups of the per-project volumes — outside the guests' reach — so even "the agent trashed its own /home" is a rollback.
-- **Engine swap behind the policy contract.** If profiling ever shows the proxy hot on a critical path beyond what passthrough fixes, reimplement the same `policy.json` semantics on a faster engine (Go/Envoy) without touching the rest of the system.
+- Compromised code can read, corrupt, or delete its own Project and Home data,
+  and can exfiltrate through or misuse already-granted services.
+- The Host kernel, VMM, Nix supply chain, and policy services remain trusted.
+  Deliberate containment of VM-escape exploits is outside the threat model.
+- Persistent guest state may remain compromised after a clean-root reboot;
+  reset does not inspect or repair the Project Volume.
+- Guest output still reaches the operator's terminal. VM isolation is not
+  comprehensive terminal-output sanitization or malware detection.
+- Fixed guest volumes and cgroups bound individual resources, but Host capacity
+  planning, updates, backups, and credential rotation remain operator duties.
+- TLS interception needs application trust-store integration; passthrough is
+  destination-checked but opaque. Non-HTTP credential brokering is not provided.
+- Broad macOS hardware coverage, unattended identity, automatic Host/tunnel
+  management, multi-repository Workspaces, and additional Guest Profiles remain
+  outside the current supported workflow.

@@ -30,11 +30,14 @@ Seter gives every project a **workspace**: a micro-VM that holds one repository 
 
 Seter is early software, and it is usable today on NixOS with KVM.
 
-Working now: trusted host deployment, per-workspace micro-VMs, safe and retryable repository bootstrap over authenticated HTTPS, the complete network boundary, destination-bound secret injection, strict SSH host-key checking, persistent storage, and the daily `init` / `shell` / `run` / `down` cycle. An ordinary development flake runs inside a workspace.
+Working now: trusted host deployment, per-workspace micro-VMs, safe and retryable repository bootstrap over authenticated HTTPS, the complete network boundary, destination-bound secret injection, strict SSH host-key checking, persistent storage, and the daily `init` / `shell` / `run` / `down` cycle. An ordinary development flake runs inside a workspace. Manual macOS deployment and operator use have been validated on an M5 Mac; the [validation summary](./docs/macos-validation.md) distinguishes that coverage from remaining complete-workflow and operability gates.
 
-Not there yet: macOS support ([roadmap](./macos-roadmap.md)), guest profiles other than `default`, IPv6, and automated repository credentials. Option names and the registry schema can still change between versions.
+Not there yet: a native macOS CLI, automatic Lima or tunnel management ([roadmap](./macos-roadmap.md)), guest profiles other than `default`, IPv6, and automated repository credentials. Option names and the registry schema can still change between versions.
 
 Start with the [quickstart](./quickstart.md) to configure a host and launch your first workspace. See [project-description.md](./project-description.md) for the intended architecture and threat model.
+
+For macOS, start with [deployment](./docs/macos-deployment.md), then follow the
+[operator workflow](./docs/macos-workflow.md).
 
 ## How Seter compares
 
@@ -206,7 +209,7 @@ Reference documentation:
 
 ## VM lifecycle
 
-The host declares an on-demand `seter-vm-<workspace>.service`. The CLI controls that fixed unit rather than executing a VMM itself. Starting it brings up `seter-runtime-<workspace>.target` and launches `microvm-run` from the Runner embedded in the active NixOS generation. Stopping it uses the matching immutable Runner's shutdown helper, with a systemd timeout and forced termination as a fallback, then removes the TAP and identity socket. Project, Home, and private Nix-store volumes are retained.
+The host declares an on-demand `seter-vm-<workspace>.service`. The CLI controls that fixed unit rather than executing a VMM itself. Starting it brings up `seter-runtime-<workspace>.target` and launches `microvm-run` from the Runner embedded in the active NixOS generation. Cloud Hypervisor stops through the matching immutable Runner's shutdown helper; QEMU receives `system_powerdown` through its private QMP socket. The service waits for the VMM to exit, with a systemd timeout and forced termination as a fallback, then removes the TAP and identity socket. Project, Home, and private Nix-store volumes are retained.
 
 `seter status [workspace]` reports `not-deployed`, `stopped`, `starting`, `running`, `stopping`, or `failed`. A stopped single-workspace status exits with code 3 for scripting.
 
@@ -249,6 +252,7 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 - `packages.<system>.seter`: Rust CLI
 - `apps.<system>.default`: Seter CLI application
 - `nixosModules.host`: host-side Seter module
+- `nixosModules.limaHost`: `aarch64-linux` Seter Host integration for the pinned macOS Lima bootstrap
 - `nixosModules.guest`: low-level guest building block used by Seter's trusted profile and standalone verification
 - `nixosConfigurations.minimal`: buildable reference microVM
 - `apps.x86_64-linux.test-minimal`: KVM-backed minimal guest verification
