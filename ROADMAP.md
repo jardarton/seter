@@ -2,7 +2,7 @@
 
 ## Objective
 
-Reach the first genuinely usable Seter milestone: one repository in one trusted-profile workspace on a native NixOS host, suitable for normal development and agent work, with default-deny policy that an operator can review and widen safely.
+Reach the first genuinely usable Seter milestone: one or more repositories in one trusted-profile workspace on a native NixOS host, suitable for normal development and agent work, with default-deny policy that an operator can review and widen safely.
 
 The milestone requires both automated KVM evidence and a private real-project trial. Personal repositories, hosts, policy, credentials, and infra paths never enter this public repository; only generalized defects and testable product behavior do.
 
@@ -35,9 +35,9 @@ scenario and private real-project trial required below.
 
 - Remove the compatibility `mkWorkspace` path and project-installable-based default workflow.
 - Define one trusted Workspace Registry schema containing:
-  - one approved HTTPS repository URL;
-  - optional initial branch;
-  - URL-derived checkout name with optional override;
+  - a nonempty named collection of approved HTTPS repository URLs;
+  - optional initial branch per repository;
+  - key-derived checkout names with optional overrides and an optional default repository;
   - workspace identity and resource limits;
   - selected Guest Profile, initially only `default`;
   - credential bindings and effective Policy Grants;
@@ -93,7 +93,7 @@ Add `seter init <workspace>` with this contract:
 - require the Runner installed by successful host deployment;
 - create missing host identity and persistent volumes;
 - start the workspace and leave it running;
-- clone the single approved repository under `/project/<checkout-name>`;
+- clone all approved repositories (or the selected `--repo`) under `/project/<checkout-name>`;
 - use the remote default branch unless the registry selects one;
 - use an exact-host and exact-repository-path HTTPS credential binding when configured;
 - support read/write Git authority for the approved repository without exposing the credential to the guest;
@@ -182,7 +182,6 @@ After automated success, perform a private real-project trial involving normal d
 - macOS acceptance is tracked separately in the [macOS integration roadmap](./macos-roadmap.md);
 - Docker and additional public Guest Profiles;
 - arbitrary project-owned NixOS modules or a specialized capability schema;
-- multi-repository workspaces;
 - SSH Git transport;
 - wildcard direct TCP;
 - automatic `.envrc` approval;

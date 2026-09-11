@@ -6,7 +6,7 @@ A workspace has three persistent storage classes with different safety contracts
 
 ## Project Volume
 
-The Project Volume contains the approved repository checkout under `/project/<repository>`. It is durable working data and may contain dirty or unpushed changes. Garbage collection and Workspace Reset never remove or recreate it.
+The Project Volume contains all approved repository checkouts under `/project/<checkout-name>`. Capacity is shared by the repositories. It is durable working data and may contain dirty or unpushed changes. Garbage collection and Workspace Reset never remove or recreate it.
 
 Deleting a Project Volume is a separate destructive action with strong confirmation. Workspace Retirement retains it by default.
 
@@ -34,7 +34,7 @@ seter reset <workspace> --all-state
 
 Reset preserves:
 
-- the Project Volume and repository working tree;
+- the Project Volume and all repository working trees;
 - the host-created Workspace SSH Identity;
 - Workspace Registry identity and Policy Grants;
 - the deployed Runner.
@@ -49,4 +49,4 @@ generation roots become unreachable. `seter gc` removes Seter's explicitly
 replaceable host projections and reports retained orphan state. It does not
 remove any workspace volume.
 
-Workspace Retirement stops active use and identifies retained state after registry removal. `seter destroy-project` is a separate, strongly confirmed operation for a still-registered, stopped workspace; it warns that the offline image may contain dirty or unpushed Git state before removing it. Retirement, reset, garbage collection, and destruction are distinct operations.
+Workspace Retirement stops active use and identifies retained state after registry removal. `seter destroy-project` is a separate, strongly confirmed operation for a still-registered, stopped workspace; it warns that the offline image may contain dirty or unpushed Git state before removing it. Destruction removes **every repository checkout** in that workspace, including retained checkouts no longer in the registry. Removing a repository from configuration never deletes its working data. Retirement, reset, garbage collection, and destruction are distinct operations.

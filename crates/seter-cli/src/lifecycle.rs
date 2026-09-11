@@ -14,7 +14,7 @@ use std::{
 use anyhow::{bail, ensure, Context, Result};
 use fs2::FileExt;
 
-use crate::registry::{Registry, RunnerIdentity, Workspace};
+use crate::registry::{Registry, Repository, RunnerIdentity, Workspace};
 
 const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
 const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
@@ -200,9 +200,18 @@ struct UnitState {
     main_pid: u32,
 }
 
-pub fn init(name: &str) -> Result<i32> {
+pub fn init(name: &str, requested: Option<&str>) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
+    let selected: Vec<(&str, &Repository)> = if requested.is_some() {
+        vec![workspace.select_repository(requested)?]
+    } else {
+        workspace
+            .repositories
+            .iter()
+            .map(|(key, repo)| (key.as_str(), repo))
+            .collect()
+    };
 
     ensure!(
         workspace.runner.path.exists(),
@@ -220,30 +229,40 @@ pub fn init(name: &str) -> Result<i32> {
     let known_hosts = temporary_known_hosts(workspace, &host_key)?;
 
     let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
-    let target = format!("/project/{}", workspace.repository.checkout_name);
-    let branch = workspace.repository.branch.as_deref().unwrap_or("");
-    let placeholder = workspace
-        .repository
+    let mut failed = false;
+    for (repository_name, repository) in selected {
+        eprintln!("seter init: {name}/{repository_name}");
+        let status = ssh_command(&known_hosts)
+            .arg(&destination)
+            .arg("--")
+            .arg(bootstrap_remote_command(repository))
+            .status()
+            .context("failed to execute ssh for Workspace Bootstrap")?;
+        if !status.success() {
+            eprintln!(
+                "seter init: {name}/{repository_name} failed (exit {}); retained all working data",
+                status.code().unwrap_or(255)
+            );
+            failed = true;
+        }
+    }
+    Ok(if failed { 1 } else { 0 })
+}
+
+fn bootstrap_remote_command(repository: &Repository) -> String {
+    let placeholder = repository
         .credential
         .as_ref()
         .map(|credential| credential.placeholder.as_str())
         .unwrap_or("");
-    let remote_command = format!(
+    format!(
         "sh -c {} seter-bootstrap {} {} {} {}",
         shell_quote(BOOTSTRAP_SCRIPT),
-        shell_quote(&workspace.repository.url),
-        shell_quote(&target),
-        shell_quote(branch),
+        shell_quote(&repository.url),
+        shell_quote(&checkout_path(repository)),
+        shell_quote(repository.branch.as_deref().unwrap_or("")),
         shell_quote(placeholder),
-    );
-
-    let status = ssh_command(&known_hosts)
-        .arg(&destination)
-        .arg("--")
-        .arg(remote_command)
-        .status()
-        .context("failed to execute ssh for Workspace Bootstrap")?;
-    Ok(status.code().unwrap_or(255))
+    )
 }
 
 pub fn up(name: &str) -> Result<i32> {
@@ -442,7 +461,7 @@ pub fn destroy_project(name: &str, yes: bool) -> Result<i32> {
     let registry = Registry::load_default()?;
     registry.workspace(name)?;
     eprintln!(
-        "WARNING: the Project Volume may contain dirty or unpushed Git work; its offline image cannot be inspected safely."
+        "WARNING: destroying the Project Volume deletes ALL repository checkouts in this workspace and may destroy dirty or unpushed Git work; its offline image cannot be inspected safely."
     );
     eprintln!("This permanently destroys all working data for workspace {name}.");
     if !yes {
@@ -562,9 +581,21 @@ pub fn status(name: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
-pub fn shell(name: &str) -> Result<i32> {
+pub fn shell(name: &str, requested: Option<&str>, root: bool) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
+    ensure!(
+        !root || requested.is_none(),
+        "--root cannot be combined with --repo"
+    );
+    let selected = if root {
+        None
+    } else {
+        Some(workspace.select_repository(requested)?)
+    };
+    let checkout = selected
+        .map(|(_, repository)| checkout_path(repository))
+        .unwrap_or_else(|| "/project".to_owned());
     ensure_running(name, workspace)?;
 
     let host_key = workspace_host_key(name)?;
@@ -574,8 +605,9 @@ pub fn shell(name: &str) -> Result<i32> {
     let known_hosts = temporary_known_hosts(workspace, &host_key)?;
 
     let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
-    let checkout = checkout_path(workspace);
-    explain_direnv(name);
+    if let Some((key, _)) = selected {
+        explain_direnv(name, key);
+    }
     let status = ssh_command(&known_hosts)
         .arg("-t")
         .arg(&destination)
@@ -591,11 +623,12 @@ pub fn shell(name: &str) -> Result<i32> {
     Ok(status.code().unwrap_or(255))
 }
 
-pub fn run(name: &str, arguments: &[String]) -> Result<i32> {
+pub fn run(name: &str, requested: Option<&str>, arguments: &[String]) -> Result<i32> {
     ensure!(!arguments.is_empty(), "seter run requires a command");
 
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
+    let (key, repository) = workspace.select_repository(requested)?;
     ensure_running(name, workspace)?;
 
     let host_key = workspace_host_key(name)?;
@@ -604,8 +637,8 @@ pub fn run(name: &str, arguments: &[String]) -> Result<i32> {
     let known_hosts = temporary_known_hosts(workspace, &host_key)?;
 
     let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
-    let remote_command = run_remote_command(name, &checkout_path(workspace), arguments);
-    explain_direnv(name);
+    let remote_command = run_remote_command(name, &checkout_path(repository), arguments);
+    explain_direnv(name, key);
     let status = ssh_command(&known_hosts)
         .arg(&destination)
         .arg("--")
@@ -627,8 +660,8 @@ fn ensure_running(name: &str, workspace: &Workspace) -> Result<()> {
     }
 }
 
-fn checkout_path(workspace: &Workspace) -> String {
-    format!("/project/{}", workspace.repository.checkout_name)
+fn checkout_path(repository: &Repository) -> String {
+    format!("/project/{}", repository.checkout_name)
 }
 
 fn run_remote_command(name: &str, checkout: &str, arguments: &[String]) -> String {
@@ -645,9 +678,9 @@ fn run_remote_command(name: &str, checkout: &str, arguments: &[String]) -> Strin
     )
 }
 
-fn explain_direnv(name: &str) {
+fn explain_direnv(name: &str, repository: &str) {
     eprintln!(
-        "seter: repository code is never approved automatically; review .envrc and run `direnv allow` in `seter shell {name}`"
+        "seter: repository code is never approved automatically; review .envrc and run `direnv allow` in `seter shell {name} --repo {repository}`"
     );
 }
 

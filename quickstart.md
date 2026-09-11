@@ -45,7 +45,7 @@ Replace the user name, repository, public SSH key, and network identity below. E
     enable = true;
 
     workspaces.project = {
-      repository.url = "https://github.com/owner/project.git";
+      repositories.project.url = "https://github.com/owner/project.git";
 
       network = {
         address = "10.100.0.10";
@@ -57,9 +57,8 @@ Replace the user name, repository, public SSH key, and network identity below. E
         "ssh-ed25519 AAAA... alice@my-host"
       ];
 
-      # Permit the initial clone without TLS interception. Replace this with
-      # your repository host when it is not github.com.
-      egress.passthroughHosts = [ "github.com" ];
+      # Repository hosts are allowed through interception automatically.
+      # Enroll the reviewed proxy CA after the first deployment, below.
     };
   };
 
@@ -84,6 +83,21 @@ seter status project
 ```
 
 A newly deployed workspace should report `stopped`.
+
+Export the host proxy's public CA certificate, verify its fingerprint through
+a trusted channel, and include the reviewed certificate in trusted configuration:
+
+```console
+seter proxy-ca > seter-proxy-ca-cert.pem
+```
+
+```nix
+seter.host.proxyCaCertificate = builtins.readFile ./seter-proxy-ca-cert.pem;
+```
+
+Redeploy before starting the workspace. Never copy the private
+`/var/lib/seter-proxy/mitmproxy-ca.pem` file. Repository hosts must not also be
+listed in TLS-passthrough grants.
 
 ## 4. Bootstrap and enter the workspace
 
@@ -112,9 +126,15 @@ seter down project
 
 `seter run` uses `direnv`; it fails closed until the checkout's `.envrc` has been approved.
 
+To add related repositories to this VM, add more `repositories.<key>` entries
+and deploy again. `init` initializes them all; `shell` and `run` accept
+`--repo <key>`. Set `defaultRepository = "project"` to preserve the default
+entry above, or use `shell --root` to work across checkouts. All repositories
+share authority and storage. See [multi-repository workspaces](./docs/multi-repository-workspaces.md).
+
 ## 5. Add only the network access the project needs
 
-The example grants passthrough HTTPS only to the repository host. Development commands may reveal additional blocked destinations. Inspect observations with:
+The example allows intercepted HTTP/HTTPS to the repository host. Development commands may reveal additional blocked destinations. Inspect observations with:
 
 ```console
 seter audit project --since 30m
@@ -122,15 +142,4 @@ seter audit project --since 30m
 
 Review each destination, add narrow `egress.httpHosts`, `egress.passthroughHosts`, or `egress.tcp` grants to trusted configuration, and redeploy the host. For a reviewable TOML-based workflow, see [Policy observation and review](./docs/policy-workflow.md).
 
-For intercepted HTTPS, first export the public Seter proxy CA, verify its fingerprint through a trusted channel, commit only the public certificate to trusted host configuration, and redeploy:
-
-```console
-seter proxy-ca > seter-proxy-ca-cert.pem
-```
-
-```nix
-seter.host.proxyCaCertificate =
-  builtins.readFile ./seter-proxy-ca-cert.pem;
-```
-
-Never copy `/var/lib/seter-proxy/mitmproxy-ca.pem`; it contains the private signing key. See [Network isolation](./README.md#network-isolation) for proxy trust, TLS passthrough, direct TCP, host services, and secret injection.
+See [Network isolation](./README.md#network-isolation) for proxy trust, TLS passthrough, direct TCP, host services, and secret injection.

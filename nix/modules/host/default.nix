@@ -131,31 +131,12 @@ let
     "upgrade"
   ];
   allowedSecretHosts =
-    workspace: normalizeHosts ([ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts);
+    workspace: normalizeHosts (repositories.hosts workspace ++ workspace.egress.httpHosts);
   secretHosts =
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
-  # The repository URL path is deliberately permissive, so a name derived from
-  # its final component must satisfy the same constraint the explicit
-  # repository.checkoutName option enforces. Requiring a leading alphanumeric
-  # also rejects "." and "..".
-  validCheckoutName = name: builtins.match "[a-zA-Z0-9][a-zA-Z0-9_.-]*" name != null;
-
-  checkoutNameFor =
-    workspace:
-    if workspace.repository.checkoutName != null then
-      workspace.repository.checkoutName
-    else
-      let
-        components = lib.splitString "/" workspace.repository.url;
-        final = builtins.elemAt components (builtins.length components - 1);
-      in
-      lib.removeSuffix ".git" final;
-
-  repositoryMatchFor =
-    workspace: builtins.match "https://([^/:]+)(:443)?(/.*)" workspace.repository.url;
-  repositoryHostFor = workspace: builtins.elemAt (repositoryMatchFor workspace) 0;
-  repositoryPathFor = workspace: builtins.elemAt (repositoryMatchFor workspace) 2;
+  repositories = import ../../lib/repositories.nix { inherit lib; };
+  repositoryValues = workspace: builtins.attrValues workspace.resolvedRepositories;
   validRepositoryPath =
     path:
     let
@@ -219,7 +200,7 @@ let
   workspaceRunners = mapAttrs (_: system: system.config.microvm.declaredRunner) workspaceSystems;
 
   lifecycleRegistry = {
-    version = 6;
+    version = 7;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace)
         hostname
@@ -227,18 +208,18 @@ let
         network
         storage
         ;
-      repository = {
-        inherit (workspace.repository) url branch;
-        checkoutName = checkoutNameFor workspace;
+      defaultRepository = workspace.defaultRepository;
+      repositories = mapAttrs (_: repository: {
+        inherit (repository) url branch checkoutName;
         credential =
-          if workspace.repository.credential == null then
+          if repository.credential == null then
             null
           else
             {
-              name = workspace.repository.credential;
-              placeholder = workspace.secrets.${workspace.repository.credential}.placeholder;
+              name = repository.credential;
+              placeholder = workspace.secrets.${repository.credential}.placeholder;
             };
-      };
+      }) workspace.resolvedRepositories;
       # hostOverheadMiB sizes the host systemd limit only. It is not guest
       # identity and the CLI has no use for it, so it stays out of the registry.
       resources = {
@@ -828,35 +809,80 @@ in
         message = "seter.host.workspaces.${workspace.name} intercepted HTTP and TLS passthrough Host Patterns must not overlap";
       }
       {
-        assertion = validCheckoutName (checkoutNameFor workspace);
-        message = "seter.host.workspaces.${workspace.name} repository URL must end in a checkout name starting with a letter or digit and containing only letters, digits, underscores, dots, or hyphens; set repository.checkoutName explicitly otherwise";
+        assertion = workspace.repository == null || workspace.repositories == { };
+        message = "seter.host.workspaces.${workspace.name} cannot combine repository and repositories";
       }
       {
-        assertion = repositoryMatchFor workspace != null;
+        assertion = workspace.resolvedRepositories != { };
+        message = "seter.host.workspaces.${workspace.name} requires at least one repository";
+      }
+      {
+        assertion =
+          lib.all repositories.validName (attrNames workspace.resolvedRepositories)
+          && lib.all (repository: repositories.validName repository.checkoutName) (
+            repositoryValues workspace
+          );
+        message = "seter.host.workspaces.${workspace.name} repository and checkout names must start with a letter or digit and contain only letters, digits, underscores, dots, or hyphens";
+      }
+      {
+        assertion = hasUniqueValues (
+          map (repository: repository.checkoutName) (repositoryValues workspace)
+        );
+        message = "seter.host.workspaces.${workspace.name} repositories must use unique checkout names";
+      }
+      {
+        assertion =
+          workspace.defaultRepository == null
+          || builtins.hasAttr workspace.defaultRepository workspace.resolvedRepositories;
+        message = "seter.host.workspaces.${workspace.name} defaultRepository must name a registered repository";
+      }
+      {
+        assertion = lib.all (repository: repositories.match repository != null) (
+          repositoryValues workspace
+        );
         message = "seter.host.workspaces.${workspace.name} repository URL must use HTTPS on port 443 and contain an exact path";
       }
       {
-        assertion = validRepositoryPath (repositoryPathFor workspace);
+        assertion = lib.all (repository: validRepositoryPath (repositories.path repository)) (
+          repositoryValues workspace
+        );
         message = "seter.host.workspaces.${workspace.name} repository URL path must not contain empty, dot, or encoded separator segments";
       }
       {
-        assertion =
-          workspace.repository.credential == null
-          || builtins.hasAttr workspace.repository.credential workspace.secrets;
+        assertion = lib.all (
+          repository:
+          repository.credential == null || builtins.hasAttr repository.credential workspace.secrets
+        ) (repositoryValues workspace);
         message = "seter.host.workspaces.${workspace.name} repository credential must reference a defined secret";
       }
       {
-        assertion =
-          workspace.repository.credential == null
+        assertion = lib.all (
+          repository:
+          repository.credential == null
           || (
-            builtins.elem (lib.toLower (repositoryHostFor workspace)) (
-              normalizeHosts workspace.secrets.${workspace.repository.credential}.hosts
+            builtins.hasAttr repository.credential workspace.secrets
+            && builtins.elem (repositories.host repository) (
+              normalizeHosts workspace.secrets.${repository.credential}.hosts
             )
             && builtins.elem "authorization" (
-              normalizeHeaders workspace.secrets.${workspace.repository.credential}.headers
+              normalizeHeaders workspace.secrets.${repository.credential}.headers
             )
-          );
+          )
+        ) (repositoryValues workspace);
         message = "seter.host.workspaces.${workspace.name} repository credential must allow the repository's exact host and authorization header";
+      }
+      {
+        assertion =
+          workspace.repository != null
+          || lib.all (
+            repository:
+            repository.credential == null
+            || (
+              builtins.hasAttr repository.credential workspace.secrets
+              && workspace.secrets.${repository.credential}.repositoryOnly
+            )
+          ) (repositoryValues workspace);
+        message = "seter.host.workspaces.${workspace.name} repositories require repositoryOnly = true on their credential bindings (safe revocation after repository removal)";
       }
       {
         assertion = lib.all (secretName: builtins.hasAttr secretName workspace.secrets) (

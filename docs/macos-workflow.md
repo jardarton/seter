@@ -62,7 +62,9 @@ seter shell example
 seter run example -- cargo test
 ```
 
-`init` safely bootstraps the registered repository. Review any `.envrc` and
+`init` safely bootstraps all registered repositories. For a multi-repository
+Workspace, select a checkout with `shell` / `run --repo <key>` or configure
+`defaultRepository`; `shell --root` opens `/project`. Review any `.envrc` and
 explicitly run `direnv allow` inside the Workspace before `run` can load it.
 
 Seter allocates a Workspace TTY for `shell`, propagates terminal signals and

@@ -4,7 +4,7 @@
   <img src="assets/seter-logo.png" alt="Seter logo: a Norwegian summer farm with subtle circuit-board elements" width="280">
 </p>
 
-Seter runs each development project in its own micro-VM, with only the authority you declared for it.
+Seter runs development workspaces in micro-VMs, each containing one or more Git repositories with only the authority you declared for it.
 
 ## The problem
 
@@ -18,7 +18,7 @@ The [threat cases](./docs/threat-cases/) in this repository record real incident
 
 ## What Seter does
 
-Seter gives every project a **workspace**: a micro-VM that holds one repository and nothing else it was not granted.
+Seter gives related projects a **workspace**: a micro-VM containing one or more approved repositories. Repositories in a workspace share its authority and storage; use separate workspaces when they need isolation from each other.
 
 - **A real isolation boundary.** Each workspace is a KVM micro-VM with its own kernel, not a container.
 - **The network is closed until you open it.** A workspace reaches only the destinations you list. DNS, HTTP, HTTPS, and direct TCP each have their own policy. Everything else is refused, including the host and the LAN.
@@ -61,7 +61,7 @@ The table describes each tool's normal execution mode and built-in supported mec
 
 Seter is built **on** microvm.nix. It adds the policy layer, the lifecycle, and the credential boundary that a VM alone does not give you.
 
-Seter is not a replacement for Qubes OS. Qubes isolates your whole computing life, across every application you run. Seter isolates one development project, and makes that isolation a reviewable part of your system configuration.
+Seter is not a replacement for Qubes OS. Qubes isolates your whole computing life, across every application you run. Seter isolates a deliberately grouped set of development repositories, and makes that isolation a reviewable part of your system configuration.
 
 ## Core concepts
 
@@ -75,7 +75,7 @@ trusted Workspace Registry ── NixOS deployment ──> host policy + Runner
                                                    running VM
 ```
 
-A Runner contains Seter's guest baseline and registered non-secret identity, never project code. The approved HTTPS repository enters later through Workspace Bootstrap. Cold starts validate and execute the already deployed immutable Runner without evaluating Nix. Guest Profile or identity changes therefore use the operator's normal trusted host deployment; there is no `seter update` command.
+A Runner contains Seter's guest baseline and registered non-secret identity, never project code. The approved HTTPS repositories enter later through Workspace Bootstrap. Cold starts validate and execute the already deployed immutable Runner without evaluating Nix. Guest Profile or identity changes therefore use the operator's normal trusted host deployment; there is no `seter update` command.
 
 The trusted [`default` Guest Profile](./docs/guest-profile-default.md) includes
 flake-enabled Nix with the private writable store, Git and system HTTPS trust,
@@ -93,11 +93,17 @@ seter status project
 seter down project
 ```
 
-Both `shell` and `run` enter the registered checkout and leave the VM running.
+Both `shell` and `run` enter the selected checkout and leave the VM running.
 They never approve repository code: review `.envrc` and run `direnv allow`
 explicitly in a workspace shell before `run` can load the environment.
 
 ## Workspace Registry
+
+Each workspace accepts a nonempty `repositories` collection. Use `--repo <key>`
+with `init`, `shell`, or `run`; configure `defaultRepository` for convenient
+entry when there is more than one. `shell --root` opens `/project` for work
+across checkouts. See [multi-repository workspaces](./docs/multi-repository-workspaces.md)
+for configuration, shared-authority implications, safe removal, and migration.
 
 Create the workspace directly in trusted NixOS configuration:
 
@@ -108,10 +114,10 @@ Create the workspace directly in trusted NixOS configuration:
   seter.host = {
     enable = true;
     workspaces.project = {
-      repository = {
+      repositories.project = {
         url = "https://git.example/owner/project.git";
         # branch = "main";       # null uses the remote default
-        # checkoutName = "project";
+        # checkoutName = "project"; # defaults to the repository key
       };
       guestProfile = "default";
       network = {
@@ -138,8 +144,9 @@ The schema also owns optional repository credential binding, storage image names
 ## Workspace Bootstrap
 
 `seter init <workspace>` starts the host-deployed Runner, leaves it running,
-and clones the one approved HTTPS repository into
-`/project/<checkout-name>`. A configured branch is selected explicitly;
+and clones all approved HTTPS repositories into
+`/project/<checkout-name>`. Checkout names default to repository keys; use
+`--repo <key>` to initialize only one. A configured branch is selected explicitly;
 otherwise Git uses the remote default branch. Bootstrap never evaluates or
 approves `.envrc`.
 
@@ -154,11 +161,12 @@ For a private repository, bind a dedicated HTTP Authorization value:
 
 ```nix
 seter.host.workspaces.project = {
-  repository = {
+  repositories.project = {
     url = "https://git.example/owner/project.git";
     credential = "repositoryToken";
   };
   secrets.repositoryToken = {
+    repositoryOnly = true;
     placeholder = "seter-placeholder-repository-0123456789abcdef";
     sourceFile = "/run/secrets/project-repository-token";
     hosts = [ "git.example" ];
@@ -170,9 +178,9 @@ seter.host.workspaces.project = {
 The guest stores only the non-secret placeholder in repository-local Git
 configuration. The host proxy substitutes the runtime credential only for HTTPS
 requests to the exact repository host and path (including its Git smart-HTTP
-endpoints), and redacts exact reflections. Requests to sibling repository
-paths, traversal-like subpaths, or arbitrary endpoints below the repository
-path cannot use the binding. SSH Git is not supported.
+endpoints), and redacts exact reflections. Only repository paths explicitly associated with that credential can use the
+binding. Unassociated sibling paths, traversal-like subpaths, and arbitrary
+endpoints below a repository path are denied. SSH Git is not supported.
 
 The credential source contains the complete Authorization field value, such
 as `Bearer <token>` or `Basic <base64-user-and-token>`, so the binding works
@@ -228,7 +236,7 @@ seter ssh-host-key project
 `seter shell project` and `seter run project -- <command>` read that
 host-created public key and use strict host-key checking automatically, with no
 SSH agent or X11 forwarding. Both start the workspace when needed, enter its
-registered checkout, and leave it running. `run` executes through `direnv`, so
+selected checkout, and leave it running. `run` executes through `direnv`, so
 an unreviewed `.envrc` fails closed until the operator explicitly runs
 `direnv allow` in `seter shell`. Configure the developer's public login key in
 the registry at `ssh.authorizedKeys`.

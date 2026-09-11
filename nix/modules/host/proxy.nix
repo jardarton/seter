@@ -18,10 +18,7 @@ let
   normalizeHosts = hosts: unique (map lib.toLower hosts);
   normalizeHeaders = headers: unique (map lib.toLower headers);
   hostPatterns = import ./host-patterns.nix { inherit lib; };
-  repositoryMatchFor =
-    workspace: builtins.match "https://([^/:]+)(:443)?(/.*)" workspace.repository.url;
-  repositoryHostFor = workspace: lib.toLower (builtins.elemAt (repositoryMatchFor workspace) 0);
-  repositoryPathFor = workspace: builtins.elemAt (repositoryMatchFor workspace) 2;
+  repositories = import ../../lib/repositories.nix { inherit lib; };
   credentialNameFor = workspaceName: secretName: "seter-${workspaceName}.${secretName}";
   secretCredentials = lib.concatLists (
     lib.mapAttrsToList (
@@ -32,22 +29,22 @@ let
     ) cfg.workspaces
   );
   policy = {
-    version = 3;
+    version = 4;
     workspaces = builtins.listToAttrs (
       lib.mapAttrsToList (
         name: workspace:
         nameValuePair workspace.network.address {
           inherit name;
-          httpHosts = normalizeHosts ([ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts);
+          httpHosts = normalizeHosts ((repositories.hosts workspace) ++ workspace.egress.httpHosts);
           passthroughHosts = normalizeHosts workspace.egress.passthroughHosts;
-          repository = {
-            host = repositoryHostFor workspace;
-            path = repositoryPathFor workspace;
-            credential = workspace.repository.credential;
-          };
+          repositories = lib.mapAttrs (_: repository: {
+            host = repositories.host repository;
+            path = repositories.path repository;
+            credential = repository.credential;
+          }) workspace.resolvedRepositories;
           secrets = lib.mapAttrs (secretName: secret: {
             credential = credentialNameFor name secretName;
-            inherit (secret) placeholder;
+            inherit (secret) placeholder repositoryOnly;
             hosts = normalizeHosts secret.hosts;
             headers = normalizeHeaders secret.headers;
           }) workspace.secrets;
@@ -174,7 +171,7 @@ in
         lib.all (passthrough: !(hostPatterns.overlaps http passthrough)) (
           normalizeHosts workspace.egress.passthroughHosts
         )
-      ) (normalizeHosts ([ (repositoryHostFor workspace) ] ++ workspace.egress.httpHosts));
+      ) (normalizeHosts ((repositories.hosts workspace) ++ workspace.egress.httpHosts));
       message = "seter.host.workspaces.${name} must not list a host for both HTTP interception and TLS passthrough";
     }) cfg.workspaces;
 

@@ -8,7 +8,7 @@ Seter separates configuration by authority. A repository's development environme
 
 | Layer | Owner | Defines | Must not define |
 | --- | --- | --- | --- |
-| Workspace Registry | Trusted infra | Repository source, workspace identity, resource limits, credential bindings, selected Guest Profile, and effective Policy Grants | Project development commands |
+| Workspace Registry | Trusted infra | Repository sources, workspace identity, resource limits, credential bindings, selected Guest Profile, and effective Policy Grants | Project development commands |
 | Policy File | Trusted infra | Consumer-owned, reviewable network and host-capability grants merged into the Workspace Registry | Real credentials or project development commands |
 | Guest Profile | Trusted infra or Seter | Reusable guest packages, services, agents, and baseline bootstrap capabilities | A specific repository's source or host policy |
 | Development flake | Project repository | The development shell and project dependencies | Host or guest security policy |
@@ -19,10 +19,10 @@ The Workspace Registry and host enforcement are authoritative. Repository code a
 
 This is the only onboarding path required for the first usable milestone:
 
-1. The Workspace Registry approves one HTTPS repository source and selects the trusted `default` Guest Profile.
+1. The Workspace Registry approves one or more named HTTPS repository sources and selects the trusted `default` Guest Profile.
 2. Seter builds a runner entirely from trusted configuration.
-3. `seter init` creates the workspace and checks out the approved repository under `/project/<repository>`.
-4. The user explicitly approves the repository's `.envrc` before its development flake executes.
+3. `seter init` creates the workspace and checks out all approved repositories under `/project/<checkout-name>` (or only `--repo <key>`).
+4. The user explicitly approves each repository's `.envrc` before its development flake executes.
 
 A repository does not need Seter-specific NixOS configuration. The `default` profile provides Nix, Git, SSH tooling, direnv/nix-direnv, and baseline shell utilities. Agent packages may be supplied by trusted consumer-owned profiles, while Seter core remains agent-agnostic.
 

@@ -16,20 +16,36 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Bootstrap a workspace from its approved HTTPS repository.
-    Init { workspace: String },
+    /// Bootstrap all approved HTTPS repositories, or only --repo.
+    Init {
+        workspace: String,
+        /// Repository key; omit to initialize every registered repository.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Start a workspace using its host-deployed Runner.
     Up { workspace: String },
     /// Gracefully stop a workspace.
     Down { workspace: String },
-    /// Run a command through direnv in the registered checkout, starting when needed.
+    /// Run a command through direnv in the selected checkout, starting when needed.
     Run {
         workspace: String,
+        /// Repository key; otherwise use the default or sole repository.
+        #[arg(long)]
+        repo: Option<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Open the registered checkout in an interactive shell, starting when needed.
-    Shell { workspace: String },
+    /// Open the selected checkout (or --root) in a shell, starting when needed.
+    Shell {
+        workspace: String,
+        /// Repository key; otherwise use the default or sole repository.
+        #[arg(long, conflicts_with = "root")]
+        repo: Option<String>,
+        /// Open /project rather than a repository checkout.
+        #[arg(long)]
+        root: bool,
+    },
     /// Show one workspace or all workspace statuses.
     Status { workspace: Option<String> },
     /// List configured workspaces.
@@ -144,4 +160,28 @@ impl From<CompletionShell> for Shell {
 
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_selection_and_root_are_explicit() {
+        assert!(Cli::try_parse_from(["seter", "init", "product", "--repo", "backend"]).is_ok());
+        assert!(Cli::try_parse_from(["seter", "shell", "product", "--root"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["seter", "shell", "product", "--root", "--repo", "backend"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "seter", "run", "product", "--repo", "backend", "--", "echo", "--repo", "literal",
+        ])
+        .unwrap();
+        let Command::Run { repo, command, .. } = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(repo.as_deref(), Some("backend"));
+        assert_eq!(command, ["echo", "--repo", "literal"]);
+    }
 }
