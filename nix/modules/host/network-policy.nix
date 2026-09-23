@@ -11,14 +11,7 @@ let
     mkIf
     ;
 
-  dnsPorts = import ./dns-ports.nix {
-    inherit lib;
-    workspaces = cfg.workspaces;
-  };
-  tcpSets = import ./tcp-egress-sets.nix {
-    inherit lib;
-    workspaces = cfg.workspaces;
-  };
+  inherit (cfg.generated) dnsPorts tcpSets;
   workspaces = mapAttrsToList (
     name: workspace:
     workspace

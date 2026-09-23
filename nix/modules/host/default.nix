@@ -648,6 +648,27 @@ in
       description = "Typed workspace registry used by the host and Seter CLI.";
     };
 
+    generated = {
+      dnsPorts = mkOption {
+        internal = true;
+        readOnly = true;
+        type = types.attrsOf types.port;
+        default = import ./dns-ports.nix {
+          inherit lib;
+          workspaces = cfg.workspaces;
+        };
+      };
+      tcpSets = mkOption {
+        internal = true;
+        readOnly = true;
+        type = types.attrsOf types.str;
+        default = import ./tcp-egress-sets.nix {
+          inherit lib;
+          workspaces = cfg.workspaces;
+        };
+      };
+    };
+
     package = mkOption {
       type = types.package;
       default = defaultPackage;
