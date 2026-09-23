@@ -29,12 +29,7 @@ let
   ) cfg.gatewayServices;
   activeServiceNames = attrNames activeServices;
 
-  dnsPorts = builtins.attrValues (
-    import ./dns-ports.nix {
-      inherit lib;
-      workspaces = cfg.workspaces;
-    }
-  );
+  dnsPorts = builtins.attrValues cfg.generated.dnsPorts;
   serviceValues = builtins.attrValues cfg.gatewayServices;
   listenPorts = map (service: service.listenPort) serviceValues;
   targetAddresses = map (service: service.targetAddress) serviceValues;

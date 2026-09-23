@@ -15,10 +15,7 @@ let
     types
     ;
 
-  tcpSets = import ./tcp-egress-sets.nix {
-    inherit lib;
-    workspaces = cfg.workspaces;
-  };
+  tcpSets = cfg.generated.tcpSets;
   refreshProgram = pkgs.writeTextFile {
     name = "seter-tcp-egress-refresh";
     executable = true;

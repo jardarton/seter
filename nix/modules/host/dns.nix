@@ -19,10 +19,7 @@ let
     unique
     ;
 
-  dnsPorts = import ./dns-ports.nix {
-    inherit lib;
-    workspaces = cfg.workspaces;
-  };
+  dnsPorts = cfg.generated.dnsPorts;
   rawWorkspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
 
   parseIpv4 = import ../../lib/ipv4.nix { inherit lib; };
