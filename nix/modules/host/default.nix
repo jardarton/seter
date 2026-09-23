@@ -13,14 +13,12 @@ let
     mapAttrs
     mapAttrs'
     mapAttrsToList
-    optionalAttrs
     mkEnableOption
     mkIf
     mkAfter
     nameValuePair
     mkOption
     types
-    unique
     ;
 
   workspaceType = types.submodule (import ./workspace.nix);
@@ -28,7 +26,6 @@ let
   lifecycleLockDirectory = "/run/lock/seter";
   workspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
 
-  hostPatterns = import ./host-patterns.nix { inherit lib; };
   policyRaw =
     if cfg.policyFile == null then
       {
@@ -42,223 +39,53 @@ let
   policyHttpFor = value: (policyEgressFor value)."http-hosts" or [ ];
   policyPassthroughFor = value: (policyEgressFor value)."passthrough-hosts" or [ ];
   policyTcpFor = value: (policyEgressFor value).tcp or [ ];
-  hasOnlyAttrs =
-    allowed: value:
-    builtins.isAttrs value && lib.all (name: builtins.elem name allowed) (attrNames value);
-  policyStructureValid =
-    hasOnlyAttrs [ "version" "workspaces" ] policyRaw
-    && builtins.isAttrs policyWorkspaces
-    && lib.all (
-      value:
-      hasOnlyAttrs [ "egress" ] value
-      && hasOnlyAttrs [ "http-hosts" "passthrough-hosts" "tcp" ] (policyEgressFor value)
-      && lib.all (destination: hasOnlyAttrs [ "host" "port" ] destination) (policyTcpFor value)
-    ) (builtins.attrValues policyWorkspaces);
   policyWorkspaceDefinitions = mapAttrs (_: value: {
     egress.httpHosts = mkAfter (policyHttpFor value);
     egress.passthroughHosts = mkAfter (policyPassthroughFor value);
     egress.tcp = mkAfter (policyTcpFor value);
   }) policyWorkspaces;
 
-  valuesFor = select: map select workspaces;
-  hasUniqueValues = values: builtins.length values == builtins.length (unique values);
-
   parseIpv4 = import ../../lib/ipv4.nix { inherit lib; };
+  subnetPrefix = lib.toInt (builtins.elemAt (lib.splitString "/" cfg.subnet) 1);
 
-  pow2 = exponent: if exponent == 0 then 1 else 2 * pow2 (exponent - 1);
-  subnetParts = lib.splitString "/" cfg.subnet;
-  subnetAddress = parseIpv4 (builtins.elemAt subnetParts 0);
-  subnetPrefix = lib.toInt (builtins.elemAt subnetParts 1);
-  subnetBlockSize = pow2 (32 - subnetPrefix);
-  subnetNetwork =
-    if subnetAddress == null then
-      null
-    else
-      builtins.div subnetAddress subnetBlockSize * subnetBlockSize;
-  subnetBroadcast = if subnetNetwork == null then null else subnetNetwork + subnetBlockSize - 1;
-  gatewayAddress = parseIpv4 cfg.gateway;
-  addressInSubnet =
-    address:
-    let
-      parsedAddress = parseIpv4 address;
-    in
-    parsedAddress != null
-    && subnetAddress != null
-    && builtins.div parsedAddress subnetBlockSize == builtins.div subnetAddress subnetBlockSize;
-
-  addressIsUsable =
-    address:
-    let
-      parsedAddress = parseIpv4 address;
-    in
-    parsedAddress != null
-    && addressInSubnet address
-    && parsedAddress != subnetNetwork
-    && parsedAddress != subnetBroadcast;
-
-  workspaceSecretNames = workspace: attrNames workspace.secrets;
-  workspaceSecrets = workspace: builtins.attrValues workspace.secrets;
-  normalizeHosts = map lib.toLower;
-  normalizeHeaders = map lib.toLower;
-  validSecretName = name: builtins.match "[a-zA-Z][a-zA-Z0-9_-]{0,62}" name != null;
-  validSecretPlaceholder =
-    placeholder: builtins.match "seter-placeholder-[a-zA-Z0-9_-]{16,}" placeholder != null;
-  nonOverlappingPlaceholders =
-    placeholders:
-    lib.all (
-      placeholder: lib.all (other: placeholder == other || !lib.hasInfix placeholder other) placeholders
-    ) placeholders;
-  prohibitedSecretHeaders = [
-    "connection"
-    "content-length"
-    "host"
-    "keep-alive"
-    "proxy-authenticate"
-    "proxy-authorization"
-    "proxy-connection"
-    "te"
-    "trailer"
-    "transfer-encoding"
-    "upgrade"
-  ];
-  allowedSecretHosts =
-    workspace: normalizeHosts (repositories.hosts workspace ++ workspace.egress.httpHosts);
-  secretHosts =
-    workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
-
-  repositories = import ../../lib/repositories.nix { inherit lib; };
-  repositoryValues = workspace: builtins.attrValues workspace.resolvedRepositories;
-  validRepositoryPath =
-    path:
-    let
-      lower = lib.toLower path;
-      components = lib.drop 1 (lib.splitString "/" path);
-    in
-    lib.all (component: component != "" && component != "." && component != "..") components
-    && !lib.hasInfix "%2e" lower
-    && !lib.hasInfix "%2f" lower
-    && !lib.hasInfix "%5c" lower;
-
-  workspaceDefinitions = mapAttrs (
-    name: workspace:
-    import ../../lib/mk-runner-definition.nix {
-      inherit name workspace;
-      gateway = cfg.gateway;
-      prefixLength = subnetPrefix;
-      proxyPort = cfg.proxy.explicitPort;
-      proxyCaCertificate = cfg.proxyCaCertificate;
-      hypervisor = cfg.runner.hypervisor;
-    }
-  ) cfg.workspaces;
-
-  workspaceSystems = mapAttrs (
-    name: workspace:
-    import "${pkgs.path}/nixos/lib/eval-config.nix" {
-      system = pkgs.stdenv.hostPlatform.system;
-      modules = [
-        seterMicrovmModule
-        (import ../guest)
-        workspaceDefinitions.${name}.guestModule
-        (import ../guest/profiles/default.nix)
-        {
-          seter.guest = {
-            memory = workspace.resources.memoryMiB;
-            vcpu = workspace.resources.vcpu;
-            ssh.authorizedKeys = workspace.ssh.authorizedKeys;
-          };
-          boot.kernelPackages = mkIf (
-            cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
-          ) pkgs.linuxPackages_6_12;
-          microvm.qemu.machineOpts =
-            mkIf (cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64)
-              {
-                accel = "kvm";
-                gic-version = "max";
-              };
-          # Workspaces are headless. The physical-Mac probe showed that
-          # virtual-console initialization can stall under nested ARM KVM.
-          console.enable = mkIf (cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64) false;
-          # Derive the vsock context ID from the already-unique workspace
-          # address so two workspaces can never collide. The values are large
-          # and unmemorable by construction; they are host-internal identifiers
-          # rather than anything an operator configures or reads.
-          microvm.vsock.cid = 3 + parseIpv4 workspace.network.address;
-        }
-      ];
-    }
-  ) cfg.workspaces;
-
-  workspaceRunners = mapAttrs (_: system: system.config.microvm.declaredRunner) workspaceSystems;
-
-  lifecycleRegistry = {
-    version = 7;
-    workspaces = mapAttrs (name: workspace: {
-      inherit (workspace)
-        hostname
-        guestProfile
-        developmentPorts
-        network
-        storage
-        ;
-      defaultRepository = workspace.defaultRepository;
-      repositories = mapAttrs (_: repository: {
-        inherit (repository) url branch checkoutName;
-        credential =
-          if repository.credential == null then
-            null
-          else
-            {
-              name = repository.credential;
-              placeholder = workspace.secrets.${repository.credential}.placeholder;
-            };
-      }) workspace.resolvedRepositories;
-      # hostOverheadMiB sizes the host systemd limit only. It is not guest
-      # identity and the CLI has no use for it, so it stays out of the registry.
-      resources = {
-        inherit (workspace.resources) memoryMiB vcpu cpuQuotaPercent;
-      };
-      ssh = {
-        inherit (workspace.ssh) user;
-      };
-      runner = {
-        path = toString workspaceRunners.${name};
-        identity = workspaceDefinitions.${name}.identity;
-      };
-    }) cfg.workspaces;
+  validation = import ./validation.nix {
+    inherit
+      cfg
+      lib
+      pkgs
+      config
+      workspaces
+      workspaceRuntime
+      policyRaw
+      policyWorkspaces
+      parseIpv4
+      subnetPrefix
+      ;
   };
 
-  registryFile = pkgs.writeText "seter-workspaces.json" (builtins.toJSON lifecycleRegistry);
-  activePolicyFile = pkgs.writeText "seter-active-policy.json" (
-    builtins.toJSON {
-      version = 1;
-      workspaces = mapAttrs (_: workspace: {
-        egress = {
-          "http-hosts" = map lib.toLower workspace.egress.httpHosts;
-          "passthrough-hosts" = map lib.toLower workspace.egress.passthroughHosts;
-          tcp = map (
-            destination: destination // { host = lib.toLower destination.host; }
-          ) workspace.egress.tcp;
-        };
-      }) cfg.workspaces;
-    }
-  );
+  projections = import ./projections.nix {
+    inherit
+      cfg
+      lib
+      pkgs
+      seterMicrovmModule
+      subnetPrefix
+      parseIpv4
+      ;
+  };
+  inherit (projections) workspaceRunners registryFile activePolicyFile;
 
-  workspaceRuntime = mapAttrs (
-    name: workspace:
-    let
-      suffix = builtins.substring 0 8 (builtins.hashString "sha256" name);
-      account = "seter-${builtins.substring 0 12 name}-${suffix}";
-    in
-    {
-      inherit account workspace;
-      lifecycleLock = "${lifecycleLockDirectory}/${name}.lock";
-      runtimeDirectory = "seter/${name}";
-      identitySocket = "/run/seter/${name}/virtiofs-identity.sock";
-      identityDirectory = "/var/lib/seter/identities/${name}";
-      knownHostFile = "/var/lib/seter/known-hosts/${name}";
-      stateDirectory = "/var/lib/seter/workspaces/${name}";
-    }
-  ) cfg.workspaces;
+  runtime = import ./runtime.nix {
+    inherit
+      cfg
+      lib
+      pkgs
+      workspaceRunners
+      subnetPrefix
+      lifecycleLockDirectory
+      ;
+  };
+  inherit (runtime) workspaceRuntime;
 
   lifecycleSudoCommands = concatMap (
     name:
@@ -294,323 +121,6 @@ let
     options = [ "NOPASSWD" ];
   }) (attrNames cfg.workspaces);
 
-  tapServices = mapAttrs' (
-    name: runtime:
-    let
-      inherit (runtime) account workspace;
-      tap = workspace.network.tap;
-      tapUp = pkgs.writeShellScript "seter-tap-${name}-up" ''
-        set -eu
-
-        if ${pkgs.iproute2}/bin/ip link show dev ${lib.escapeShellArg tap} >/dev/null 2>&1; then
-          echo "refusing to replace existing interface ${tap}" >&2
-          exit 1
-        fi
-
-        for attempt in $(${pkgs.coreutils}/bin/seq 1 100); do
-          test -e /sys/class/net/${lib.escapeShellArg cfg.bridge} && break
-          ${pkgs.coreutils}/bin/sleep 0.1
-        done
-        if ! test -e /sys/class/net/${lib.escapeShellArg cfg.bridge}; then
-          echo "Seter bridge ${cfg.bridge} did not appear" >&2
-          exit 1
-        fi
-
-        cleanup() {
-          ${pkgs.iproute2}/bin/ip link delete dev ${lib.escapeShellArg tap} 2>/dev/null || true
-        }
-        trap cleanup EXIT
-
-        ${pkgs.iproute2}/bin/ip tuntap add \
-          name ${lib.escapeShellArg tap} \
-          mode tap \
-          user ${lib.escapeShellArg account} \
-          group ${lib.escapeShellArg account} \
-          vnet_hdr multi_queue
-        ${pkgs.iproute2}/bin/ip link set dev ${lib.escapeShellArg tap} master ${lib.escapeShellArg cfg.bridge}
-        ${pkgs.iproute2}/bin/bridge link set dev ${lib.escapeShellArg tap} isolated on
-        ${pkgs.iproute2}/bin/ip link set dev ${lib.escapeShellArg tap} up
-
-        trap - EXIT
-      '';
-      tapDown = pkgs.writeShellScript "seter-tap-${name}-down" ''
-        set -eu
-        if ${pkgs.iproute2}/bin/ip link show dev ${lib.escapeShellArg tap} >/dev/null 2>&1; then
-          ${pkgs.iproute2}/bin/ip link delete dev ${lib.escapeShellArg tap}
-        fi
-      '';
-    in
-    nameValuePair "seter-tap-${name}" {
-      description = "Seter TAP interface for workspace ${name}";
-      after = [
-        "nftables.service"
-        "seter-bridge.service"
-        "seter-dns-${name}.service"
-        "seter-proxy.service"
-      ]
-      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
-      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
-      requires = [
-        "nftables.service"
-        "seter-bridge.service"
-        "seter-dns-${name}.service"
-        "seter-proxy.service"
-      ]
-      ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
-      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
-      partOf = [ "seter-runtime-${name}.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = tapUp;
-        ExecStop = tapDown;
-      };
-    }
-  ) workspaceRuntime;
-
-  identityVirtiofsdServices = mapAttrs' (
-    name: runtime:
-    let
-      inherit (runtime) identityDirectory identitySocket;
-      runtimeIdentityDirectory = "/run/credentials/seter-identity-virtiofsd-${name}.service";
-      runIdentityVirtiofsd = pkgs.writeShellScript "seter-identity-virtiofsd-${name}" ''
-        set -eu
-        test "$CREDENTIALS_DIRECTORY" = ${lib.escapeShellArg runtimeIdentityDirectory}
-        rm -f ${lib.escapeShellArg identitySocket}
-        ${lib.getExe pkgs.virtiofsd} \
-          --socket-path=${lib.escapeShellArg identitySocket} \
-          --shared-dir="$CREDENTIALS_DIRECTORY" \
-          --readonly \
-          --posix-acl=always \
-          --cache=never \
-          --inode-file-handles=prefer &
-        virtiofsd_pid=$!
-
-        shutdown() {
-          trap - INT TERM
-          kill -TERM "$virtiofsd_pid" 2>/dev/null || true
-          wait "$virtiofsd_pid" 2>/dev/null || true
-          exit 0
-        }
-        trap shutdown INT TERM
-        wait "$virtiofsd_pid"
-      '';
-      waitForSocket = pkgs.writeShellScript "seter-identity-virtiofsd-${name}-ready" ''
-        set -eu
-        for attempt in $(${pkgs.coreutils}/bin/seq 1 100); do
-          if test -S ${lib.escapeShellArg identitySocket} && kill -0 "$MAINPID" 2>/dev/null; then
-            exit 0
-          fi
-          ${pkgs.coreutils}/bin/sleep 0.05
-        done
-        echo "Workspace SSH Identity socket ${identitySocket} did not become ready" >&2
-        exit 1
-      '';
-    in
-    nameValuePair "seter-identity-virtiofsd-${name}" {
-      description = "Read-only Workspace SSH Identity for ${name}";
-      after = [ "seter-tap-${name}.service" ];
-      requires = [ "seter-tap-${name}.service" ];
-      bindsTo = [ "seter-tap-${name}.service" ];
-      partOf = [ "seter-runtime-${name}.target" ];
-      serviceConfig = {
-        Type = "exec";
-        User = runtime.account;
-        Group = runtime.account;
-        RuntimeDirectory = runtime.runtimeDirectory;
-        RuntimeDirectoryMode = "0700";
-        LoadCredential = [
-          "ssh_host_ed25519_key:${identityDirectory}/ssh_host_ed25519_key"
-          "ssh_host_ed25519_key.pub:${identityDirectory}/ssh_host_ed25519_key.pub"
-        ];
-        ExecStart = runIdentityVirtiofsd;
-        ExecStartPost = waitForSocket;
-        TimeoutStopSec = "10s";
-        Restart = "on-failure";
-        RestartSec = "1s";
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectHome = true;
-        ProtectSystem = "strict";
-        ReadOnlyPaths = [ identityDirectory ];
-      };
-    }
-  ) (if cfg.runner.hypervisor == "cloud-hypervisor" then workspaceRuntime else { });
-
-  runtimeTargets = mapAttrs' (
-    name: _:
-    let
-      identityUnit =
-        if cfg.runner.hypervisor == "cloud-hypervisor" then
-          "seter-identity-virtiofsd-${name}.service"
-        else
-          "seter-tap-${name}.service";
-    in
-    nameValuePair "seter-runtime-${name}" {
-      description = "Host runtime plumbing for Seter workspace ${name}";
-      requires = [ identityUnit ];
-      bindsTo = [ identityUnit ];
-      after = [ identityUnit ];
-      # Stopping either half of the lifecycle tears down the other. The VM
-      # service also has PartOf= on this target so operators may still stop
-      # the plumbing target directly.
-      partOf = [ "seter-vm-${name}.service" ];
-    }
-  ) workspaceRuntime;
-
-  vmServices = mapAttrs' (
-    name: runtime:
-    let
-      inherit (runtime) account lifecycleLock stateDirectory;
-      workspace = runtime.workspace;
-      runner = workspaceRunners.${name};
-      runVm = pkgs.writeShellScript "seter-vm-${name}-run" ''
-        set -eu
-        exec {lifecycle_lock}<${lib.escapeShellArg lifecycleLock}
-        ${pkgs.util-linux}/bin/flock --exclusive "$lifecycle_lock"
-        test -x ${runner}/bin/microvm-run
-        test -x ${runner}/bin/microvm-shutdown
-        exec ${runner}/bin/microvm-run
-      '';
-      stopVm = pkgs.writeShellScript "seter-vm-${name}-stop" ''
-        set -eu
-        shutdown=$1
-        ${
-          if cfg.runner.hypervisor == "qemu" then
-            ''
-              qmp_socket=$2
-              main_pid=''${3:-}
-            ''
-          else
-            ''
-              main_pid=''${2:-}
-            ''
-        }
-
-        # QEMU may have exited independently, in which case systemd expands
-        # $MAINPID to no argument while completing the service teardown.
-        if [ -z "$main_pid" ] || ! kill -0 "$main_pid" 2>/dev/null; then
-          exit 0
-        fi
-
-        ${
-          if cfg.runner.hypervisor == "qemu" then
-            ''
-              if [ ! -S "$qmp_socket" ]; then
-                echo "QMP socket $qmp_socket is unavailable" >&2
-                exit 1
-              fi
-
-              # microvm.nix sends Ctrl-Alt-Delete, but Seter's headless QEMU
-              # machine has no input handler. Request an ACPI powerdown over
-              # the Runner's private QMP socket instead.
-              if ! qmp_output=$(
-                {
-                  printf '%s\n' '{"execute":"qmp_capabilities"}'
-                  printf '%s\n' '{"execute":"system_powerdown"}'
-                } | ${pkgs.socat}/bin/socat STDIO "UNIX-CONNECT:$qmp_socket"
-              ); then
-                echo "failed to request guest powerdown over $qmp_socket" >&2
-                exit 1
-              fi
-              printf '%s\n' "$qmp_output"
-              if printf '%s\n' "$qmp_output" | ${pkgs.gnugrep}/bin/grep -q '"error"'; then
-                echo "QEMU rejected the guest powerdown request" >&2
-                exit 1
-              fi
-            ''
-          else
-            ''
-              "$shutdown"
-            ''
-        }
-
-        # Do not let systemd terminate the VMM while the guest is flushing and
-        # unmounting its persistent filesystems.
-        while kill -0 "$main_pid" 2>/dev/null; do
-          ${pkgs.coreutils}/bin/sleep 0.1
-        done
-      '';
-    in
-    nameValuePair "seter-vm-${name}" {
-      description = "Seter microVM for workspace ${name}";
-      requires = [ "seter-runtime-${name}.target" ];
-      after = [ "seter-runtime-${name}.target" ];
-      partOf = [ "seter-runtime-${name}.target" ];
-      unitConfig.ConditionPathExists = "${runner}/bin/microvm-run";
-      serviceConfig = {
-        Type = "simple";
-        User = account;
-        Group = account;
-        WorkingDirectory = stateDirectory;
-        ExecStart = runVm;
-        ExecStop =
-          if cfg.runner.hypervisor == "qemu" then
-            "${stopVm} ${runner}/bin/microvm-shutdown ${stateDirectory}/seter-${name}.sock $MAINPID"
-          else
-            "${stopVm} ${runner}/bin/microvm-shutdown $MAINPID";
-        TimeoutStopSec = "60s";
-        KillMode = "mixed";
-        Restart = "no";
-        MemoryMax = (workspace.resources.memoryMiB + workspace.resources.hostOverheadMiB) * 1024 * 1024;
-        CPUQuota = "${toString workspace.resources.cpuQuotaPercent}%";
-        LimitNOFILE = 1048576;
-        LimitMEMLOCK = "infinity";
-        UMask = "0077";
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectHome = true;
-        ProtectSystem = "strict";
-        ReadWritePaths = [ stateDirectory ];
-        DevicePolicy = "closed";
-        DeviceAllow = [
-          "/dev/kvm rw"
-          "/dev/net/tun rw"
-          "/dev/vhost-net rw"
-          "/dev/vhost-vsock rw"
-        ];
-      }
-      // optionalAttrs (cfg.runner.hypervisor == "qemu") {
-        LoadCredential = [
-          "ssh_host_ed25519_key:${runtime.identityDirectory}/ssh_host_ed25519_key"
-        ];
-      };
-    }
-  ) workspaceRuntime;
-
-  bridgeUp = pkgs.writeShellScript "seter-bridge-up" ''
-    set -eu
-
-    created=false
-    cleanup() {
-      if test "$created" = true; then
-        ${pkgs.iproute2}/bin/ip link delete dev ${lib.escapeShellArg cfg.bridge} 2>/dev/null || true
-      fi
-    }
-    trap cleanup EXIT
-
-    if test -e /sys/class/net/${lib.escapeShellArg cfg.bridge}; then
-      echo "refusing to replace existing interface ${cfg.bridge}" >&2
-      exit 1
-    fi
-
-    ${pkgs.iproute2}/bin/ip link add name ${lib.escapeShellArg cfg.bridge} type bridge
-    created=true
-
-    ${pkgs.iproute2}/bin/ip address replace \
-      ${lib.escapeShellArg "${cfg.gateway}/${toString subnetPrefix}"} \
-      dev ${lib.escapeShellArg cfg.bridge}
-    ${pkgs.iproute2}/bin/ip link set dev ${lib.escapeShellArg cfg.bridge} up
-
-    trap - EXIT
-  '';
-
-  bridgeDown = pkgs.writeShellScript "seter-bridge-down" ''
-    set -eu
-    if test -e /sys/class/net/${lib.escapeShellArg cfg.bridge}; then
-      ${pkgs.iproute2}/bin/ip link delete dev ${lib.escapeShellArg cfg.bridge}
-    fi
-  '';
 in
 {
   imports = [
@@ -708,438 +218,66 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
-    seter.host.workspaces = policyWorkspaceDefinitions;
+  config = mkIf cfg.enable (
+    lib.mkMerge [
+      {
+        seter.host.workspaces = policyWorkspaceDefinitions;
 
-    # The physical-Mac gate isolated nested-KVM hangs to the bootstrap Host's
-    # latest kernel. Keep both ARM virtualization layers on the accepted LTS.
-    boot.kernelPackages = mkIf (
-      cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
-    ) pkgs.linuxPackages_6_12;
+        # The physical-Mac gate isolated nested-KVM hangs to the bootstrap Host's
+        # latest kernel. Keep both ARM virtualization layers on the accepted LTS.
+        boot.kernelPackages = mkIf (
+          cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
+        ) pkgs.linuxPackages_6_12;
 
-    assertions = [
-      {
-        assertion =
-          cfg.runner.hypervisor != "qemu"
-          || !pkgs.stdenv.hostPlatform.isAarch64
-          || config.boot.kernelPackages.kernel == pkgs.linuxPackages_6_12.kernel;
-        message = "the aarch64-linux QEMU Seter Host requires the validated Linux 6.12 LTS kernel";
-      }
-      {
-        assertion = (policyRaw.version or null) == 1;
-        message = "seter.host.policyFile must use Policy File version 1";
-      }
-      {
-        assertion = policyStructureValid;
-        message = "seter.host.policyFile contains unknown fields or invalid table structure";
-      }
-      {
-        assertion = lib.all (name: builtins.hasAttr name cfg.workspaces) (attrNames policyWorkspaces);
-        message = "seter.host.policyFile must not refer to an unknown workspace";
-      }
-      {
-        assertion = lib.all (name: builtins.match "[a-z0-9][a-z0-9-]{0,62}" name != null) (
-          attrNames cfg.workspaces
-        );
-        message = "seter.host.workspaces names must contain only lower-case letters, digits, and hyphens";
-      }
-      {
-        assertion = subnetAddress != null;
-        message = "seter.host.subnet must start with a valid IPv4 address";
-      }
-      {
-        assertion = subnetPrefix <= 30;
-        message = "seter.host.subnet must leave room for a gateway and at least one workspace";
-      }
-      {
-        assertion = gatewayAddress != null && addressIsUsable cfg.gateway;
-        message = "seter.host.gateway must be a usable IPv4 address in seter.host.subnet";
-      }
-      {
-        assertion = lib.all (workspace: parseIpv4 workspace.network.address != null) workspaces;
-        message = "seter.host.workspaces network addresses must be valid IPv4 addresses";
-      }
-      {
-        assertion = lib.all (workspace: addressIsUsable workspace.network.address) workspaces;
-        message = "seter.host.workspaces network addresses must be usable addresses in seter.host.subnet";
-      }
-      {
-        assertion = lib.all (workspace: parseIpv4 workspace.network.address != gatewayAddress) workspaces;
-        message = "seter.host.workspaces network addresses must not reuse seter.host.gateway";
-      }
-      {
-        assertion = hasUniqueValues (valuesFor (workspace: parseIpv4 workspace.network.address));
-        message = "seter.host.workspaces must assign a unique IPv4 address to every workspace";
-      }
-      {
-        assertion = hasUniqueValues (valuesFor (workspace: lib.toLower workspace.network.mac));
-        message = "seter.host.workspaces must assign a unique MAC address to every workspace";
-      }
-      {
-        assertion = hasUniqueValues (valuesFor (workspace: workspace.network.tap));
-        message = "seter.host.workspaces must assign a unique tap interface to every workspace";
-      }
-      {
-        assertion = lib.all (workspace: workspace.network.tap != cfg.bridge) workspaces;
-        message = "seter.host.workspaces tap interfaces must not reuse seter.host.bridge";
-      }
-      {
-        assertion = hasUniqueValues (valuesFor (workspace: lib.toLower workspace.hostname));
-        message = "seter.host.workspaces must assign a unique hostname to every workspace";
-      }
-      {
-        assertion = lib.all (runtime: runtime.account != cfg.operatorGroup) (
-          builtins.attrValues workspaceRuntime
-        );
-        message = "seter.host.operatorGroup must not collide with a workspace runtime account";
-      }
-    ]
-    ++ concatMap (workspace: [
-      {
-        assertion = lib.all hostPatterns.valid (
-          workspace.egress.httpHosts ++ workspace.egress.passthroughHosts
-        );
-        message = "seter.host.workspaces.${workspace.name} HTTP and passthrough grants must be exact lower-case hosts or safe single-label Host Patterns";
-      }
-      {
-        assertion =
-          hasUniqueValues (normalizeHosts workspace.egress.httpHosts)
-          && hasUniqueValues (normalizeHosts workspace.egress.passthroughHosts)
-          && hasUniqueValues (
-            map (
-              destination: "${lib.toLower destination.host}:${toString destination.port}"
-            ) workspace.egress.tcp
-          );
-        message = "seter.host.workspaces.${workspace.name} Policy Grants must not contain duplicates";
-      }
-      {
-        assertion = lib.all (
-          http:
-          lib.all (
-            passthrough: !(hostPatterns.overlaps (lib.toLower http) (lib.toLower passthrough))
-          ) workspace.egress.passthroughHosts
-        ) workspace.egress.httpHosts;
-        message = "seter.host.workspaces.${workspace.name} intercepted HTTP and TLS passthrough Host Patterns must not overlap";
-      }
-      {
-        assertion = workspace.repository == null || workspace.repositories == { };
-        message = "seter.host.workspaces.${workspace.name} cannot combine repository and repositories";
-      }
-      {
-        assertion = workspace.resolvedRepositories != { };
-        message = "seter.host.workspaces.${workspace.name} requires at least one repository";
-      }
-      {
-        assertion =
-          lib.all repositories.validName (attrNames workspace.resolvedRepositories)
-          && lib.all (repository: repositories.validName repository.checkoutName) (
-            repositoryValues workspace
-          );
-        message = "seter.host.workspaces.${workspace.name} repository and checkout names must start with a letter or digit and contain only letters, digits, underscores, dots, or hyphens";
-      }
-      {
-        assertion = hasUniqueValues (
-          map (repository: repository.checkoutName) (repositoryValues workspace)
-        );
-        message = "seter.host.workspaces.${workspace.name} repositories must use unique checkout names";
-      }
-      {
-        assertion =
-          workspace.defaultRepository == null
-          || builtins.hasAttr workspace.defaultRepository workspace.resolvedRepositories;
-        message = "seter.host.workspaces.${workspace.name} defaultRepository must name a registered repository";
-      }
-      {
-        assertion = lib.all (repository: repositories.match repository != null) (
-          repositoryValues workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} repository URL must use HTTPS on port 443 and contain an exact path";
-      }
-      {
-        assertion = lib.all (repository: validRepositoryPath (repositories.path repository)) (
-          repositoryValues workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} repository URL path must not contain empty, dot, or encoded separator segments";
-      }
-      {
-        assertion = lib.all (
-          repository:
-          repository.credential == null || builtins.hasAttr repository.credential workspace.secrets
-        ) (repositoryValues workspace);
-        message = "seter.host.workspaces.${workspace.name} repository credential must reference a defined secret";
-      }
-      {
-        assertion = lib.all (
-          repository:
-          repository.credential == null
-          || (
-            builtins.hasAttr repository.credential workspace.secrets
-            && builtins.elem (repositories.host repository) (
-              normalizeHosts workspace.secrets.${repository.credential}.hosts
-            )
-            && builtins.elem "authorization" (
-              normalizeHeaders workspace.secrets.${repository.credential}.headers
-            )
-          )
-        ) (repositoryValues workspace);
-        message = "seter.host.workspaces.${workspace.name} repository credential must allow the repository's exact host and authorization header";
-      }
-      {
-        assertion =
-          workspace.repository != null
-          || lib.all (
-            repository:
-            repository.credential == null
-            || (
-              builtins.hasAttr repository.credential workspace.secrets
-              && workspace.secrets.${repository.credential}.repositoryOnly
-            )
-          ) (repositoryValues workspace);
-        message = "seter.host.workspaces.${workspace.name} repositories require repositoryOnly = true on their credential bindings (safe revocation after repository removal)";
-      }
-      {
-        assertion = lib.all (secretName: builtins.hasAttr secretName workspace.secrets) (
-          builtins.attrValues workspace.secretVariables
-        );
-        message = "seter.host.workspaces.${workspace.name} secret variables must reference defined secrets";
-      }
-      {
-        assertion = hasUniqueValues [
-          workspace.storage.project.image
-          workspace.storage.home.image
-          workspace.storage.nixStore.image
-        ];
-        message = "seter.host.workspaces.${workspace.name} volume images must use distinct names";
-      }
-      {
-        assertion = hasUniqueValues workspace.hostServices;
-        message = "seter.host.workspaces.${workspace.name}.hostServices must not contain duplicates";
-      }
-      {
-        assertion = lib.all validSecretName (workspaceSecretNames workspace);
-        message = "seter.host.workspaces.${workspace.name} secret names must start with a letter and contain only letters, digits, underscores, or hyphens, up to 63 characters";
-      }
-      {
-        assertion = lib.all (secret: validSecretPlaceholder secret.placeholder) (
-          workspaceSecrets workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} secret placeholders must start with seter-placeholder- and have a URL-safe suffix of at least 16 characters";
-      }
-      {
-        assertion = hasUniqueValues (map (secret: secret.placeholder) (workspaceSecrets workspace));
-        message = "seter.host.workspaces.${workspace.name} secret placeholders must be unique within the workspace";
-      }
-      {
-        assertion = nonOverlappingPlaceholders (
-          map (secret: secret.placeholder) (workspaceSecrets workspace)
-        );
-        message = "seter.host.workspaces.${workspace.name} secret placeholders must not contain one another";
-      }
-      {
-        assertion = lib.all (
-          secret:
-          !builtins.hasContext secret.sourceFile
-          && secret.sourceFile != builtins.storeDir
-          && !lib.hasPrefix "${builtins.storeDir}/" secret.sourceFile
-        ) (workspaceSecrets workspace);
-        message = "seter.host.workspaces.${workspace.name} secret source files must not reference the Nix store or carry Nix string context";
-      }
-      {
-        assertion = lib.all (host: builtins.elem host (allowedSecretHosts workspace)) (
-          secretHosts workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} secret hosts must be declared as intercepted HTTP hosts; TLS passthrough cannot inject secrets";
-      }
-      {
-        assertion = lib.all (secret: hasUniqueValues (normalizeHosts secret.hosts)) (
-          workspaceSecrets workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} secret host lists must not contain case-insensitive duplicates";
-      }
-      {
-        assertion = lib.all (secret: hasUniqueValues (normalizeHeaders secret.headers)) (
-          workspaceSecrets workspace
-        );
-        message = "seter.host.workspaces.${workspace.name} secret header lists must not contain case-insensitive duplicates";
-      }
-      {
-        assertion = lib.all (
-          secret: lib.intersectLists (normalizeHeaders secret.headers) prohibitedSecretHeaders == [ ]
-        ) (workspaceSecrets workspace);
-        message = "seter.host.workspaces.${workspace.name} secret headers must not include routing, framing, hop-by-hop, or proxy authentication headers";
-      }
-    ]) workspaces;
+        assertions = validation.assertions;
 
-    environment.etc = {
-      "seter/workspaces.json" = {
-        source = registryFile;
-        mode = "0444";
-      };
-      "seter/policy.json" = {
-        source = activePolicyFile;
-        mode = "0444";
-      };
-    }
-    // mapAttrs' (
-      name: runner:
-      nameValuePair "seter/runners/${name}" {
-        source = runner;
-      }
-    ) workspaceRunners;
-
-    # Runners are part of the trusted NixOS generation. The /etc entries above
-    # already place each closure in the system closure; declaring them again as
-    # explicit system dependencies keeps that rooting guarantee independent of
-    # how the /etc layout may later change. Older NixOS generations therefore
-    # retain the runners needed for rollback.
-    system.extraDependencies = builtins.attrValues workspaceRunners;
-
-    boot.kernelModules = [
-      "tun"
-      "vhost_net"
-      "vhost_vsock"
-    ];
-
-    networking.dhcpcd.denyInterfaces = [
-      cfg.bridge
-    ]
-    ++ map (workspace: workspace.network.tap) workspaces;
-    networking.networkmanager.unmanaged = [
-      cfg.bridge
-    ]
-    ++ map (workspace: workspace.network.tap) workspaces;
-
-    systemd.services =
-      tapServices
-      // identityVirtiofsdServices
-      // vmServices
-      // {
-        seter-bridge = {
-          description = "Seter workspace bridge";
-          wantedBy = [ "multi-user.target" ];
-          before = map (name: "seter-tap-${name}.service") (attrNames cfg.workspaces);
-          serviceConfig = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            ExecStart = bridgeUp;
-            ExecStop = bridgeDown;
+        environment.etc = {
+          "seter/workspaces.json" = {
+            source = registryFile;
+            mode = "0444";
           };
-        };
-      };
+          "seter/policy.json" = {
+            source = activePolicyFile;
+            mode = "0444";
+          };
+        }
+        // mapAttrs' (
+          name: runner:
+          nameValuePair "seter/runners/${name}" {
+            source = runner;
+          }
+        ) workspaceRunners;
 
-    users.groups = {
-      ${cfg.operatorGroup} = { };
-    }
-    // mapAttrs' (_: runtime: nameValuePair runtime.account { }) workspaceRuntime;
-    users.users = mapAttrs' (
-      _: runtime:
-      nameValuePair runtime.account {
-        isSystemUser = true;
-        group = runtime.account;
-        extraGroups = [ "kvm" ];
+        # Runners are part of the trusted NixOS generation. The /etc entries above
+        # already place each closure in the system closure; declaring them again as
+        # explicit system dependencies keeps that rooting guarantee independent of
+        # how the /etc layout may later change. Older NixOS generations therefore
+        # retain the runners needed for rollback.
+        system.extraDependencies = builtins.attrValues workspaceRunners;
+
+        # Authorize only exact internal commands for configured workspaces. The
+        # privileged command reloads the root-owned registry and constructs the
+        # systemd unit name itself; operators never receive general systemctl or
+        # unrestricted Seter access through sudo.
+        security.sudo.extraRules = [
+          {
+            groups = [ cfg.operatorGroup ];
+            runAs = "root";
+            commands = lifecycleSudoCommands ++ destroyProjectSudoCommands ++ [ gcSudoCommand ];
+          }
+        ];
+
+        # These are used by lifecycle commands and Workspace SSH Identity creation.
+        environment.systemPackages = [
+          cfg.package
+          pkgs.openssh
+        ];
+
+        # The plumbing units expose only the registered TAP and read-only
+        # Workspace SSH Identity. Only seter-vm-* executes the Runner, always as
+        # the dedicated unprivileged workspace account.
       }
-    ) workspaceRuntime;
-
-    systemd.tmpfiles.settings."10-seter" = {
-      "/var/lib/seter".d = {
-        user = "root";
-        group = "root";
-        mode = "0755";
-      };
-      "/var/lib/seter/workspaces".d = {
-        user = "root";
-        group = "root";
-        mode = "0711";
-      };
-      "/var/lib/seter/identities".d = {
-        user = "root";
-        group = "root";
-        mode = "0700";
-      };
-      "/var/lib/seter/known-hosts".d = {
-        user = "root";
-        group = cfg.operatorGroup;
-        mode = "0750";
-      };
-      ${lifecycleLockDirectory}.d = {
-        user = "root";
-        group = "root";
-        mode = "0755";
-      };
-    }
-    // mapAttrs' (
-      _: runtime:
-      nameValuePair runtime.stateDirectory {
-        d = {
-          user = runtime.account;
-          group = runtime.account;
-          mode = "0700";
-        };
-      }
-    ) workspaceRuntime
-    // mapAttrs' (
-      _: runtime:
-      nameValuePair runtime.lifecycleLock {
-        f = {
-          user = "root";
-          group = runtime.account;
-          mode = "0640";
-        };
-      }
-    ) workspaceRuntime;
-
-    systemd.targets = runtimeTargets;
-
-    # Workspace identities are host state, not guest-generated project data.
-    # Generate them during trusted host activation, before any first boot.
-    system.activationScripts.seterWorkspaceState = {
-      deps = [
-        "users"
-        "groups"
-      ];
-      text = lib.concatStringsSep "\n" (
-        mapAttrsToList (name: runtime: ''
-          install -d -m 0700 -o root -g root ${lib.escapeShellArg runtime.identityDirectory}
-          if ! test -f ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}; then
-            ${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N "" \
-              -C ${lib.escapeShellArg "seter workspace ${name}"} \
-              -f ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}
-          fi
-          chown root:root ${lib.escapeShellArg runtime.identityDirectory}/ssh_host_ed25519_key{,.pub}
-          chmod 0600 ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key"}
-          chmod 0644 ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key.pub"}
-
-          install -d -m 0750 -o root -g ${lib.escapeShellArg cfg.operatorGroup} /var/lib/seter/known-hosts
-          install -m 0440 -o root -g ${lib.escapeShellArg cfg.operatorGroup} \
-            ${lib.escapeShellArg "${runtime.identityDirectory}/ssh_host_ed25519_key.pub"} \
-            ${lib.escapeShellArg runtime.knownHostFile}
-
-          install -d -m 0700 -o ${lib.escapeShellArg runtime.account} -g ${lib.escapeShellArg runtime.account} \
-            ${lib.escapeShellArg runtime.stateDirectory}
-        '') workspaceRuntime
-      );
-    };
-
-    # Authorize only exact internal commands for configured workspaces. The
-    # privileged command reloads the root-owned registry and constructs the
-    # systemd unit name itself; operators never receive general systemctl or
-    # unrestricted Seter access through sudo.
-    security.sudo.extraRules = [
-      {
-        groups = [ cfg.operatorGroup ];
-        runAs = "root";
-        commands = lifecycleSudoCommands ++ destroyProjectSudoCommands ++ [ gcSudoCommand ];
-      }
-    ];
-
-    # These are used by lifecycle commands and Workspace SSH Identity creation.
-    environment.systemPackages = [
-      cfg.package
-      pkgs.openssh
-    ];
-
-    # The plumbing units expose only the registered TAP and read-only
-    # Workspace SSH Identity. Only seter-vm-* executes the Runner, always as
-    # the dedicated unprivileged workspace account.
-  };
+      runtime.config
+    ]
+  );
 }
