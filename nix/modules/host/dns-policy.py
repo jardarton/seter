@@ -259,59 +259,34 @@ class PolicyServer:
                 protocol=protocol,
             )
             return error_wire(data, dns.rcode.REFUSED, tcp=tcp)
+        name = ""
+        query_type = ""
+
+        def deny(reason: str) -> bytes:
+            self.audit(
+                source=source,
+                decision="deny",
+                reason=reason,
+                name=name,
+                query_type=query_type,
+                protocol=protocol,
+            )
+            return response_wire(local_response(query, dns.rcode.REFUSED), query, tcp=tcp)
+
         if query.opcode() != dns.opcode.QUERY:
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="only standard DNS queries are accepted",
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("only standard DNS queries are accepted")
         if len(query.question) != 1:
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="exactly one DNS question is required",
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("exactly one DNS question is required")
         if query.answer or query.authority or query.additional:
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="DNS query answer and authority sections must be empty",
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("DNS query answer and authority sections must be empty")
 
         question = query.question[0]
         name = question.name.canonicalize().to_text(omit_final_dot=True)
         query_type = dns.rdatatype.to_text(question.rdtype)
         if question.rdclass != dns.rdataclass.IN:
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="only the IN DNS class is accepted",
-                name=name,
-                query_type=query_type,
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("only the IN DNS class is accepted")
         if not policy_name_allowed(self.allowed_names, name):
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="name is not exactly allowlisted or matched by an allowed Host Pattern",
-                name=name,
-                query_type=query_type,
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("name is not exactly allowlisted or matched by an allowed Host Pattern")
 
         if question.rdtype == dns.rdatatype.AAAA:
             self.audit(
@@ -324,16 +299,7 @@ class PolicyServer:
             )
             return response_wire(local_response(query, dns.rcode.NOERROR), query, tcp=tcp)
         if question.rdtype != dns.rdatatype.A:
-            return self.deny(
-                query,
-                source=source,
-                protocol=protocol,
-                reason="only A and AAAA queries are supported",
-                name=name,
-                query_type=query_type,
-                rcode=dns.rcode.REFUSED,
-                tcp=tcp,
-            )
+            return deny("only A and AAAA queries are supported")
 
         # Build a fresh query. Nothing else from the guest packet—including
         # mixed-case encoding, EDNS options, additional records, or its message
@@ -391,29 +357,6 @@ class PolicyServer:
             protocol=protocol,
         )
         return response_wire(upstream_response, query, tcp=tcp)
-
-    def deny(
-        self,
-        query: dns.message.Message,
-        *,
-        source: str,
-        protocol: str,
-        reason: str,
-        rcode: int,
-        tcp: bool,
-        name: str = "",
-        query_type: str = "",
-    ) -> bytes:
-        self.audit(
-            source=source,
-            decision="deny",
-            reason=reason,
-            name=name,
-            query_type=query_type,
-            protocol=protocol,
-        )
-        return response_wire(local_response(query, rcode), query, tcp=tcp)
-
 
 class UDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, server: PolicyServer):
