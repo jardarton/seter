@@ -3,12 +3,9 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, IsTerminal, Write},
-    net::{SocketAddr, TcpStream},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output},
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -16,158 +13,16 @@ use fs2::FileExt;
 
 use crate::registry::{Registry, Repository, RunnerIdentity, Workspace};
 
+mod privilege;
+mod ssh;
+use privilege::{delegate_or_run, enter_privileged_mode, uses_test_state};
+pub use ssh::{proxy_ca, ssh_host_key};
+use ssh::{shell_quote, SshSession};
+
 const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
 const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
 
-const PROXY_CA_FILE: &str = "/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem";
-const KNOWN_HOSTS_ROOT: &str = "/var/lib/seter/known-hosts";
-const SSH_WAIT: Duration = Duration::from_secs(30);
-
-const BOOTSTRAP_SCRIPT: &str = r#"
-set -eu
-
-url=$1
-target=$2
-branch=$3
-placeholder=$4
-marker=${target%/*}/.seter-bootstrap-${target##*/}
-
-fail() {
-    printf 'seter init: %s\n' "$1" >&2
-    exit 20
-}
-
-configure_credential() {
-    if test -n "$placeholder"; then
-        git -C "$target" config --local "http.$url.extraHeader" "Authorization: $placeholder"
-    fi
-}
-
-ensure_marker() {
-    if test -L "$marker" || { test -e "$marker" && ! test -d "$marker"; }; then
-        fail "bootstrap marker $marker is not a directory; refusing to overwrite it"
-    fi
-    if test -d "$marker" && test -n "$(find "$marker" -mindepth 1 -maxdepth 1 -print -quit)"; then
-        fail "bootstrap marker $marker contains unrelated content; refusing to overwrite it"
-    fi
-    if ! test -d "$marker"; then
-        mkdir -- "$marker"
-    fi
-}
-
-clone_repository() {
-    ensure_marker
-    set -- clone --origin origin
-    if test -n "$branch"; then
-        set -- "$@" --branch "$branch"
-    fi
-    set -- "$@" -- "$url" "$target"
-    if test -n "$placeholder"; then
-        git -c "http.$url.extraHeader=Authorization: $placeholder" "$@"
-    else
-        git "$@"
-    fi
-    rmdir -- "$marker"
-    configure_credential
-}
-
-if test -L "$target"; then
-    fail "checkout path $target is a symbolic link; refusing to overwrite it"
-fi
-
-if ! test -e "$target"; then
-    clone_repository
-    printf 'Initialized repository at %s\n' "$target"
-    exit 0
-fi
-
-if ! test -d "$target"; then
-    fail "checkout path $target is not a directory; refusing to overwrite it"
-fi
-
-if test -L "$target/.git"; then
-    fail "checkout path $target has a symbolic-link .git directory; refusing to alter it"
-fi
-
-if ! test -e "$target/.git"; then
-    if test -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)"; then
-        fail "checkout path $target contains unrelated content; move it aside or choose a different checkout name"
-    fi
-    clone_repository
-    printf 'Initialized repository at %s\n' "$target"
-    exit 0
-fi
-
-if ! test -d "$target/.git"; then
-    fail "checkout path $target has an unsupported .git file; refusing to alter it"
-fi
-
-actual_url=$(git -C "$target" remote get-url origin 2>/dev/null || true)
-if test "$actual_url" != "$url"; then
-    fail "checkout path $target has origin $actual_url, expected $url; refusing to alter it"
-fi
-
-recover_empty_worktree=false
-if git -C "$target" rev-parse --verify HEAD >/dev/null 2>&1; then
-    if test -d "$marker"; then
-        if test -z "$(git -C "$target" status --porcelain)"; then
-            rmdir -- "$marker"
-            configure_credential
-            printf 'Workspace repository is already initialized at %s\n' "$target"
-            exit 0
-        fi
-        if test -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)"; then
-            # Seter left its marker and no working files exist, so it is safe
-            # to reconstruct the index and working tree from the fetched HEAD.
-            recover_empty_worktree=true
-        else
-            fail "checkout path $target is a partial repository with working data; refusing to overwrite it"
-        fi
-    else
-        configure_credential
-        printf 'Workspace repository is already initialized at %s\n' "$target"
-        exit 0
-    fi
-fi
-
-# A repository with no checked-out commit is recoverable only while no working
-# data exists. Never fetch, checkout, clean, reset, or otherwise mutate a
-# partial bootstrap that contains anything except Seter's clone metadata.
-if test -n "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)"; then
-    fail "checkout path $target is a partial repository with working data; refusing to overwrite it"
-fi
-
-ensure_marker
-configure_credential
-git -C "$target" fetch origin
-if test -n "$branch"; then
-    git -C "$target" show-ref --verify --quiet "refs/remotes/origin/$branch" \
-        || fail "configured branch $branch does not exist on the approved repository"
-    if git -C "$target" show-ref --verify --quiet "refs/heads/$branch"; then
-        git -C "$target" checkout "$branch"
-    else
-        git -C "$target" checkout --track -b "$branch" "origin/$branch"
-    fi
-else
-    git -C "$target" remote set-head origin --auto >/dev/null
-    default_ref=$(git -C "$target" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) \
-        || fail "approved repository does not advertise a default branch"
-    default_branch=${default_ref#refs/remotes/origin/}
-    if git -C "$target" show-ref --verify --quiet "refs/heads/$default_branch"; then
-        git -C "$target" checkout "$default_branch"
-    else
-        git -C "$target" checkout --track -b "$default_branch" "$default_ref"
-    fi
-fi
-
-if test "$recover_empty_worktree" = true; then
-    git -C "$target" read-tree HEAD
-    git -C "$target" checkout-index --all
-fi
-
-rmdir -- "$marker"
-printf 'Recovered and initialized repository at %s\n' "$target"
-"#;
+const BOOTSTRAP_SCRIPT: &str = include_str!("lifecycle/bootstrap.sh");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -630,167 +485,6 @@ fn explain_direnv(name: &str, repository: &str) {
     );
 }
 
-fn temporary_known_hosts(workspace: &Workspace, host_key: &str) -> Result<TemporaryFile> {
-    let known_hosts = TemporaryFile::new("known-hosts")?;
-    fs::write(
-        known_hosts.path(),
-        format!("{} {}\n", workspace.network.address, host_key.trim()),
-    )
-    .context("failed to write temporary known_hosts file")?;
-    Ok(known_hosts)
-}
-
-struct SshSession {
-    known_hosts: TemporaryFile,
-    destination: String,
-}
-
-impl SshSession {
-    fn connect(name: &str, workspace: &Workspace) -> Result<Self> {
-        let host_key = workspace_host_key(name)?;
-        validate_public_key(&host_key)?;
-        wait_for_ssh(name, workspace)?;
-        let known_hosts = temporary_known_hosts(workspace, &host_key)?;
-        let destination = format!("{}@{}", workspace.ssh.user, workspace.network.address);
-        Ok(Self {
-            known_hosts,
-            destination,
-        })
-    }
-
-    fn command(&self, tty: bool) -> Command {
-        let mut command = ssh_command(&self.known_hosts);
-        if tty {
-            command.arg("-t");
-        }
-        command.arg(&self.destination);
-        command
-    }
-}
-
-fn ssh_command(known_hosts: &TemporaryFile) -> Command {
-    let mut ssh = command("SETER_SSH", "ssh");
-    ssh.arg("-o")
-        .arg("StrictHostKeyChecking=yes")
-        .arg("-o")
-        .arg(format!(
-            "UserKnownHostsFile={}",
-            known_hosts.path().display()
-        ))
-        .arg("-o")
-        .arg("GlobalKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("ForwardAgent=no")
-        .arg("-o")
-        .arg("ForwardX11=no")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-o")
-        .arg("ConnectionAttempts=1")
-        .arg("-o")
-        .arg("ServerAliveInterval=5")
-        .arg("-o")
-        .arg("ServerAliveCountMax=2");
-    ssh
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-pub fn ssh_host_key(name: &str) -> Result<i32> {
-    let registry = Registry::load_default()?;
-    registry.workspace(name)?;
-    print_host_key(&workspace_host_key(name)?)
-}
-
-pub fn proxy_ca() -> Result<i32> {
-    let path = env::var_os("SETER_PROXY_CA_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(PROXY_CA_FILE));
-    let metadata = fs::symlink_metadata(&path).with_context(|| {
-        format!(
-            "cannot read the proxy CA at {}; ensure seter-proxy.service has started",
-            path.display()
-        )
-    })?;
-    ensure!(
-        metadata.file_type().is_file(),
-        "proxy CA path {} is not a regular file",
-        path.display()
-    );
-
-    let certificate = fs::read(&path)
-        .with_context(|| format!("failed to read proxy CA certificate {}", path.display()))?;
-    ensure!(
-        !certificate
-            .windows(b"PRIVATE KEY".len())
-            .any(|window| window == b"PRIVATE KEY"),
-        "refusing to print proxy CA file containing private key material"
-    );
-
-    let fingerprint = command("SETER_OPENSSL", "openssl")
-        .args(["x509", "-in"])
-        .arg(&path)
-        .args(["-noout", "-fingerprint", "-sha256"])
-        .output()
-        .context("failed to execute openssl while validating the proxy CA")?;
-    ensure!(
-        fingerprint.status.success(),
-        "proxy CA certificate is invalid: {}",
-        String::from_utf8_lossy(&fingerprint.stderr).trim()
-    );
-
-    io::stdout()
-        .write_all(&certificate)
-        .context("failed to print proxy CA certificate")?;
-    eprintln!("{}", String::from_utf8_lossy(&fingerprint.stdout).trim());
-    Ok(0)
-}
-
-fn workspace_host_key(name: &str) -> Result<String> {
-    let root = env::var_os("SETER_KNOWN_HOSTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(KNOWN_HOSTS_ROOT));
-    let path = root.join(name);
-    match fs::read_to_string(&path) {
-        Ok(key) => {
-            let key = key.trim().to_owned();
-            validate_public_key(&key).with_context(|| {
-                format!("host-created Workspace SSH Identity at {} is invalid", path.display())
-            })?;
-            Ok(key)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => bail!(
-            "workspace {name:?} has no host-created Workspace SSH Identity at {}; redeploy the NixOS host configuration",
-            path.display()
-        ),
-        Err(error) => Err(error).with_context(|| {
-            format!("failed to read Workspace SSH Identity public key {}", path.display())
-        }),
-    }
-}
-
-fn print_host_key(key: &str) -> Result<i32> {
-    validate_public_key(key)?;
-
-    let key_file = TemporaryFile::new("host-key")?;
-    fs::write(key_file.path(), format!("{key}\n"))?;
-    let fingerprint = command("SETER_SSH_KEYGEN", "ssh-keygen")
-        .arg("-l")
-        .arg("-f")
-        .arg(key_file.path())
-        .output()
-        .context("failed to execute ssh-keygen")?;
-    ensure_success("ssh-keygen", &fingerprint)?;
-
-    println!("{key}");
-    eprintln!("{}", String::from_utf8_lossy(&fingerprint.stdout).trim());
-    Ok(0)
-}
-
 fn validate_runner(
     runner: &Path,
     workspace_name: &str,
@@ -931,38 +625,6 @@ fn print_status(name: &str, workspace: &Workspace, state: State, verbose: bool) 
     Ok(())
 }
 
-fn wait_for_ssh(name: &str, workspace: &Workspace) -> Result<()> {
-    let address = SocketAddr::from((workspace.network.address, 22));
-    let deadline = Instant::now() + SSH_WAIT;
-    while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok() {
-            return Ok(());
-        }
-        let state = state_for(name, workspace)?;
-        ensure!(
-            matches!(state, State::Running | State::Starting),
-            "workspace {name:?} stopped while waiting for SSH"
-        );
-        thread::sleep(Duration::from_millis(500));
-    }
-    bail!(
-        "timed out after {}s waiting for SSH at {address}",
-        SSH_WAIT.as_secs()
-    )
-}
-
-fn validate_public_key(key: &str) -> Result<()> {
-    let mut fields = key.split_whitespace();
-    let kind = fields.next().context("SSH public key has no key type")?;
-    let body = fields.next().context("SSH public key has no key data")?;
-    ensure!(
-        kind.starts_with("ssh-") || kind.starts_with("ecdsa-") || kind.starts_with("sk-"),
-        "unsupported SSH public key type {kind:?}"
-    );
-    ensure!(!body.is_empty(), "SSH public key has empty key data");
-    Ok(())
-}
-
 fn run_systemctl<const N: usize>(arguments: [&str; N]) -> Result<()> {
     let output = command("SETER_SYSTEMCTL", "systemctl")
         .args(arguments)
@@ -985,86 +647,6 @@ fn ensure_success(description: &str, output: &Output) -> Result<()> {
             format!(": {}", stderr.trim())
         }
     )
-}
-
-fn run_elevated(arguments: &[OsString]) -> Result<()> {
-    // Wrapped Nix packages set this to the public wrapper path. Rust's
-    // current_exe() sees the wrapper's private payload, which would not match
-    // the exact command path authorized by the generated sudoers rules.
-    let executable = match env::var_os("SETER_PRIVILEGED_HELPER") {
-        Some(path) => PathBuf::from(path),
-        None => env::current_exe().context("failed to locate the seter executable")?,
-    };
-    // NixOS exposes the setuid-root sudo entry point through /run/wrappers;
-    // the immutable Nix store binary itself intentionally has no setuid bit.
-    let output = command("SETER_SUDO", "/run/wrappers/bin/sudo")
-        .arg("--")
-        .arg(executable)
-        .args(arguments)
-        .output()
-        .context("failed to invoke privileged Seter helper through sudo")?;
-    if !output.stdout.is_empty() {
-        std::io::stdout().write_all(&output.stdout)?;
-    }
-    if !output.stderr.is_empty() {
-        std::io::stderr().write_all(&output.stderr)?;
-    }
-    ensure_success("privileged Seter helper", &output)
-}
-
-fn delegate_or_run(
-    workspace: Option<&str>,
-    arguments: &[OsString],
-    privileged: impl FnOnce() -> Result<i32>,
-) -> Result<i32> {
-    if uses_test_state() || is_root()? {
-        return privileged();
-    }
-    // Catch typos before sudo; the privileged handler independently reloads
-    // and validates the root-owned registry after elevation.
-    if let Some(name) = workspace {
-        Registry::load_default()?.workspace(name)?;
-    }
-    run_elevated(arguments)?;
-    Ok(0)
-}
-
-fn is_root() -> Result<bool> {
-    let status = fs::read_to_string("/proc/self/status")
-        .context("failed to read effective user ID from /proc/self/status")?;
-    let effective = status
-        .lines()
-        .find_map(|line| line.strip_prefix("Uid:"))
-        .and_then(|uids| uids.split_whitespace().nth(1))
-        .context("/proc/self/status did not contain an effective user ID")?;
-    Ok(effective == "0")
-}
-
-fn enter_privileged_mode() -> Result<()> {
-    if !is_root()? {
-        ensure!(uses_test_state(), "this internal command must run as root");
-        return Ok(());
-    }
-
-    // The privileged half always uses host-owned configuration, paths and
-    // executables. Environment overrides exist only for unprivileged tests
-    // and must never turn a narrowly scoped sudo invocation into arbitrary
-    // root command execution or filesystem writes.
-    for variable in [
-        "SETER_REGISTRY",
-        "SETER_STATE_DIR",
-        "SETER_TEST_MODE",
-        "SETER_ALLOW_NON_STORE_RUNNER",
-        "SETER_SYSTEMCTL",
-        "SETER_DEBUGFS",
-        "SETER_SSH_KEYGEN",
-        "SETER_SSH",
-        "SETER_SUDO",
-        "SETER_PRIVILEGED_HELPER",
-    ] {
-        env::remove_var(variable);
-    }
-    Ok(())
 }
 
 fn command(variable: &str, default: &str) -> Command {
@@ -1118,51 +700,11 @@ fn acquire_lock(name: &str, lock_path: &Path) -> Result<fs::File> {
     Ok(lock)
 }
 
-// Unprivileged tests run the privileged halves in-process against a private
-// state directory. Both variables are required so that setting only a state
-// directory can never silently skip real privilege separation, and both are
-// discarded before any genuinely privileged work.
-fn uses_test_state() -> bool {
-    env::var_os("SETER_STATE_DIR").is_some() && env::var_os("SETER_TEST_MODE").is_some()
-}
-
-struct TemporaryFile(PathBuf);
-
-impl TemporaryFile {
-    fn new(label: &str) -> Result<Self> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = env::temp_dir().join(format!("seter-{label}-{}-{nonce}", std::process::id()));
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("failed to create temporary file {}", path.display()))?;
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TemporaryFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, time::SystemTime};
 
-    use super::{
-        acquire_lock, classify_state, run_remote_command, shell_quote, SshSession, State,
-        TemporaryFile,
-    };
+    use super::{acquire_lock, classify_state, run_remote_command, shell_quote, State};
 
     #[test]
     fn classifies_systemd_and_build_state() {
@@ -1196,29 +738,6 @@ mod tests {
             ),
             "cd '/project/project' || { printf 'seter run: registered checkout is missing; run seter init %s\\n' 'minimal' >&2; exit 72; }; exec direnv exec . 'printf' '%s\\n' 'a'\\''b; $(touch nope)'"
         );
-    }
-
-    #[test]
-    fn ssh_session_owns_host_file_and_places_destination_after_options() {
-        let known_hosts = TemporaryFile::new("ssh-session-test").unwrap();
-        let known_hosts_path = known_hosts.path().to_owned();
-        let session = SshSession {
-            known_hosts,
-            destination: "seter@192.0.2.2".to_owned(),
-        };
-        let command = session.command(true);
-        let arguments = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(arguments[arguments.len() - 2..], ["-t", "seter@192.0.2.2"]);
-        assert!(arguments.contains(&format!(
-            "UserKnownHostsFile={}",
-            known_hosts_path.display()
-        )));
-        drop(session);
-        assert!(!known_hosts_path.exists());
     }
 
     #[test]
