@@ -260,16 +260,11 @@ fn bootstrap_remote_command(repository: &Repository) -> String {
 }
 
 pub fn up(name: &str) -> Result<i32> {
-    if uses_test_state() || is_root()? {
-        return start_workspace(name);
-    }
-
-    // Give the caller a useful error for typos before asking sudo. This is
-    // only a usability check; the privileged half reloads and revalidates the
-    // root-owned registry independently.
-    Registry::load_default()?.workspace(name)?;
-    run_elevated(&[OsString::from("__start"), OsString::from(name)])?;
-    Ok(0)
+    delegate_or_run(
+        Some(name),
+        &[OsString::from("__start"), OsString::from(name)],
+        || start_workspace(name),
+    )
 }
 
 pub fn start_workspace(name: &str) -> Result<i32> {
@@ -315,13 +310,11 @@ pub fn start_workspace(name: &str) -> Result<i32> {
 }
 
 pub fn down(name: &str) -> Result<i32> {
-    if uses_test_state() || is_root()? {
-        return stop_workspace(name);
-    }
-
-    Registry::load_default()?.workspace(name)?;
-    run_elevated(&[OsString::from("__stop"), OsString::from(name)])?;
-    Ok(0)
+    delegate_or_run(
+        Some(name),
+        &[OsString::from("__stop"), OsString::from(name)],
+        || stop_workspace(name),
+    )
 }
 
 pub fn stop_workspace(name: &str) -> Result<i32> {
@@ -376,9 +369,6 @@ pub fn reset(name: &str, home: bool, nix_store: bool, yes: bool) -> Result<i32> 
         io::stdin().read_line(&mut answer)?;
         ensure!(answer.trim() == name, "reset cancelled");
     }
-    if uses_test_state() || is_root()? {
-        return reset_workspace(name, home, nix_store);
-    }
     let mut arguments = vec![OsString::from("__reset"), OsString::from(name)];
     if home {
         arguments.push(OsString::from("--home"));
@@ -386,8 +376,7 @@ pub fn reset(name: &str, home: bool, nix_store: bool, yes: bool) -> Result<i32> 
     if nix_store {
         arguments.push(OsString::from("--nix-store"));
     }
-    run_elevated(&arguments)?;
-    Ok(0)
+    delegate_or_run(None, &arguments, || reset_workspace(name, home, nix_store))
 }
 
 pub fn reset_workspace(name: &str, home: bool, nix_store: bool) -> Result<i32> {
@@ -462,11 +451,11 @@ pub fn destroy_project(name: &str, yes: bool) -> Result<i32> {
             "destruction cancelled"
         );
     }
-    if uses_test_state() || is_root()? {
-        return destroy_project_volume(name);
-    }
-    run_elevated(&[OsString::from("__destroy-project"), OsString::from(name)])?;
-    Ok(0)
+    delegate_or_run(
+        None,
+        &[OsString::from("__destroy-project"), OsString::from(name)],
+        || destroy_project_volume(name),
+    )
 }
 
 pub fn destroy_project_volume(name: &str) -> Result<i32> {
@@ -487,11 +476,7 @@ pub fn destroy_project_volume(name: &str) -> Result<i32> {
 }
 
 pub fn gc() -> Result<i32> {
-    if uses_test_state() || is_root()? {
-        return collect_garbage();
-    }
-    run_elevated(&[OsString::from("__gc")])?;
-    Ok(0)
+    delegate_or_run(None, &[OsString::from("__gc")], collect_garbage)
 }
 
 pub fn collect_garbage() -> Result<i32> {
@@ -1025,6 +1010,23 @@ fn run_elevated(arguments: &[OsString]) -> Result<()> {
         std::io::stderr().write_all(&output.stderr)?;
     }
     ensure_success("privileged Seter helper", &output)
+}
+
+fn delegate_or_run(
+    workspace: Option<&str>,
+    arguments: &[OsString],
+    privileged: impl FnOnce() -> Result<i32>,
+) -> Result<i32> {
+    if uses_test_state() || is_root()? {
+        return privileged();
+    }
+    // Catch typos before sudo; the privileged handler independently reloads
+    // and validates the root-owned registry after elevation.
+    if let Some(name) = workspace {
+        Registry::load_default()?.workspace(name)?;
+    }
+    run_elevated(arguments)?;
+    Ok(0)
 }
 
 fn is_root() -> Result<bool> {
