@@ -54,11 +54,17 @@ let
   };
   policyFile = pkgs.writeText "seter-proxy-policy.json" (builtins.toJSON policy);
   addon = ./proxy-addon.py;
-  # The pinned Nixpkgs currently carries msgpack 1.2 with mitmproxy's
-  # conservative <=1.1.2 metadata bound. Relax only that dependency until
-  # Nixpkgs catches up, preserving checks for every other runtime dependency.
+  # Relax msgpack's conservative metadata bound when Nixpkgs has not already
+  # relaxed all dependencies. Preserve the upstream setting otherwise.
   mitmproxy = pkgs.mitmproxy.overridePythonAttrs (old: {
-    pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "msgpack" ];
+    pythonRelaxDeps =
+      let
+        relaxDeps = old.pythonRelaxDeps or false;
+      in
+      if relaxDeps == true then
+        true
+      else
+        (if relaxDeps == false then [ ] else relaxDeps) ++ [ "msgpack" ];
   });
   proxyAccount = "seter-proxy";
   readyFile = "/run/seter-proxy/policy-ready";
