@@ -1366,6 +1366,12 @@
               touch "$out"
             '';
 
+        status-snapshot = pkgs.runCommand "seter-status-snapshot-check" { } ''
+          ${pkgs.python3}/bin/python ${../tests/status-snapshot.py} \
+            ${lib.getExe self.packages.${system}.seter} ${registryFile}
+          touch "$out"
+        '';
+
         host-patterns = import ../tests/host-patterns.nix { inherit pkgs; };
 
         policy-ownership = import ../tests/policy-ownership.nix {
