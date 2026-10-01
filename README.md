@@ -28,11 +28,15 @@ Seter gives related projects a **workspace**: a micro-VM containing one or more 
 
 ## Status
 
-Seter is early software, and it is usable today on NixOS with KVM.
+Seter is early software. Option names and the registry schema can still change
+between versions.
 
-Working now: trusted host deployment, per-workspace micro-VMs, safe and retryable repository bootstrap over authenticated HTTPS, the complete network boundary, destination-bound secret injection, strict SSH host-key checking, persistent storage, and the daily `init` / `shell` / `run` / `down` cycle. An ordinary development flake runs inside a workspace. Manual macOS deployment and operator use have been validated on an M5 Mac; the [validation summary](./docs/macos-validation.md) distinguishes that coverage from remaining complete-workflow and operability gates.
-
-Not there yet: a native macOS CLI, automatic Lima or tunnel management ([roadmap](./macos-roadmap.md)), guest profiles other than `default`, IPv6, and automated repository credentials. Option names and the registry schema can still change between versions.
+- [Core roadmap](./ROADMAP.md): canonical feature status, evidence, remaining
+  milestone gates, and deferred work for native NixOS with KVM.
+- [macOS validation](./docs/macos-validation.md): canonical physical test
+  results and limits.
+- [macOS roadmap](./macos-roadmap.md): remaining acceptance gates and later
+  client work.
 
 Start with the [quickstart](./quickstart.md) to configure a host and launch your first workspace. See [project-description.md](./project-description.md) for the intended architecture and threat model.
 

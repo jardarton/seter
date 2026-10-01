@@ -1,7 +1,7 @@
 # Trusted `default` Guest Profile
 
-**Status:** implemented. This is the only public Guest Profile in the first
-usable milestone.
+See the [`default` Guest Profile milestone](../ROADMAP.md#3-implement-the-trusted-default-guest-profile)
+for implementation status and evidence.
 
 The host builds every registered `default` Runner from trusted Seter code. A
 repository supplies only its normal development flake and optional `.envrc`;

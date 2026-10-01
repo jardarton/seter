@@ -2,8 +2,8 @@
 
 ## Scope
 
-This manual deployment path has been exercised on an M5 Mac. See the
-[validation summary](./macos-validation.md) for coverage and remaining limits,
+See the [validation summary](./macos-validation.md) for physical coverage and
+remaining limits,
 and the [operator workflow](./macos-workflow.md) for daily use after deployment.
 
 This procedure creates one persistent `aarch64-linux` Seter Host from the
@@ -31,8 +31,7 @@ deletion or disk corruption and no backup/restore facility.
 
 ## Prerequisites
 
-Nested virtualization requires Apple Silicon M3 or newer and macOS 15 or newer;
-physical validation so far covers an M5 Mac, not every eligible combination.
+Nested virtualization requires Apple Silicon M3 or newer and macOS 15 or newer.
 Install Nix with flakes enabled and Lima 2.0 or newer. The wrapper currently
 recognizes M3, M4, and M5 chips and rejects other CPU/OS combinations.
 
@@ -134,9 +133,8 @@ limactl shell seter -- bash -lc '
 Stop each Workspace with `seter down`. For QEMU Runners, the Host requests an
 ACPI powerdown through the private QMP socket and waits for QEMU to exit, so
 systemd does not terminate the VMM while the guest flushes its filesystems.
-The physical-Mac acceptance run verified unsynchronized Project, Home, and
-private Store markers byte-for-byte after this lifecycle. Do not use important
-data as an acceptance marker.
+See [established storage behavior](./macos-validation.md#established-behavior)
+for physical results. Do not use important data as an acceptance marker.
 
 Deploy the next generation, then run the same command. The root filesystem UUID
 and existing volume paths/sizes must be unchanged. Start the Workspace and

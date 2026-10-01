@@ -11,7 +11,7 @@ prototype before adoption.
 | Upstream mTLS | Reuse mitmproxy client certificates for exact-destination authority without guest private keys. | Keep keys Host-side; prefer per-Workspace proxy isolation before adding more shared credentials. |
 | AWS request signing | Evaluate [aws-sigv4-proxy](https://github.com/awslabs/aws-sigv4-proxy). | Fix destination, service, region, and least-privilege role; do not expose arbitrary upstream selection. |
 | Dev Container Guest Profile | Evaluate [Envbuilder](https://github.com/coder/envbuilder) rather than implementing the ecosystem anew. | VM remains the security boundary; repository configuration requires explicit approval; Nix-native default stays available. |
-| Dynamic credentials | Consume short-lived credentials from existing secret managers and workload-identity tools. | Seter binds authority; it should not become a secret manager or run arbitrary credential-provider commands as root. See [repository credential work](../TODO.md). |
+| Dynamic credentials | Consume short-lived credentials from existing secret managers and workload-identity tools. | Seter binds authority; it should not become a secret manager or run arbitrary credential-provider commands as root. See [repository credential work](../ROADMAP.md#automate-github-repository-credentials). |
 | Disposable Workspaces | Explore copy-on-write state for one-off tasks. | First define how dirty Project data enters and leaves; never make working-tree deletion implicit. |
 | Prebuilt environments | Reduce repeated dependency realization if measured usage warrants it. | Execute repository code only inside the Workspace, never during trusted Host deployment. |
 

@@ -1,6 +1,8 @@
 # Workspace storage lifecycle
 
-**Status:** persistent Project, Home, and private Nix-store volumes and safe reset are implemented.
+See the [storage and identity milestone](../ROADMAP.md#2-close-foundational-storage-and-identity-gaps)
+and [reset and retirement milestone](../ROADMAP.md#7-add-safe-reset-and-retirement-operations)
+for implementation status and evidence.
 
 A workspace has three persistent storage classes with different safety contracts.
 
@@ -45,8 +47,8 @@ Resetting Home removes direnv approvals and user configuration. Resetting the pr
 
 Runner closures are rooted exclusively by retained NixOS system generations;
 normal host Nix garbage collection therefore removes them only after those
-generation roots become unreachable. `seter gc` removes Seter's explicitly
-replaceable host projections and reports retained orphan state. It does not
-remove any workspace volume.
+generation roots become unreachable. `seter gc` removes retired workspaces'
+public host-key projections and reports retained orphan state. It preserves
+all workspace volumes and the underlying Workspace SSH Identities.
 
 Workspace Retirement stops active use and identifies retained state after registry removal. `seter destroy-project` is a separate, strongly confirmed operation for a still-registered, stopped workspace; it warns that the offline image may contain dirty or unpushed Git state before removing it. Destruction removes **every repository checkout** in that workspace, including retained checkouts no longer in the registry. Removing a repository from configuration never deletes its working data. Retirement, reset, garbage collection, and destruction are distinct operations.

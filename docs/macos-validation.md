@@ -2,11 +2,14 @@
 
 ## Scope
 
+This is the canonical source for physical macOS validation results and limits.
+See the [macOS roadmap](../macos-roadmap.md) for remaining acceptance gates and
+later client work.
+
 Manual physical testing on an **M5 Mac** established the nested QEMU/KVM
 deployment and operator path. This is a summary of supplied acceptance results,
 not a claim that Linux CI reproduces macOS behavior or that all eligible Macs
-have been tested. The complete-workflow and operability gates in the
-[roadmap](../macos-roadmap.md) remain open.
+have been tested.
 
 The validated stack used Lima/vz, the pinned nixos-lima bootstrap, QEMU/KVM,
 Linux 6.12 LTS in both Linux layers, and a four-vCPU Workspace. Dependency
