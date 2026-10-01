@@ -103,7 +103,7 @@ Each workspace accepts a nonempty `repositories` collection. Use `--repo <key>`
 with `init`, `shell`, or `run`; configure `defaultRepository` for convenient
 entry when there is more than one. `shell --root` opens `/project` for work
 across checkouts. See [multi-repository workspaces](./docs/multi-repository-workspaces.md)
-for configuration, shared-authority implications, safe removal, and migration.
+for configuration, shared-authority implications, and safe removal.
 
 Create the workspace directly in trusted NixOS configuration:
 

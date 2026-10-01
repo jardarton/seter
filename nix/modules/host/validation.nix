@@ -212,10 +212,6 @@ in
       message = "seter.host.workspaces.${workspace.name} intercepted HTTP and TLS passthrough Host Patterns must not overlap";
     }
     {
-      assertion = workspace.repository == null || workspace.repositories == { };
-      message = "seter.host.workspaces.${workspace.name} cannot combine repository and repositories";
-    }
-    {
       assertion = workspace.resolvedRepositories != { };
       message = "seter.host.workspaces.${workspace.name} requires at least one repository";
     }
@@ -275,16 +271,14 @@ in
       message = "seter.host.workspaces.${workspace.name} repository credential must allow the repository's exact host and authorization header";
     }
     {
-      assertion =
-        workspace.repository != null
-        || lib.all (
-          repository:
-          repository.credential == null
-          || (
-            builtins.hasAttr repository.credential workspace.secrets
-            && workspace.secrets.${repository.credential}.repositoryOnly
-          )
-        ) (repositoryValues workspace);
+      assertion = lib.all (
+        repository:
+        repository.credential == null
+        || (
+          builtins.hasAttr repository.credential workspace.secrets
+          && workspace.secrets.${repository.credential}.repositoryOnly
+        )
+      ) (repositoryValues workspace);
       message = "seter.host.workspaces.${workspace.name} repositories require repositoryOnly = true on their credential bindings (safe revocation after repository removal)";
     }
     {

@@ -50,16 +50,6 @@ let
       ];
     }).config;
   config = host base;
-  repositoryLib = import ../nix/lib/repositories.nix { inherit lib; };
-  legacy = {
-    repository = {
-      url = "https://git.example/team/original.git";
-      checkoutName = "retained";
-      branch = null;
-      credential = null;
-    };
-    repositories = { };
-  };
   rejected = workspace: lib.any (assertion: !assertion.assertion) (host workspace).assertions;
   python = pkgs.python3.withPackages (ps: [
     (ps.mitmproxy.overridePythonAttrs (old: {
@@ -67,23 +57,6 @@ let
     }))
   ]);
 in
-assert (repositoryLib.resolve legacy).retained.checkoutName == "retained";
-assert
-  builtins.attrNames (
-    repositoryLib.resolve (
-      legacy
-      // {
-        repository = legacy.repository // {
-          checkoutName = null;
-        };
-      }
-    )
-  ) == [ "original" ];
-assert
-  repositoryLib.resolve legacy == repositoryLib.resolve {
-    repository = null;
-    repositories.retained = legacy.repository;
-  };
 assert lib.all (assertion: assertion.assertion) config.assertions;
 assert rejected (
   base
@@ -93,7 +66,6 @@ assert rejected (
   }
 );
 assert rejected (base // { defaultRepository = "missing"; });
-assert rejected (base // { repository.url = "https://git.example/team/legacy.git"; });
 assert rejected (
   base
   // {

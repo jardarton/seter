@@ -15,12 +15,6 @@ let
 in
 {
   options = {
-    repository = mkOption {
-      type = types.nullOr (types.submodule (import ./repository.nix));
-      default = null;
-      description = "Legacy single repository; use repositories instead. Cannot be combined with repositories.";
-    };
-
     repositories = mkOption {
       type = types.attrsOf (types.submodule (import ./repository.nix));
       default = { };
@@ -38,7 +32,7 @@ in
       readOnly = true;
       type = types.attrsOf (types.submodule (import ./repository.nix));
       default = (import ../../lib/repositories.nix { inherit lib; }).resolve config;
-      description = "Normalized repository collection, including legacy configuration.";
+      description = "Repository collection with checkout names resolved from keys and explicit overrides.";
     };
 
     guestProfile = mkOption {

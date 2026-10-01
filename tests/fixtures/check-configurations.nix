@@ -15,7 +15,7 @@ let
     }:
     {
       guestProfile = "default";
-      repository = {
+      repositories.workspace = {
         url = "https://example.invalid/owner/workspace.git";
         branch = null;
         checkoutName = null;
@@ -93,13 +93,14 @@ let
     })
     // {
       developmentPorts = [ 3000 ];
-      repository = {
+      repositories.workspace = {
         url = "https://api.example.com/owner/workspace.git";
         branch = null;
         checkoutName = null;
         credential = "githubToken";
       };
       secrets.githubToken = {
+        repositoryOnly = true;
         placeholder = "seter-placeholder-github-0123456789abcdef";
         sourceFile = "/run/secrets/identity-github-token";
         hosts = [ "api.example.com" ];

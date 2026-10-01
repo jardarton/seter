@@ -9,7 +9,6 @@ use std::{io, process::ExitCode};
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command, PolicyCommand};
-use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
     match run() {
@@ -23,7 +22,6 @@ fn main() -> ExitCode {
 
 fn run() -> Result<i32> {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
 
     match cli.command {
         Command::List => {
@@ -90,19 +88,6 @@ fn run() -> Result<i32> {
             Ok(0)
         }
     }
-}
-
-fn init_tracing(verbose: u8) {
-    let fallback = match verbose {
-        0 => "warn",
-        1 => "info",
-        _ => "debug",
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| fallback.into()))
-        .with_writer(io::stderr)
-        .init();
 }
 
 #[cfg(test)]

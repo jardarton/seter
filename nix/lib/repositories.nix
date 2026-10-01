@@ -7,20 +7,11 @@ rec {
   hosts = workspace: lib.unique (map host (builtins.attrValues workspace.resolvedRepositories));
   resolve =
     workspace:
-    let
-      legacy = workspace.repository;
-      legacyName =
-        if legacy.checkoutName != null then
-          legacy.checkoutName
-        else
-          lib.removeSuffix ".git" (lib.last (lib.splitString "/" legacy.url));
-      inputs = if legacy == null then workspace.repositories else { ${legacyName} = legacy; };
-    in
     lib.mapAttrs (
       name: repository:
       repository
       // {
         checkoutName = if repository.checkoutName == null then name else repository.checkoutName;
       }
-    ) inputs;
+    ) workspace.repositories;
 }

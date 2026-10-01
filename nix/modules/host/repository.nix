@@ -14,7 +14,7 @@
     checkoutName = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9][a-zA-Z0-9_.-]*");
       default = null;
-      description = "Directory under /project; defaults to the repository key (URL basename for legacy repository).";
+      description = "Directory under /project; defaults to the repository key.";
     };
     credential = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z][a-zA-Z0-9_-]{0,62}");

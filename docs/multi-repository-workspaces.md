@@ -109,26 +109,12 @@ deletes the entire Project Volume**, including all registered and retained
 unregistered checkouts. Removing or renaming a registry entry is not a file
 migration or deletion operation.
 
-## Migration from a single repository
-
-The legacy `repository = { ... };` input remains accepted, but cannot be
-combined with `repositories`. It is immediately normalized into the same
-collection used by all runtime paths. Its key and checkout name retain the old
-URL-basename (without `.git`) or explicit `checkoutName` behavior.
-
-To migrate, replace `repository` with `repositories.<key>`. Choose the existing
-checkout directory as the key, or preserve it explicitly with `checkoutName`.
-Set `repositoryOnly = true` on any repository credential binding. Keep the
-Workspace name and storage image names unchanged: neither the VM identity nor
-its existing volumes need replacement. Add `defaultRepository` before adding
-other repositories if you want existing `shell` / `run` commands to keep
-selecting that checkout.
+## Deployment
 
 The generated lifecycle registry is version 7 and proxy policy is version 4;
 the Runner identity remains version 3. Deploy CLI and host configuration
 together through the normal NixOS generation, rather than editing generated
-JSON. Legacy input compatibility does not imply compatibility with older
-generated registry versions.
+JSON.
 
 ## Validation
 

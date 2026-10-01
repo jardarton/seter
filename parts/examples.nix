@@ -7,7 +7,7 @@ let
   minimalWorkspace = {
     hostname = "minimal.vm";
     guestProfile = "default";
-    repository = {
+    repositories.minimal = {
       url = "https://example.invalid/owner/minimal.git";
       branch = null;
       checkoutName = null;

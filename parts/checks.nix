@@ -280,7 +280,7 @@
 
       nonHttpsRepositoryRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
-          repository = validWorkspaces.alpha.repository // {
+          repositories.workspace = validWorkspaces.alpha.repositories.workspace // {
             url = "ssh://git@example.invalid/owner/workspace.git";
           };
         };
@@ -288,18 +288,16 @@
 
       invalidRepositoryHostRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
-          repository = validWorkspaces.alpha.repository // {
+          repositories.workspace = validWorkspaces.alpha.repositories.workspace // {
             url = "https://./owner/workspace.git";
           };
         };
       };
 
-      # The URL path is permissive by design, so the derived checkout name must
-      # be constrained even though an explicit override is type-checked.
       traversingCheckoutNameRejected = configurationRejected {
         broken = validWorkspaces.alpha // {
-          repository = validWorkspaces.alpha.repository // {
-            url = "https://example.invalid/owner/..";
+          repositories.workspace = validWorkspaces.alpha.repositories.workspace // {
+            checkoutName = "..";
           };
         };
       };

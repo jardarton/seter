@@ -74,7 +74,6 @@ pub(super) fn enter_privileged_mode() -> Result<()> {
         "SETER_TEST_MODE",
         "SETER_ALLOW_NON_STORE_RUNNER",
         "SETER_SYSTEMCTL",
-        "SETER_DEBUGFS",
         "SETER_SSH_KEYGEN",
         "SETER_SSH",
         "SETER_SUDO",
