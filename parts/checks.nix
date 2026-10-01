@@ -1372,6 +1372,12 @@
           touch "$out"
         '';
 
+        privilege = pkgs.runCommand "seter-privilege-check" { } ''
+          ${pkgs.python3}/bin/python ${../tests/privilege.py} \
+            ${lib.getExe self.packages.${system}.seter} ${registryFile}
+          touch "$out"
+        '';
+
         host-patterns = import ../tests/host-patterns.nix { inherit pkgs; };
 
         policy-ownership = import ../tests/policy-ownership.nix {
@@ -1685,6 +1691,16 @@
             machine.fail("su - operator -c 'sudo -n true'")
             machine.fail("su - operator -c 'sudo -n -u outsider ${lifecycleHelper} __start alpha'")
             machine.fail("su - operator -c 'seter __start alpha'")
+            # Audit uses the same packaged helper and NixOS sudo wrapper,
+            # while remaining strictly root-only on the privileged side.
+            machine.succeed("su - operator -c 'PATH=/no-sudo ${lifecycleHelper} audit alpha'")
+            machine.fail("su - outsider -c 'seter audit alpha'")
+            machine.succeed("set +e; su - operator -c 'SETER_TEST_MODE=1 SETER_STATE_DIR=/tmp/test-state seter __audit alpha' 2> /tmp/audit-not-root; code=$?; set -e; test $code = 1; grep -F 'must run as root' /tmp/audit-not-root")
+            # Even a direct root invocation discards test configuration before
+            # registry loading or systemd calls; sudo's env reset is not needed.
+            machine.succeed("SETER_REGISTRY=/dev/null SETER_TEST_MODE=1 SETER_STATE_DIR=/tmp/test-state seter __audit alpha")
+            machine.succeed("SETER_REGISTRY=/dev/null SETER_TEST_MODE=1 SETER_STATE_DIR=/tmp/test-state SETER_SYSTEMCTL=/bin/false seter __stop alpha")
+            machine.succeed("set +e; SETER_REGISTRY=/dev/null seter __audit missing 2> /tmp/audit-missing; code=$?; set -e; test $code = 1; grep -F 'is not configured' /tmp/audit-missing")
             # 4096 MiB of guest RAM plus the default 512 MiB of VMM overhead.
             machine.succeed("test $(systemctl show --value --property MemoryMax seter-vm-alpha.service) = 4831838208")
             machine.succeed("test $(systemctl show --value --property CPUQuotaPerSecUSec seter-vm-alpha.service) = 2s")

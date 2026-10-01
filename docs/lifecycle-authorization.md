@@ -30,6 +30,8 @@ seter up project
 
 `seter down` similarly delegates to `__stop`. The NixOS module generates passwordless sudo rules for each exact operation and configured workspace. It does not use a wildcard and does not authorize arbitrary `seter` or `systemctl` commands.
 
+Lifecycle and audit share helper selection and use `/run/wrappers/bin/sudo` by default. `seter audit` delegates to the workspace-scoped `__audit` helper and streams its observations. Both privileged paths discard test overrides before reloading the Host-owned registry. Only lifecycle permits an unprivileged test path, requiring both `SETER_TEST_MODE` and `SETER_STATE_DIR`; audit always requires root.
+
 The internal commands are implementation details, not a user-facing API. Hiding them from CLI help is only a usability measure; authorization comes from sudoers and privileged revalidation.
 
 ## Privileged-side requirements
