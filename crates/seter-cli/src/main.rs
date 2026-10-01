@@ -3,6 +3,7 @@ mod cli;
 mod host_patterns;
 mod lifecycle;
 mod policy;
+mod privilege;
 mod registry;
 
 use std::{io, process::ExitCode};

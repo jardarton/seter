@@ -1,9 +1,6 @@
 use std::{
     collections::BTreeMap,
-    env,
-    ffi::OsString,
     io::{BufRead, BufReader},
-    path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -12,7 +9,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::registry::Registry;
+use crate::{privilege, registry::Registry};
 
 const MAX_JOURNAL_RECORDS: usize = 20_000;
 const MAX_GROUPS: usize = 2_000;
@@ -100,13 +97,7 @@ pub fn show(workspace: &str, since: &str, show_paths: bool) -> Result<i32> {
 pub fn collect(workspace: &str, cutoff: Option<u64>) -> Result<AuditCollection> {
     let registry = Registry::load_default()?;
     registry.workspace(workspace)?;
-    let executable = env::var_os("SETER_PRIVILEGED_HELPER")
-        .map(PathBuf::from)
-        .unwrap_or(env::current_exe().context("failed to locate the seter executable")?);
-    let sudo = env::var_os("SETER_SUDO").unwrap_or_else(|| OsString::from("sudo"));
-    let mut child = Command::new(sudo)
-        .arg("--")
-        .arg(executable)
+    let mut child = privilege::elevated_command()?
         .arg("__audit")
         .arg(workspace)
         .stdout(Stdio::piped())
@@ -188,10 +179,7 @@ fn add_record(
 }
 
 pub fn privileged_export(workspace: &str) -> Result<i32> {
-    ensure!(
-        unsafe { libc::geteuid() } == 0,
-        "the internal audit helper must run as root"
-    );
+    privilege::enter_privileged_mode()?;
     let registry = Registry::load_default()?;
     registry.workspace(workspace)?;
     let output = Command::new("journalctl")
