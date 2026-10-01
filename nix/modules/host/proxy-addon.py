@@ -7,6 +7,15 @@ import socket
 import time
 from pathlib import Path
 
+from host_patterns import (
+    canonical_host,
+    canonical_pattern,
+    exact_valid,
+    host_allowed,
+    patterns_overlap,
+    request_host,
+)
+
 from mitmproxy import ctx, http, tls
 from mitmproxy.exceptions import OptionsError
 from mitmproxy.proxy.mode_specs import RegularMode
@@ -18,12 +27,6 @@ class SeterPolicy:
     _MAX_CREDENTIAL_BYTES = 16 * 1024
     _CREDENTIAL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,254}")
     _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-    _HOST_NAME = re.compile(
-        r"(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])"
-    )
-    _HOST_PATTERN = re.compile(
-        r"(?:\*\.)?(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])"
-    )
     _PLACEHOLDER = re.compile(r"seter-placeholder-[A-Za-z0-9_-]{16,}")
     _SECRET_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,62}")
     _PROHIBITED_SECRET_HEADERS = frozenset(
@@ -123,17 +126,7 @@ class SeterPolicy:
                 if (
                     not isinstance(name, str)
                     or not isinstance(http_hosts, list)
-                    or not all(
-                        isinstance(host, str)
-                        and self._HOST_PATTERN.fullmatch(host) is not None
-                        for host in http_hosts
-                    )
                     or not isinstance(passthrough_hosts, list)
-                    or not all(
-                        isinstance(host, str)
-                        and self._HOST_PATTERN.fullmatch(host) is not None
-                        for host in passthrough_hosts
-                    )
                     or not isinstance(secrets, dict)
                     or not isinstance(repositories, dict)
                     or not repositories
@@ -141,16 +134,16 @@ class SeterPolicy:
                     raise ValueError("invalid workspace policy")
 
                 normalized_http_hosts = frozenset(
-                    self._normalize(host) for host in http_hosts
+                    canonical_pattern(host) for host in http_hosts
                 )
                 normalized_passthrough_hosts = frozenset(
-                    self._normalize(host) for host in passthrough_hosts
+                    canonical_pattern(host) for host in passthrough_hosts
                 )
                 if (
                     len(normalized_http_hosts) != len(http_hosts)
                     or len(normalized_passthrough_hosts) != len(passthrough_hosts)
                     or any(
-                        self._patterns_overlap(http, passthrough)
+                        patterns_overlap(http, passthrough)
                         for http in normalized_http_hosts
                         for passthrough in normalized_passthrough_hosts
                     )
@@ -178,11 +171,7 @@ class SeterPolicy:
                         or self._PLACEHOLDER.fullmatch(placeholder) is None
                         or not isinstance(hosts, list)
                         or not hosts
-                        or not all(
-                            isinstance(host, str)
-                            and self._HOST_NAME.fullmatch(host) is not None
-                            for host in hosts
-                        )
+                        or not all(exact_valid(host) for host in hosts)
                         or not isinstance(headers, list)
                         or not headers
                         or not all(
@@ -194,7 +183,7 @@ class SeterPolicy:
                         raise ValueError(f"invalid secret policy for {secret_name!r}")
 
                     normalized_hosts = frozenset(
-                        self._normalize(host) for host in hosts
+                        canonical_host(host) for host in hosts
                     )
                     normalized_headers = frozenset(
                         header.lower() for header in headers
@@ -240,7 +229,7 @@ class SeterPolicy:
                         or not isinstance(repository, dict)
                     ):
                         raise ValueError(f"invalid repository policy for {name!r}/{repository_name!r}")
-                    repository_host = self._normalize(repository.get("host"))
+                    repository_host = canonical_host(repository.get("host"))
                     repository_path = repository.get("path")
                     repository_credential = repository.get("credential")
                     repository_path_lower = (
@@ -249,8 +238,7 @@ class SeterPolicy:
                         else ""
                     )
                     if (
-                        self._HOST_NAME.fullmatch(repository_host) is None
-                        or repository_host not in normalized_http_hosts
+                        repository_host not in normalized_http_hosts
                         or not isinstance(repository_path, str)
                         or not repository_path.startswith("/")
                         or "?" in repository_path
@@ -300,12 +288,6 @@ class SeterPolicy:
             Path(ready_path).touch(mode=0o600)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise OptionsError(f"cannot load Seter policy: {error}") from error
-
-    @staticmethod
-    def _normalize(host: object) -> str:
-        if not isinstance(host, str):
-            return ""
-        return host.rstrip(".").lower()
 
     def _workspace(self, client_ip: str) -> dict[str, object] | None:
         return self.workspaces.get(client_ip)
@@ -553,24 +535,6 @@ class SeterPolicy:
             )
 
     @staticmethod
-    def _pattern_matches(pattern: str, host: str) -> bool:
-        if pattern == host:
-            return True
-        if not pattern.startswith("*."):
-            return False
-        suffix = pattern[2:]
-        prefix, separator, remainder = host.partition(".")
-        return bool(prefix) and separator == "." and remainder == suffix
-
-    @classmethod
-    def _patterns_overlap(cls, left: str, right: str) -> bool:
-        return cls._pattern_matches(left, right) or cls._pattern_matches(right, left)
-
-    @classmethod
-    def _host_allowed(cls, patterns: frozenset[str], host: str) -> bool:
-        return any(cls._pattern_matches(pattern, host) for pattern in patterns)
-
-    @staticmethod
     def _client_ip(flow: http.HTTPFlow) -> str:
         return flow.client_conn.peername[0]
 
@@ -595,7 +559,7 @@ class SeterPolicy:
         """
         client_ip = self._client_ip(flow)
         workspace = self._workspace(client_ip)
-        host = self._normalize(flow.request.host)
+        host = request_host(flow.request.host)
         port = flow.request.port
         decision = "deny"
         reason = "source is not a registered Seter workspace"
@@ -606,7 +570,7 @@ class SeterPolicy:
             allowed_hosts = workspace["httpHosts"] | workspace["passthroughHosts"]
             if port != 443:
                 reason = "explicit HTTP CONNECT is restricted to port 443"
-            elif not self._host_allowed(allowed_hosts, host):
+            elif not host_allowed(allowed_hosts, host):
                 reason = (
                     f"host {host or '<missing>'!r} is not in this workspace's "
                     "HTTP or TLS-passthrough allowlist"
@@ -656,7 +620,7 @@ class SeterPolicy:
         """
         client_ip = data.context.client.peername[0]
         workspace = self._workspace(client_ip)
-        sni = self._normalize(data.client_hello.sni)
+        sni = request_host(data.client_hello.sni)
         if workspace is None:
             self._audit(
                 {
@@ -670,7 +634,7 @@ class SeterPolicy:
             )
             return
 
-        if self._host_allowed(workspace["passthroughHosts"], sni):
+        if host_allowed(workspace["passthroughHosts"], sni):
             # The original packet destination is attacker-controlled. Resolve
             # the allowlisted SNI once, reject host-private destinations, and
             # relay only to the resulting pinned address.
@@ -702,7 +666,7 @@ class SeterPolicy:
                     "reason": "SNI is allowlisted for TLS passthrough",
                 }
             )
-        elif not self._host_allowed(workspace["httpHosts"], sni):
+        elif not host_allowed(workspace["httpHosts"], sni):
             self._audit(
                 {
                     "workspace": workspace["name"],
@@ -720,7 +684,7 @@ class SeterPolicy:
         # In transparent mode Request.host is the packet's original IP.
         # pretty_host prefers the HTTP Host/:authority value, which we then
         # validate and use to replace—not merely annotate—the upstream target.
-        host = self._normalize(flow.request.pretty_host)
+        host = request_host(flow.request.pretty_host)
         scheme = flow.request.scheme.lower()
         decision = "deny"
         reason = "source is not a registered Seter workspace"
@@ -735,9 +699,9 @@ class SeterPolicy:
         if workspace is not None:
             if scheme not in ("http", "https"):
                 reason = f"unsupported URL scheme {scheme!r}"
-            elif not self._host_allowed(workspace["httpHosts"], host):
+            elif not host_allowed(workspace["httpHosts"], host):
                 reason = f"host {host or '<missing>'!r} is not in this workspace's HTTP allowlist"
-            elif scheme == "https" and self._normalize(flow.client_conn.sni) != host:
+            elif scheme == "https" and request_host(flow.client_conn.sni) != host:
                 reason = "HTTPS SNI and HTTP host do not match"
             else:
                 port = 443 if scheme == "https" else 80
@@ -808,7 +772,7 @@ class SeterPolicy:
         if workspace is None:
             return
 
-        host = self._normalize(flow.request.pretty_host)
+        host = request_host(flow.request.pretty_host)
         scheme = flow.request.scheme.lower()
         redacted_secrets = self._redact_response_secrets(
             flow, workspace, host, scheme

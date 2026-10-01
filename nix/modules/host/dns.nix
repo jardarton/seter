@@ -52,7 +52,8 @@ let
 
   upstreamAccount = "seter-dns-upstream";
   dnsPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.dnspython ]);
-  dnsPolicyProgram = ./dns-policy.py;
+  policyPython = import ../../lib/policy-python.nix { inherit pkgs; };
+  dnsPolicyProgram = "${policyPython}/dns-policy.py";
 
   upstreamConfig = pkgs.writeText "seter-dns-upstream.conf" ''
     port=${toString dnsCfg.upstreamPort}

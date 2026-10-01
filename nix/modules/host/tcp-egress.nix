@@ -16,13 +16,8 @@ let
     ;
 
   tcpSets = cfg.generated.tcpSets;
-  refreshProgram = pkgs.writeTextFile {
-    name = "seter-tcp-egress-refresh";
-    executable = true;
-    text = builtins.replaceStrings [ "#!/usr/bin/env python3" ] [ "#!${pkgs.python3}/bin/python3" ] (
-      builtins.readFile ./tcp-egress-refresh.py
-    );
-  };
+  policyPython = import ../../lib/policy-python.nix { inherit pkgs; };
+  refreshProgram = "${pkgs.python3}/bin/python3 ${policyPython}/tcp-egress-refresh.py";
   workspacesWithTcp = lib.filterAttrs (_: workspace: workspace.egress.tcp != [ ]) cfg.workspaces;
 
   serviceName = name: "seter-tcp-egress-${name}";

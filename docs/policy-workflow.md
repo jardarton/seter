@@ -64,9 +64,24 @@ Review never creates credential bindings, invokes arbitrary deployment commands,
 
 ## Host Patterns
 
+Policy hostnames are ASCII multi-label DNS names, normalized to lower case.
+Labels contain letters, digits, and internal hyphens, with at most 63 characters
+per label and 253 characters for the complete name or Host Pattern. Policy
+entries reject trailing dots, empty labels, underscores, and Unicode; exact
+IDNA names may use their ASCII `xn--` form. HTTP/TLS requests may include one
+trailing DNS root dot, which is removed before matching.
+
+Literal addresses must be canonical dotted-decimal IPv4. Numeric names with
+leading zeros, missing octets, or out-of-range octets are rejected, as are IPv6
+literals. Wildcards cannot name literal addresses or IDNA suffixes.
+
 A Policy Grant may name an exact host or use one leading wildcard. `*.example.com` matches `api.example.com`, but does not match the apex `example.com` or a deeper name such as `deep.api.example.com`.
 
 Wildcard patterns are explicit operator choices. Seter never generalizes observed exact hosts into a wildcard proposal. It rejects wildcards at public-suffix and shared-hosting boundaries, rejects wildcard syntax anywhere except the complete leading label, and displays the expanded authority prominently during review. Intercepted-HTTP and passthrough patterns must not overlap.
+
+Nix, Rust, and the Python policy loaders enforce this contract against the
+same [validation cases](../crates/seter-cli/data/host-pattern-cases.json) and
+public suffix list, including its wildcard rules and exceptions.
 
 Credential bindings remain exact-host and, where applicable, exact-repository-path grants. A wildcard can authorize intercepted HTTP or TLS passthrough egress but can never authorize Seter to inject a credential. Direct-TCP grants remain exact-host only; wildcard direct TCP would require dynamic DNS-driven firewall authority and is outside the initial contract.
 

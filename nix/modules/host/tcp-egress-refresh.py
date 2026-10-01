@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from host_patterns import canonical_host
+
 
 def ipv4_literal(value: str):
     try:
@@ -59,7 +61,7 @@ def main():
 
     if not args.flush:
         for destination in config["destinations"]:
-            host = destination["host"].lower()
+            host = canonical_host(destination["host"])
             literal = ipv4_literal(host)
             addresses = (
                 {literal}

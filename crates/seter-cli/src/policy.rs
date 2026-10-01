@@ -2,10 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    net::Ipv4Addr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 use anyhow::{ensure, Context, Result};
@@ -14,11 +12,14 @@ use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
-use crate::{audit, registry::Registry};
+use crate::{
+    audit,
+    host_patterns::{patterns_overlap, validate_exact_host, validate_host_pattern},
+    registry::Registry,
+};
 
 pub const ACTIVE_POLICY_PATH: &str = "/etc/seter/policy.json";
 const POLICY_VERSION: u32 = 1;
-const PUBLIC_SUFFIX_LIST: &str = include_str!("../data/public_suffix_list.dat");
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -147,102 +148,6 @@ fn validate_patterns(workspace: &str, field: &str, patterns: &[String]) -> Resul
         );
     }
     Ok(())
-}
-
-pub fn validate_host_pattern(pattern: &str) -> Result<()> {
-    ensure!(
-        pattern == pattern.to_ascii_lowercase(),
-        "Host Patterns must be lower-case"
-    );
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        validate_exact_host(suffix)?;
-        ensure!(
-            !suffix.contains('*'),
-            "wildcard syntax is allowed only as the complete leading label"
-        );
-        ensure!(
-            !wildcard_suffix_forbidden(suffix),
-            "wildcards at public or shared-hosting suffix {suffix:?} are prohibited"
-        );
-        return Ok(());
-    }
-    ensure!(
-        !pattern.contains('*'),
-        "wildcard syntax is allowed only as the complete leading label"
-    );
-    validate_exact_host(pattern)
-}
-
-fn validate_exact_host(host: &str) -> Result<()> {
-    if host.parse::<Ipv4Addr>().is_ok() {
-        return Ok(());
-    }
-    ensure!(
-        !host.is_empty() && host.len() <= 253 && !host.ends_with('.'),
-        "host must be a non-empty DNS name without a trailing dot"
-    );
-    ensure!(
-        host.contains('.'),
-        "host must be an absolute multi-label DNS name"
-    );
-    for label in host.split('.') {
-        ensure!(
-            !label.is_empty()
-                && label.len() <= 63
-                && label
-                    .as_bytes()
-                    .first()
-                    .is_some_and(u8::is_ascii_alphanumeric)
-                && label
-                    .as_bytes()
-                    .last()
-                    .is_some_and(u8::is_ascii_alphanumeric)
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-            "host contains an invalid DNS label"
-        );
-    }
-    Ok(())
-}
-
-// Public suffixes cannot safely be wildcarded. Shared hosting suffixes are
-// included explicitly because tenants under them do not share authority.
-fn wildcard_suffix_forbidden(suffix: &str) -> bool {
-    static RULES: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
-    let rules = RULES.get_or_init(|| {
-        PUBLIC_SUFFIX_LIST
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .collect()
-    });
-    let labels: Vec<_> = suffix.split('.').collect();
-    if labels.len() < 2 || labels.iter().any(|label| label.starts_with("xn--")) {
-        return true;
-    }
-    if rules.contains(format!("!{suffix}").as_str()) {
-        return false;
-    }
-    rules.contains(suffix)
-        || suffix
-            .split_once('.')
-            .is_some_and(|(_, parent)| rules.contains(format!("*.{parent}").as_str()))
-}
-
-pub fn patterns_overlap(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    fn wildcard_matches(pattern: &str, exact: &str) -> bool {
-        let Some(suffix) = pattern.strip_prefix("*.") else {
-            return false;
-        };
-        exact.strip_suffix(suffix).is_some_and(|prefix| {
-            prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.') && prefix.len() > 1
-        })
-    }
-    wildcard_matches(left, right) || wildcard_matches(right, left)
 }
 
 pub fn status(workspace: &str, file: &Path) -> Result<i32> {
@@ -611,13 +516,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_pattern_boundaries_are_single_label() {
-        assert!(patterns_overlap("*.example.com", "api.example.com"));
-        assert!(!patterns_overlap("*.example.com", "example.com"));
-        assert!(!patterns_overlap("*.example.com", "deep.api.example.com"));
-    }
-
-    #[test]
     fn preserves_comments_while_editing_grants() {
         let original = r#"version = 1
 # consumer context stays here
@@ -685,26 +583,5 @@ http-hosts = ["old.example.com"]
         atomic_write(&path, b"replacement\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "replacement\n");
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn rejects_recursive_and_shared_hosting_wildcards() {
-        for value in [
-            "**.example.com",
-            "*.*.example.com",
-            "*.com",
-            "*.github.io",
-            "*.s3.amazonaws.com",
-            "*.uk.com",
-        ] {
-            assert!(validate_host_pattern(value).is_err(), "accepted {value}");
-        }
-        validate_host_pattern("*.example.com").unwrap();
-    }
-
-    #[test]
-    fn observation_candidates_must_be_exact_hosts() {
-        assert!(validate_exact_host("*.example.com").is_err());
-        validate_exact_host("api.example.com").unwrap();
     }
 }

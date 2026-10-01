@@ -53,7 +53,8 @@ let
     );
   };
   policyFile = pkgs.writeText "seter-proxy-policy.json" (builtins.toJSON policy);
-  addon = ./proxy-addon.py;
+  policyPython = import ../../lib/policy-python.nix { inherit pkgs; };
+  addon = "${policyPython}/proxy-addon.py";
   # Relax msgpack's conservative metadata bound when Nixpkgs has not already
   # relaxed all dependencies. Preserve the upstream setting otherwise.
   mitmproxy = pkgs.mitmproxy.overridePythonAttrs (old: {

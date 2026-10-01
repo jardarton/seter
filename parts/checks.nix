@@ -1366,6 +1366,8 @@
               touch "$out"
             '';
 
+        host-patterns = import ../tests/host-patterns.nix { inherit pkgs; };
+
         policy-ownership = import ../tests/policy-ownership.nix {
           inherit
             self

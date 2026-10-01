@@ -242,6 +242,12 @@ in
       message = "seter.host.workspaces.${workspace.name} repository URL must use HTTPS on port 443 and contain an exact path";
     }
     {
+      assertion = lib.all (repository: hostPatterns.exactValid (repositories.host repository)) (
+        repositoryValues workspace
+      );
+      message = "seter.host.workspaces.${workspace.name} repository hosts must be valid exact DNS names or canonical IPv4 addresses";
+    }
+    {
       assertion = lib.all (repository: validRepositoryPath (repositories.path repository)) (
         repositoryValues workspace
       );

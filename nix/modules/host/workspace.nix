@@ -8,8 +8,9 @@ let
   inherit (lib) mkOption types;
 
   hostNameType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
-  httpHostType = types.strMatching "([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
-  hostPatternType = types.strMatching "(\\*\\.)?([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])";
+  hostPatterns = import ./host-patterns.nix { inherit lib; };
+  exactHostType = types.addCheck types.str hostPatterns.exactValid;
+  hostPatternType = types.addCheck types.str hostPatterns.valid;
   httpHeaderType = types.strMatching "[!#$%&'*+.^_`|~0-9a-zA-Z-]+";
   imageNameType = types.strMatching "[a-zA-Z0-9_.-]+";
 in
@@ -181,7 +182,7 @@ in
           types.submodule {
             options = {
               host = mkOption {
-                type = hostNameType;
+                type = exactHostType;
                 description = "Allowed non-HTTP TCP destination hostname or literal IPv4 address.";
               };
               port = mkOption {
@@ -221,7 +222,7 @@ in
               description = "Runtime path containing the real secret; it must not be a Nix store path.";
             };
             hosts = mkOption {
-              type = types.nonEmptyListOf httpHostType;
+              type = types.nonEmptyListOf exactHostType;
               description = "Intercepted HTTPS destination hosts to which the secret may be sent.";
             };
             headers = mkOption {
