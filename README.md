@@ -261,6 +261,8 @@ nix flake check
 
 The default development shell is available on `x86_64-linux`, `aarch64-linux`, and Apple Silicon macOS (`aarch64-darwin`).
 
+`parts/checks.nix` wires together the scenarios under [`tests/`](./tests/README.md). The extracted Python CLI tests can also run directly against a built binary and the synthetic registry fixtures; their module docstrings describe the arguments.
+
 On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that boots the host-deployed default Runner through the CLI, connects over SSH, and verifies project-volume persistence across a restart. It requires writable `/dev/kvm` and nested virtualization support.
 
 ## Flake outputs

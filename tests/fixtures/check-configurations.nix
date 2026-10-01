@@ -113,17 +113,10 @@ let
   };
   identityRegistryFile =
     identityHostConfiguration.config.environment.etc."seter/workspaces.json".source;
-  identityActivePolicyFile =
-    identityHostConfiguration.config.environment.etc."seter/policy.json".source;
   identityDesiredPolicyFile = builtins.toFile "seter-identity-desired-policy.toml" ''
     version = 1
     [workspaces.identity.egress]
     http-hosts = ["api.example.com"]
-  '';
-  identityRevokedPolicyFile = pkgs.writeText "seter-identity-revoked-policy.toml" ''
-    version = 1
-    [workspaces.identity.egress]
-    http-hosts = []
   '';
   identityWorkspace = import ../../nix/lib/mk-runner-definition.nix {
     name = "identity";
@@ -199,9 +192,7 @@ in
     identityWorkspaceEntry
     identityHostConfiguration
     identityRegistryFile
-    identityActivePolicyFile
     identityDesiredPolicyFile
-    identityRevokedPolicyFile
     identityWorkspace
     identityGuestConfiguration
     qemuIdentityHostConfiguration
