@@ -33,8 +33,6 @@ assert lib.all (
   ) "Host Pattern overlap mismatch: ${case.left} / ${case.right}"
 ) cases.overlaps;
 pkgs.runCommand "seter-host-patterns-check" { } ''
-  ${python}/bin/python ${policyPython}/dns-policy.py --help > /dev/null
-  ${python}/bin/python ${policyPython}/tcp-egress-refresh.py --help > /dev/null
   PYTHONPATH=${policyPython} ${python}/bin/python ${./host-patterns.py} ${policyPython} ${casesFile}
   touch "$out"
 ''

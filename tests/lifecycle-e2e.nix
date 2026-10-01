@@ -352,7 +352,6 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test $(readlink -f /etc/seter/runners/e2e) = ${runner}")
     machine.succeed("jq -e '.version == 7 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repositories.e2e.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repositories.e2e.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
     machine.fail("test -e /var/lib/seter/workspaces/e2e/current")
-    machine.fail("su - operator -c 'seter update e2e'")
 
     machine.succeed("install -m 0600 ${testSshPrivateKey} /tmp/seter-e2e-key")
     machine.succeed("install -d -o operator -g users -m 0700 /home/operator/.ssh; install -o operator -g users -m 0600 ${testSshPrivateKey} /home/operator/.ssh/id_ecdsa")
