@@ -8,6 +8,12 @@ The milestone requires both automated KVM evidence and a private real-project tr
 
 Breaking changes are allowed. The current APIs have no compatibility or migration requirement.
 
+This is the canonical source for core feature status and milestone progress.
+Guides describe behavior and link here for status. Physical macOS results and
+limits belong in [macOS validation](./docs/macos-validation.md); remaining
+macOS acceptance gates and client work belong in the
+[macOS roadmap](./macos-roadmap.md).
+
 ## What the current vertical slice proves
 
 The existing implementation provides substantial machinery worth preserving and adapting:
@@ -153,7 +159,7 @@ Volume destruction is a separate, strongly confirmed stopped-only operation.
 - Implement stopped-workspace reset for Home, private Nix store, or both.
 - Define `--all-state` as Home plus private Nix store, never Project Volume.
 - Preserve Workspace SSH Identity, deployed Runner, registry, and policy across reset.
-- Implement `seter gc` for unreachable Runner roots and explicitly replaceable host artifacts only.
+- Implement `seter gc` to remove retired public host-key projections while preserving all workspace volumes and SSH identities; Runner closure retention follows NixOS generation roots.
 - Identify retained orphaned state after Workspace Retirement.
 - Keep Project Volume destruction a separate, strongly confirmed operation with dirty/unpushed-state warnings where inspectable.
 
@@ -184,11 +190,39 @@ After automated success, perform a private real-project trial involving normal d
 - arbitrary project-owned NixOS modules or a specialized capability schema;
 - SSH Git transport;
 - wildcard direct TCP;
+- IPv6;
+- [automated repository credentials](#automate-github-repository-credentials);
 - automatic `.envrc` approval;
 - mutable or automatically learned runtime policy;
 - Herdr integration and remote agent restoration;
 - disposable/snapshotted command workspaces;
 - automatic Project Volume deletion.
+
+### Automate GitHub repository credentials
+
+Manual per-workspace PAT creation and rotation is too tedious for repeatable
+workspace onboarding. Investigate a host-side GitHub App credential broker.
+
+The intended flow is:
+
+- use GitHub's App Manifest flow for a one-time guided setup;
+- require explicit account-owner confirmation when creating and installing the
+  App;
+- store the App private key in the consumer's secret manager, never in Seter's
+  public configuration or a guest;
+- mint short-lived installation access tokens narrowed to one repository and
+  the minimum required permissions;
+- expose each token to Seter as a runtime credential and inject it only for the
+  registered repository's exact Git smart-HTTP paths;
+- refresh tokens before their roughly one-hour expiry without exposing them to
+  the workspace;
+- handle credential reload without unnecessarily disrupting unrelated active
+  workspace traffic;
+- support selected-repository installations for tighter authority, while
+  documenting the authority trade-off of all-repository installations.
+
+A consumer-owned implementation may be useful for proving the design before
+adding a general dynamic credential-provider interface to Seter.
 
 ## Completion criteria
 

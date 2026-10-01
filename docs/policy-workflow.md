@@ -1,6 +1,7 @@
 # Policy observation and review
 
-**Status:** implemented. Policy File import, bounded single-label Host Patterns, workspace-scoped audit, interactive review/revocation, atomic edits, and desired-versus-active status are covered by Rust, evaluation, and KVM checks.
+See the [policy milestone](../ROADMAP.md#6-make-default-deny-policy-operable)
+for implementation status and evidence.
 
 Seter's default-deny boundary is usable only when operators can understand failed traffic and grant narrowly reviewed authority without firewall archaeology. Observed traffic is evidence, never authorization: workspace code can produce Policy Observations, but only an explicit host-operator action can create a Policy Grant.
 

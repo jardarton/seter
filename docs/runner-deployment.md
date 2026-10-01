@@ -1,6 +1,7 @@
 # Runner deployment
 
-**Status:** implemented for the trusted `default` Guest Profile, including foundational storage and identity, Workspace Bootstrap, and daily lifecycle entry.
+See the [Runner milestone](../ROADMAP.md#1-replace-the-workspace-and-runner-model)
+for implementation status and evidence.
 
 A Runner is trusted host infrastructure. It contains a workspace's selected Guest Profile and registered non-secret identity, but no project working tree or project development flake. Project code enters later through Workspace Bootstrap and builds inside the guest's private writable Nix store.
 
@@ -29,8 +30,9 @@ Optimization must preserve this contract. Future evaluation could avoid rebuildi
 
 `seter.host.runner.hypervisor` selects the trusted Host-wide Runner backend.
 It defaults to `cloud-hypervisor`, preserving the native Linux path. The
-`qemu` backend is the nested `aarch64-linux` path validated for the initial
-macOS integration. On ARM it also enforces Linux 6.12 LTS on the Seter Host
+`qemu` backend is the nested `aarch64-linux` path for the
+macOS integration; see [physical validation](./macos-validation.md) for coverage.
+On ARM it also enforces Linux 6.12 LTS on the Seter Host
 and Workspace, KVM-only acceleration, headless console setup, and the QEMU
 `fw_cfg` Workspace SSH Identity transport. The identity is loaded into each
 VMM unit as a private systemd credential and staged root-only before OpenSSH;

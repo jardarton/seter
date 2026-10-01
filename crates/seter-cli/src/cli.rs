@@ -87,7 +87,7 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Remove GC roots belonging to retired workspaces.
+    /// Remove retired public host-key projections, preserving all workspace storage.
     Gc,
     /// Generate shell completion code.
     Completions {

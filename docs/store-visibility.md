@@ -1,6 +1,7 @@
 # Host-store visibility
 
-**Status:** implemented for each deployed Runner; retained NixOS generations retain their corresponding immutable Runner Store Views for rollback.
+See the [storage and identity milestone](../ROADMAP.md#2-close-foundational-storage-and-identity-gaps)
+for implementation status and evidence.
 
 A workspace must not gain ambient read access to unrelated host-store contents. Read-only access prevents modification, not disclosure: host-store paths can contain source snapshots, configuration artifacts, and other projects even when real secrets are correctly kept out of the store.
 

@@ -2,9 +2,9 @@
 
 ## Status and scope
 
-The manual nested deployment and operator path has been validated on an
-**M5 Mac**. The complete-workflow and operability gates remain open; this is
-not broad macOS support or an automated native macOS client.
+This roadmap owns the remaining macOS acceptance gates and later client work.
+The [validation summary](./docs/macos-validation.md) is the canonical source
+for physical results and their limits.
 
 - [Deployment](./docs/macos-deployment.md): bootstrap, consumer configuration,
   remote builds, retained storage, and recovery boundaries.
@@ -15,9 +15,9 @@ not broad macOS support or an automated native macOS client.
 - [Validation checklist](./docs/macos-testing.md): repeatable product checks.
 
 Nested virtualization requires Apple Silicon M3 or newer and macOS 15 or newer.
-The wrapper currently recognizes M3, M4, and M5; physical validation covers
-only an M5 Mac. Intel, M1/M2, older macOS, and software-emulated fallback are
-unsupported. One trusted Seter Host serves one macOS Client.
+The wrapper currently recognizes M3, M4, and M5. Intel, M1/M2, older macOS,
+and software-emulated fallback are unsupported. One trusted Seter Host serves
+one macOS Client.
 
 ## Architecture
 
@@ -44,24 +44,12 @@ with fw_cfg/systemd credentials for Workspace SSH Identity. See
 [QEMU boundary review](./docs/macos-qemu-equivalence.md). Native Linux retains
 Cloud Hypervisor as its default.
 
-## Completed foundations
+## Validation before acceptance
 
-1. Nested full-NixOS feasibility with networking and persistent storage.
-2. ARM CLI/Host/Guest/Runner builds and ordinary product lifecycle; native
-   x86_64 regression coverage retained.
-3. Pinned Lima template, reusable `limaHost` module, external consumer example,
-   Client-side evaluation with Host-side Linux builds, repeat deployment,
-   fresh bootstrap-key login, graceful QMP shutdown, and retained state.
-4. Manual terminal and attended-agent workflow, policy review/redeployment
-   through the exchange directory, and loopback-only tunnel boundary checks.
-
-These correspond to the original phases 1–4. Their results do not imply the
-following gates have passed.
-
-The current atomic bootstrap-key publication and existing-mount source, type,
-and read-write validation were added after those physical results. Their
-synthetic Linux checks pass, but a physical deployment, retained-Host cold boot,
-and repeat deployment remain required.
+Consult [established behavior](./docs/macos-validation.md#established-behavior)
+and [validation scope](./docs/macos-validation.md#scope) before running the
+remaining gates. Rerun physical deployment, retained-Host cold boot, and repeat
+deployment for changes covered only by synthetic Linux checks.
 
 ## Remaining: complete-workflow acceptance
 
