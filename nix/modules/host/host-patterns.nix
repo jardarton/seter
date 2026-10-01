@@ -22,8 +22,19 @@ let
     in
     builtins.length parts < 2
     || lib.any (lib.hasPrefix "xn--") parts
-    || (!exception && (hasPublicSuffixRule suffix || hasPublicSuffixRule "*.${parent}"));
-  exactValid = host: builtins.match exactPattern host != null;
+    || (
+      !exception
+      && (
+        hasPublicSuffixRule suffix || hasPublicSuffixRule "*.${suffix}" || hasPublicSuffixRule "*.${parent}"
+      )
+    );
+  parseIpv4 = import ../../lib/ipv4.nix { inherit lib; };
+  numeric = host: builtins.match "[0-9.]+" host != null;
+  exactValid =
+    host:
+    builtins.stringLength host <= 253
+    && builtins.match exactPattern (lib.toLower host) != null
+    && (!numeric host || parseIpv4 host != null);
   valid =
     pattern:
     let
@@ -33,7 +44,10 @@ let
       let
         suffix = lib.removePrefix "*." normalized;
       in
-      exactValid suffix && !(lib.hasInfix "*" suffix) && !wildcardSuffixForbidden suffix
+      builtins.stringLength normalized <= 253
+      && exactValid suffix
+      && !numeric suffix
+      && !wildcardSuffixForbidden suffix
     else
       exactValid normalized && !(lib.hasInfix "*" normalized);
   wildcardMatches =
@@ -47,8 +61,14 @@ let
         prefix = lib.removeSuffix ending exact;
       in
       lib.hasSuffix ending exact && prefix != "" && !(lib.hasInfix "." prefix);
-  overlaps = left: right: left == right || wildcardMatches left right || wildcardMatches right left;
-  matches = pattern: host: pattern == host || wildcardMatches pattern host;
+  overlaps =
+    left: right: lib.toLower left == lib.toLower right || matches left right || matches right left;
+  matches =
+    pattern: host:
+    exactValid host
+    && (
+      lib.toLower pattern == lib.toLower host || wildcardMatches (lib.toLower pattern) (lib.toLower host)
+    );
 in
 {
   inherit

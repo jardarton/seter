@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Strict per-workspace DNS policy frontend for Seter.
 
-The guest-facing listener accepts only exact, configured names. Permitted A
+The guest-facing listener accepts configured exact names and Host Patterns. Permitted A
 queries are reconstructed before they reach the shared caching resolver, so
 case, additional sections, EDNS options, and other guest-controlled wire data
 cannot become an upstream exfiltration channel.
@@ -19,6 +19,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from host_patterns import canonical_pattern, host_allowed
 
 import dns.asyncquery
 import dns.flags
@@ -64,7 +66,7 @@ class PolicyServer:
             ipaddress.IPv4Address(require_string(config, "sourceAddress"))
         )
         self.allowed_names = frozenset(
-            canonical_policy_pattern(name) for name in require_string_list(config, "allowedNames")
+            canonical_pattern(name) for name in require_string_list(config, "allowedNames")
         )
         self.backend_address = str(
             ipaddress.IPv4Address(require_string(config, "backendAddress"))
@@ -285,7 +287,7 @@ class PolicyServer:
         query_type = dns.rdatatype.to_text(question.rdtype)
         if question.rdclass != dns.rdataclass.IN:
             return deny("only the IN DNS class is accepted")
-        if not policy_name_allowed(self.allowed_names, name):
+        if not host_allowed(self.allowed_names, name):
             return deny("name is not exactly allowlisted or matched by an allowed Host Pattern")
 
         if question.rdtype == dns.rdatatype.AAAA:
@@ -372,35 +374,6 @@ class UDPProtocol(asyncio.DatagramProtocol):
 
     def error_received(self, error: Exception) -> None:
         print(f"Seter DNS UDP listener error: {error}", file=sys.stderr, flush=True)
-
-
-def canonical_policy_name(value: str) -> str:
-    text = value.rstrip(".").lower()
-    if not text:
-        raise ValueError("allowed DNS names must not be empty")
-    name = dns.name.from_text(text).canonicalize()
-    if not name.is_absolute():
-        raise ValueError(f"allowed DNS name is not absolute: {value!r}")
-    return name.to_text(omit_final_dot=True)
-
-
-def canonical_policy_pattern(value: str) -> str:
-    text = value.rstrip(".").lower()
-    if text.startswith("*."):
-        suffix = canonical_policy_name(text[2:])
-        if "*" in suffix:
-            raise ValueError("wildcard syntax is allowed only in the leading label")
-        return "*." + suffix
-    if "*" in text:
-        raise ValueError("wildcard syntax is allowed only in the leading label")
-    return canonical_policy_name(text)
-
-
-def policy_name_allowed(patterns: frozenset[str], name: str) -> bool:
-    if name in patterns:
-        return True
-    first, separator, suffix = name.partition(".")
-    return bool(first) and separator == "." and ("*." + suffix) in patterns
 
 
 def local_response(query: dns.message.Message, rcode: int) -> dns.message.Message:

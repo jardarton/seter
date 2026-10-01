@@ -56,6 +56,7 @@ let
       pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "msgpack" ];
     }))
   ]);
+  policyPython = import ../nix/lib/policy-python.nix { inherit pkgs; };
 in
 assert lib.all (assertion: assertion.assertion) config.assertions;
 assert rejected (
@@ -126,6 +127,6 @@ pkgs.runCommand "seter-multi-repository-check"
       ${builtins.head config.systemd.services.seter-proxy.restartTriggers}
     jq -e '.allowedNames | sort == ["git.example", "second.example"]' \
       ${builtins.head config.systemd.services.seter-dns-product.restartTriggers}
-    ${python}/bin/python ${./multi-repository-policy.py} ${../nix/modules/host/proxy-addon.py}
+    PYTHONPATH=${policyPython} ${python}/bin/python ${./multi-repository-policy.py} ${policyPython}/proxy-addon.py
     touch "$out"
   ''

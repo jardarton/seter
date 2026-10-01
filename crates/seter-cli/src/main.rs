@@ -1,5 +1,6 @@
 mod audit;
 mod cli;
+mod host_patterns;
 mod lifecycle;
 mod policy;
 mod registry;

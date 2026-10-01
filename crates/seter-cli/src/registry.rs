@@ -430,21 +430,8 @@ fn validate_repository_url(url: &str) -> Result<()> {
         .split_once('/')
         .context("repository URL must contain an exact repository path")?;
     let host = authority.strip_suffix(":443").unwrap_or(authority);
-    ensure!(
-        !authority.contains('@')
-            && host
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-            && host
-                .chars()
-                .last()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-            && host.chars().all(
-                |character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
-            ),
-        "repository URL has an invalid host or port"
-    );
+    crate::host_patterns::validate_exact_host(host)
+        .context("repository URL has an invalid host or port")?;
     ensure!(
         !path.is_empty() && !path.contains(['?', '#']) && !path.chars().any(char::is_whitespace),
         "repository URL must contain an exact path without a query or fragment"
@@ -467,7 +454,7 @@ fn validate_repository_url(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Registry;
+    use super::{validate_repository_url, Registry};
 
     const VALID: &str = r#"
     {
@@ -655,6 +642,22 @@ mod tests {
         let input = VALID.replacen("https://git.example", "ssh://git.example", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("repository must use HTTPS"));
+    }
+
+    #[test]
+    fn repository_hosts_follow_shared_contract() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../data/host-pattern-cases.json")).unwrap();
+        for case in cases["hosts"].as_array().unwrap() {
+            let host = case["input"].as_str().unwrap();
+            let url = format!("https://{host}/team/project.git");
+            assert_eq!(
+                validate_repository_url(&url).is_ok(),
+                case["exact"].as_bool().unwrap(),
+                "repository host: {}",
+                case["label"]
+            );
+        }
     }
 
     #[test]
