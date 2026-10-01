@@ -6,10 +6,6 @@ use clap_complete::Shell;
 #[derive(Debug, Parser)]
 #[command(name = "seter", version, about)]
 pub struct Cli {
-    /// Increase diagnostic output. Repeat for more detail.
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
-    pub verbose: u8,
-
     #[command(subcommand)]
     pub command: Command,
 }

@@ -95,9 +95,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertIsNotNone(self.inject(workspace, "frontend", "git.example", "/api"))
         self.assertIsNone(self.inject(workspace, "backend", "git.example", "/team/backend.git/info/refs"))
 
-    def test_compiles_shared_and_legacy_scopes(self):
-        # Legacy credentials are restricted when linked even without the flag.
-        del self.workspace["secrets"]["backend"]["repositoryOnly"]
+    def test_compiles_shared_scopes(self):
         workspace = self.load()
         expected = frozenset(
             (host, path + suffix)
@@ -110,6 +108,17 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertEqual(workspace["secrets"]["backend"]["repositoryScope"], expected)
         self.assertNotIn("repositories", workspace)
         self.assertIsNotNone(self.inject(workspace, "backend", "git.example", "/api"))
+
+    def test_repository_binding_requires_repository_only(self):
+        for flag in (False, None):
+            candidate = copy.deepcopy(self.workspace)
+            if flag is None:
+                del candidate["secrets"]["backend"]["repositoryOnly"]
+            else:
+                candidate["secrets"]["backend"]["repositoryOnly"] = flag
+            with self.assertRaises(OptionsError):
+                self.load(candidate)
+            self.assertFalse(self.ready.exists())
 
     def test_generic_secret_retains_host_and_https_restrictions(self):
         del self.workspace["repositories"]["frontend"]

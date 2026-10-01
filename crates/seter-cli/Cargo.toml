@@ -21,5 +21,3 @@ toml_edit.workspace = true
 fs2.workspace = true
 libc.workspace = true
 similar.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true

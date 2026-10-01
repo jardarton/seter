@@ -86,8 +86,8 @@ endpoint on the same host cannot receive the credential.
 
 Named repository credentials require `repositoryOnly = true` on the secret.
 This preserves path-only authority even after the final repository association
-is removed. Generic API secrets default to `false`; legacy singular
-`repository` input remains compatible, but should be migrated with this flag.
+is removed. Generic API secrets default to `false` and cannot be used as
+repository credential bindings.
 A binding shared by several repositories authorizes only their explicitly
 associated host/path pairs. All code in the workspace can exercise this union
 of authority; repository selection in the CLI does not narrow it. See

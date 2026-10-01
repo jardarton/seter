@@ -18,5 +18,5 @@ bindings, so revoking the final association cannot broaden a credential into
 generic host-wide authority. Credentials remain outside the guest, but all
 code in the Workspace can exercise the Workspace's combined authority.
 
-The legacy singular configuration is normalized at the Nix input boundary;
-there is only one runtime model. See [the workflow and migration guide](../multi-repository-workspaces.md).
+Repositories are declared through `repositories.<key>` and checkout names
+default to their keys. See [the workflow guide](../multi-repository-workspaces.md).

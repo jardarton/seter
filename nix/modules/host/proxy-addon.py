@@ -269,6 +269,7 @@ class SeterPolicy:
                             and (
                                 not isinstance(repository_credential, str)
                                 or repository_credential not in parsed_secrets
+                                or parsed_secrets[repository_credential]["repositoryScope"] is None
                                 or repository_host
                                 not in parsed_secrets[repository_credential]["hosts"]
                                 or "authorization"
@@ -279,8 +280,6 @@ class SeterPolicy:
                         raise ValueError(f"invalid repository policy for {name!r}/{repository_name!r}")
                     if repository_credential is not None:
                         secret = parsed_secrets[repository_credential]
-                        if secret["repositoryScope"] is None:
-                            secret["repositoryScope"] = set()
                         secret["repositoryScope"].update(
                             (repository_host, repository_path + suffix)
                             for suffix in ("", *self._REPOSITORY_SMART_HTTP_SUFFIXES)

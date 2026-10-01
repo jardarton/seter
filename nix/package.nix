@@ -4,7 +4,6 @@
   installShellFiles,
   makeWrapper,
   coreutils,
-  e2fsprogs,
   openssl,
   openssh,
   systemd,
@@ -45,7 +44,6 @@ rustPlatform.buildRustPackage {
       --prefix PATH : ${
         lib.makeBinPath [
           coreutils
-          e2fsprogs
           openssl
           openssh
           systemd
