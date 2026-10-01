@@ -54,6 +54,12 @@ struct UnitState {
     main_pid: u32,
 }
 
+impl UnitState {
+    fn state(&self, workspace: &Workspace) -> State {
+        classify_state(&self.active, &self.sub, workspace.runner.path.exists())
+    }
+}
+
 pub fn init(name: &str, requested: Option<&str>) -> Result<i32> {
     let registry = Registry::load_default()?;
     let workspace = registry.workspace(name)?;
@@ -383,14 +389,15 @@ pub fn status(name: Option<&str>) -> Result<i32> {
 
     if let Some(name) = name {
         let workspace = registry.workspace(name)?;
-        let state = state_for(name, workspace)?;
-        print_status(name, workspace, state, true)?;
+        let unit = query_unit(name)?;
+        let state = print_status(name, workspace, &unit, true);
         return Ok(if state == State::Running { 0 } else { 3 });
     }
 
     println!("{:<20} {:<11} {:<15} PID", "NAME", "STATE", "IP");
     for (name, workspace) in &registry.workspaces {
-        print_status(name, workspace, state_for(name, workspace)?, false)?;
+        let unit = query_unit(name)?;
+        print_status(name, workspace, &unit, false);
     }
     Ok(0)
 }
@@ -546,12 +553,7 @@ fn validate_runner(
 }
 
 fn state_for(name: &str, workspace: &Workspace) -> Result<State> {
-    let unit = query_unit(name)?;
-    Ok(classify_state(
-        &unit.active,
-        &unit.sub,
-        workspace.runner.path.exists(),
-    ))
+    Ok(query_unit(name)?.state(workspace))
 }
 
 fn classify_state(active: &str, _sub: &str, built: bool) -> State {
@@ -598,8 +600,8 @@ fn query_unit(name: &str) -> Result<UnitState> {
     })
 }
 
-fn print_status(name: &str, workspace: &Workspace, state: State, verbose: bool) -> Result<()> {
-    let unit = query_unit(name)?;
+fn print_status(name: &str, workspace: &Workspace, unit: &UnitState, verbose: bool) -> State {
+    let state = unit.state(workspace);
     let pid = if unit.main_pid == 0 {
         "-".to_owned()
     } else {
@@ -622,7 +624,7 @@ fn print_status(name: &str, workspace: &Workspace, state: State, verbose: bool) 
             pid
         );
     }
-    Ok(())
+    state
 }
 
 fn run_systemctl<const N: usize>(arguments: [&str; N]) -> Result<()> {
