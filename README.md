@@ -113,6 +113,7 @@ Create the workspace directly in trusted NixOS configuration:
 
   seter.host = {
     enable = true;
+    policyFile = ./seter-policy.toml;
     workspaces.project = {
       repositories.project = {
         url = "https://git.example/owner/project.git";
@@ -131,7 +132,6 @@ Create the workspace directly in trusted NixOS configuration:
         cpuQuotaPercent = 200;
       };
       ssh.authorizedKeys = [ "ssh-ed25519 AAAA…" ];
-      egress.httpHosts = [ "api.example.com" ];
     };
   };
 
@@ -139,7 +139,16 @@ Create the workspace directly in trusted NixOS configuration:
 }
 ```
 
-The schema also owns optional repository credential binding, storage image names and capacities, host services, direct-TCP grants, HTTP policy, and destination-bound secrets. Repository URLs must use HTTPS; only the trusted `default` Guest Profile is currently accepted. Evaluation rejects invalid or duplicate network identity, reused volume names, undefined credential bindings, and host/Runner drift.
+Put reviewable egress grants in `seter-policy.toml`:
+
+```toml
+version = 1
+
+[workspaces.project.egress]
+http-hosts = ["api.example.com"]
+```
+
+The registry owns repository credential bindings, storage image names and capacities, host services, and destination-bound secrets. The consumer's [Policy File](./docs/policy-workflow.md) owns additional HTTP, TLS passthrough, and direct-TCP grants. Approved repository hosts are granted automatically. Repository URLs must use HTTPS; only the trusted `default` Guest Profile is currently accepted. Evaluation rejects invalid or duplicate network identity, reused volume names, undefined credential bindings, and host/Runner drift.
 
 ## Workspace Bootstrap
 

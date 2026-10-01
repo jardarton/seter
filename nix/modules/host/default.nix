@@ -10,18 +10,29 @@ let
   inherit (lib)
     attrNames
     concatMap
-    mapAttrs
     mapAttrs'
     mapAttrsToList
     mkEnableOption
     mkIf
-    mkAfter
     nameValuePair
     mkOption
     types
     ;
 
-  workspaceType = types.submodule (import ./workspace.nix);
+  workspaceType = types.submodule [
+    (import ./workspace.nix)
+    ({ name, ... }: {
+      config.egress =
+        let
+          egress = (policyWorkspaces.${name} or { }).egress or { };
+        in
+        {
+          httpHosts = egress."http-hosts" or [ ];
+          passthroughHosts = egress."passthrough-hosts" or [ ];
+          tcp = egress.tcp or [ ];
+        };
+    })
+  ];
   defaultPackage = pkgs.callPackage ../../package.nix { };
   lifecycleLockDirectory = "/run/lock/seter";
   workspaces = mapAttrsToList (name: workspace: workspace // { inherit name; }) cfg.workspaces;
@@ -35,15 +46,6 @@ let
     else
       builtins.fromTOML (builtins.readFile cfg.policyFile);
   policyWorkspaces = policyRaw.workspaces or { };
-  policyEgressFor = value: value.egress or { };
-  policyHttpFor = value: (policyEgressFor value)."http-hosts" or [ ];
-  policyPassthroughFor = value: (policyEgressFor value)."passthrough-hosts" or [ ];
-  policyTcpFor = value: (policyEgressFor value).tcp or [ ];
-  policyWorkspaceDefinitions = mapAttrs (_: value: {
-    egress.httpHosts = mkAfter (policyHttpFor value);
-    egress.passthroughHosts = mkAfter (policyPassthroughFor value);
-    egress.tcp = mkAfter (policyTcpFor value);
-  }) policyWorkspaces;
 
   parseIpv4 = import ../../lib/ipv4.nix { inherit lib; };
   subnetPrefix = lib.toInt (builtins.elemAt (lib.splitString "/" cfg.subnet) 1);
@@ -214,15 +216,13 @@ in
     policyFile = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Consumer-owned TOML Policy File imported into effective workspace Policy Grants.";
+      description = "Consumer-owned TOML file that owns reviewable egress Policy Grants. With no file, no additional egress is granted beyond approved repository hosts.";
     };
   };
 
   config = mkIf cfg.enable (
     lib.mkMerge [
       {
-        seter.host.workspaces = policyWorkspaceDefinitions;
-
         # The physical-Mac gate isolated nested-KVM hangs to the bootstrap Host's
         # latest kernel. Keep both ARM virtualization layers on the accepted LTS.
         boot.kernelPackages = mkIf (

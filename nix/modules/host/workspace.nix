@@ -168,13 +168,13 @@ in
     egress = {
       httpHosts = mkOption {
         type = types.listOf hostPatternType;
-        default = [ ];
-        description = "HTTP and HTTPS destination hosts allowed through the policy proxy.";
+        readOnly = true;
+        description = "HTTP and HTTPS Host Patterns projected from seter.host.policyFile. Declare grants in the TOML Policy File.";
       };
       passthroughHosts = mkOption {
         type = types.listOf hostPatternType;
-        default = [ ];
-        description = "Allowed HTTPS hosts that bypass TLS interception.";
+        readOnly = true;
+        description = "TLS passthrough Host Patterns projected from seter.host.policyFile. Declare grants in the TOML Policy File.";
       };
       tcp = mkOption {
         type = types.listOf (
@@ -191,8 +191,8 @@ in
             };
           }
         );
-        default = [ ];
-        description = "Allowed non-HTTP TCP destinations.";
+        readOnly = true;
+        description = "Non-HTTP TCP destinations projected from seter.host.policyFile. Declare grants in the TOML Policy File.";
       };
     };
 

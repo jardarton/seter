@@ -22,8 +22,6 @@ Configure the host-side binding in the trusted workspace registry:
 
 ```nix
 seter.host.workspaces.project = {
-  egress.httpHosts = [ "api.github.com" ];
-
   secrets.githubToken = {
     placeholder = "seter-placeholder-github-0123456789abcdef";
     sourceFile = "/run/secrets/github-token";
@@ -31,6 +29,15 @@ seter.host.workspaces.project = {
     headers = [ "authorization" ];
   };
 };
+```
+
+Grant the API destination in the consumer's TOML Policy File, imported with
+`seter.host.policyFile = ./seter-policy.toml`:
+
+```toml
+version = 1
+[workspaces.project.egress]
+http-hosts = ["api.github.com"]
 ```
 
 Header names are case-insensitive. Replacement applies to exact placeholder substrings, so both of these work:

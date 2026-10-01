@@ -20,7 +20,7 @@ host = "example.net"
 port = 2222
 ```
 
-The consumer's Nix configuration imports this file and merges its grants into the Workspace Registry. Personal workspace names, destinations, file locations, and deployment commands remain in private consumer configuration; the public Seter repository defines only the schema and integration contract.
+The consumer's Nix configuration imports this file as the sole source of reviewable egress grants. Personal workspace names, destinations, file locations, and deployment commands remain in private consumer configuration; the public Seter repository defines only the schema and integration contract.
 
 ```nix
 seter.host.policyFile = ./seter-policy.toml;
@@ -28,7 +28,11 @@ seter.host.policyFile = ./seter-policy.toml;
 
 A dedicated file is intentional. Seter can safely parse, validate, preserve, and atomically edit TOML, but cannot reliably rewrite arbitrary Nix expressions. Policy changes remain reviewable version-controlled data rather than mutable runtime exceptions.
 
-The Policy File contains network and host-capability grants only. It must not contain real credential values. Credential bindings and source paths remain separate trusted configuration and are never inferred from traffic.
+The Policy File contains additional HTTP, TLS passthrough, and direct-TCP grants. It must not contain real credential values. Approved repositories, host-service access, credential bindings, and source paths remain separate trusted Nix configuration and are never inferred from traffic.
+
+Workspace `egress.httpHosts`, `egress.passthroughHosts`, and `egress.tcp` are read-only projections of this file. Move former inline Nix grants into the corresponding TOML fields; inline definitions now fail evaluation. With no Policy File, or no entry for a registered workspace, these grants are empty. A Policy File entry cannot create a workspace.
+
+Approved repository hosts retain their automatic HTTP and DNS access. They are outside the reviewable-grant projection: revoking a TOML grant does not revoke authority granted by a registered repository. Remove the repository from trusted configuration to revoke that authority.
 
 ## Observing policy decisions
 
@@ -74,7 +78,7 @@ After review, the operator inspects the version-control diff and deploys through
 seter policy status example --file /path/to/seter-policy.toml
 ```
 
-It reports pending additions, pending revocations, or agreement. The effective projection contains grants but excludes secret values and secret source paths.
+It reports pending additions, pending revocations, or agreement for the reviewable grants owned by TOML. The active projection excludes automatic repository-host access, host-service configuration, secret values, and secret source paths.
 
 ## Revocation
 

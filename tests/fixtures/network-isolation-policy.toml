@@ -1,0 +1,27 @@
+version = 1
+
+[workspaces.alpha.egress]
+http-hosts = [
+  "allowed.example",
+  "*.wild.example",
+  "bad-cert.example",
+  "multicast.example",
+  "private.example",
+  "second-allowed.example",
+]
+passthrough-hosts = ["passthrough.example", "private-passthrough.example"]
+
+[[workspaces.alpha.egress.tcp]]
+host = "direct.example"
+port = 2222
+
+[[workspaces.alpha.egress.tcp]]
+host = "rebind.example"
+port = 2224
+
+[[workspaces.alpha.egress.tcp]]
+host = "multicast.example"
+port = 2225
+
+[workspaces.beta.egress]
+http-hosts = ["second-allowed.example"]
