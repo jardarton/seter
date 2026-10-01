@@ -43,19 +43,18 @@
       betaDnsPort = workspaceDnsPorts.beta;
       alphaDnsPortWithEarlierWorkspace = (dnsPortsFor ({ aardvark = { }; } // validWorkspaces)).alpha;
 
-      tcpTestWorkspaces = validWorkspaces // {
-        alpha = validWorkspaces.alpha // {
-          egress.tcp = [
-            {
-              host = "direct.example";
-              port = 2222;
-            }
-          ];
-        };
-      };
+      tcpPolicyFile = builtins.toFile "seter-tcp-policy.toml" ''
+        version = 1
+        [[workspaces.alpha.egress.tcp]]
+        host = "direct.example"
+        port = 2222
+      '';
       tcpSetsFor = workspaces: import ../nix/modules/host/tcp-egress-sets.nix { inherit lib workspaces; };
-      alphaTcpSet = (tcpSetsFor tcpTestWorkspaces).alpha;
-      tcpHostConfiguration = mkHost tcpTestWorkspaces;
+      alphaTcpSet = (tcpSetsFor validWorkspaces).alpha;
+      tcpHostConfiguration = mkHostWith {
+        policyFile = tcpPolicyFile;
+        workspaces = validWorkspaces;
+      };
 
       gatewayServiceWorkspaces = validWorkspaces // {
         alpha = validWorkspaces.alpha // {
@@ -78,7 +77,6 @@
 
       secretPolicyWorkspaces = validWorkspaces // {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "API.Example.COM" ];
           secrets.githubToken = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/github-token";
@@ -90,7 +88,10 @@
           };
         };
       };
-      secretPolicyConfiguration = mkHost secretPolicyWorkspaces;
+      secretPolicyConfiguration = mkHostWith {
+        policyFile = httpPolicyFileFor secretPolicyWorkspaces;
+        workspaces = secretPolicyWorkspaces;
+      };
       secretPolicyService = secretPolicyConfiguration.config.systemd.services.seter-proxy;
       secretPolicyFile = builtins.head secretPolicyService.restartTriggers;
       secretPolicyCredentials = secretPolicyService.serviceConfig.LoadCredential;
@@ -202,9 +203,25 @@
 
       configurationRejected = workspaces: !(forceConfiguration (mkHost workspaces)).success;
 
-      configurationAccepted = workspaces: (forceConfiguration (mkHost workspaces)).success;
-
       hostConfigurationRejected = host: !(forceConfiguration (mkHostWith host)).success;
+
+      # Exercise credential validation with an authorized HTTP destination,
+      # so a missing egress grant cannot mask the intended rejection.
+      httpPolicyFileFor =
+        workspaces:
+        builtins.toFile "seter-http-policy.toml" (
+          "version = 1\n"
+          + lib.concatMapStrings (name: ''
+            [workspaces.${name}.egress]
+            http-hosts = ["API.Example.COM"]
+          '') (builtins.attrNames workspaces)
+        );
+      httpConfigurationRejected =
+        workspaces:
+        hostConfigurationRejected {
+          policyFile = httpPolicyFileFor workspaces;
+          inherit workspaces;
+        };
 
       # Named cases retain diagnostics without repeating whole fixtures.
       networkRejections = {
@@ -317,9 +334,8 @@
         };
       };
 
-      blankSecretPlaceholderRejected = configurationRejected {
+      blankSecretPlaceholderRejected = httpConfigurationRejected {
         broken = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "   ";
             sourceFile = "/run/secrets/token";
@@ -329,9 +345,8 @@
         };
       };
 
-      nonDistinctiveSecretPlaceholderRejected = configurationRejected {
+      nonDistinctiveSecretPlaceholderRejected = httpConfigurationRejected {
         broken = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "placeholder-token";
             sourceFile = "/run/secrets/token";
@@ -341,9 +356,8 @@
         };
       };
 
-      storeSecretSourceRejected = configurationRejected {
+      storeSecretSourceRejected = httpConfigurationRejected {
         broken = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/nix/store/example-secret";
@@ -353,21 +367,21 @@
         };
       };
 
-      caseInsensitiveSecretHostAccepted = configurationAccepted {
-        alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "API.Example.COM" ];
-          secrets.token = {
-            placeholder = "seter-placeholder-0123456789abcdef";
-            sourceFile = "/run/secrets/token";
-            hosts = [ "api.example.com" ];
-            headers = [ "Authorization" ];
+      caseInsensitiveSecretHostAccepted =
+        (forceConfiguration (mkHostWith {
+          policyFile = httpPolicyFileFor { alpha = { }; };
+          workspaces.alpha = validWorkspaces.alpha // {
+            secrets.token = {
+              placeholder = "seter-placeholder-0123456789abcdef";
+              sourceFile = "/run/secrets/token";
+              hosts = [ "api.example.com" ];
+              headers = [ "Authorization" ];
+            };
           };
-        };
-      };
+        })).success;
 
-      duplicateSecretPlaceholderRejected = configurationRejected {
+      duplicateSecretPlaceholderRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets = {
             first = {
               placeholder = "seter-placeholder-0123456789abcdef";
@@ -385,9 +399,8 @@
         };
       };
 
-      overlappingSecretPlaceholderRejected = configurationRejected {
+      overlappingSecretPlaceholderRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets = {
             first = {
               placeholder = "seter-placeholder-0123456789abcdef";
@@ -405,9 +418,8 @@
         };
       };
 
-      invalidSecretNameRejected = configurationRejected {
+      invalidSecretNameRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets."bad:name" = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -417,9 +429,13 @@
         };
       };
 
-      passthroughSecretHostRejected = configurationRejected {
-        alpha = validWorkspaces.alpha // {
-          egress.passthroughHosts = [ "api.example.com" ];
+      passthroughSecretHostRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-passthrough-secret-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          passthrough-hosts = ["api.example.com"]
+        '';
+        workspaces.alpha = validWorkspaces.alpha // {
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -429,9 +445,8 @@
         };
       };
 
-      duplicateSecretHostRejected = configurationRejected {
+      duplicateSecretHostRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -444,9 +459,8 @@
         };
       };
 
-      duplicateSecretHeaderRejected = configurationRejected {
+      duplicateSecretHeaderRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -459,9 +473,8 @@
         };
       };
 
-      emptySecretHeadersRejected = configurationRejected {
+      emptySecretHeadersRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -471,9 +484,8 @@
         };
       };
 
-      prohibitedSecretHeaderRejected = configurationRejected {
+      prohibitedSecretHeaderRejected = httpConfigurationRejected {
         alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "api.example.com" ];
           secrets.token = {
             placeholder = "seter-placeholder-0123456789abcdef";
             sourceFile = "/run/secrets/token";
@@ -483,22 +495,24 @@
         };
       };
 
-      overlappingProxyHostsRejected = configurationRejected {
-        alpha = validWorkspaces.alpha // {
-          egress.httpHosts = [ "API.Example.COM" ];
-          egress.passthroughHosts = [ "api.example.com" ];
-        };
+      overlappingProxyHostsRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-overlapping-hosts-policy.toml" ''
+          version = 1
+          [workspaces.alpha.egress]
+          http-hosts = ["API.Example.COM"]
+          passthrough-hosts = ["api.example.com"]
+        '';
+        workspaces = validWorkspaces;
       };
 
-      proxyPortAsDirectTcpRejected = configurationRejected {
-        alpha = validWorkspaces.alpha // {
-          egress.tcp = [
-            {
-              host = "api.example.com";
-              port = 443;
-            }
-          ];
-        };
+      proxyPortAsDirectTcpRejected = hostConfigurationRejected {
+        policyFile = builtins.toFile "seter-proxy-port-policy.toml" ''
+          version = 1
+          [[workspaces.alpha.egress.tcp]]
+          host = "api.example.com"
+          port = 443
+        '';
+        workspaces = validWorkspaces;
       };
 
       proxyPortCollisionRejected =
@@ -694,7 +708,10 @@
                 hostModuleBase
                 {
                   networking.firewall.enable = false;
-                  seter.host.workspaces = tcpTestWorkspaces;
+                  seter.host = {
+                    policyFile = tcpPolicyFile;
+                    workspaces = validWorkspaces;
+                  };
                 }
               ];
             }).config.system.build.toplevel.drvPath
@@ -711,7 +728,10 @@
                 hostModuleBase
                 {
                   networking.firewall.filterForward = false;
-                  seter.host.workspaces = tcpTestWorkspaces;
+                  seter.host = {
+                    policyFile = tcpPolicyFile;
+                    workspaces = validWorkspaces;
+                  };
                 }
               ];
             }).config.system.build.toplevel.drvPath
@@ -1346,6 +1366,16 @@
               touch "$out"
             '';
 
+        policy-ownership = import ../tests/policy-ownership.nix {
+          inherit
+            self
+            pkgs
+            system
+            mkHostWith
+            validWorkspaces
+            ;
+        };
+
         workspace-uniqueness =
           assert lib.all
             (
@@ -1719,6 +1749,7 @@
               dns.upstreamServers = [ "11.0.0.2" ];
               proxy.upstreamCaFile = "${proxyTestCertificate}/cert.pem";
               tcpEgress.refreshIntervalSeconds = 300;
+              policyFile = ../tests/fixtures/network-isolation-policy.toml;
               gatewayServices.adb = {
                 listenPort = 5037;
                 targetPort = 15037;
@@ -1726,32 +1757,6 @@
               workspaces = validWorkspaces // {
                 alpha = validWorkspaces.alpha // {
                   hostServices = [ "adb" ];
-                  egress.httpHosts = [
-                    "allowed.example"
-                    "*.wild.example"
-                    "bad-cert.example"
-                    "multicast.example"
-                    "private.example"
-                    "second-allowed.example"
-                  ];
-                  egress.passthroughHosts = [
-                    "passthrough.example"
-                    "private-passthrough.example"
-                  ];
-                  egress.tcp = [
-                    {
-                      host = "direct.example";
-                      port = 2222;
-                    }
-                    {
-                      host = "rebind.example";
-                      port = 2224;
-                    }
-                    {
-                      host = "multicast.example";
-                      port = 2225;
-                    }
-                  ];
                   secrets.githubToken = {
                     placeholder = "seter-placeholder-0123456789abcdef";
                     sourceFile = "/run/seter-test/github-token";
@@ -1771,11 +1776,8 @@
                     headers = [ "x-api-key" ];
                   };
                 };
-                beta = validWorkspaces.beta // {
-                  # Exercise a workspace that may contact an intercepted host
-                  # but has no credential bound to it.
-                  egress.httpHosts = [ "second-allowed.example" ];
-                };
+                # Beta's Policy File grants HTTP without a credential binding.
+                beta = validWorkspaces.beta;
               };
             };
 

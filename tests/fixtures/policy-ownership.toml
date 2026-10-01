@@ -1,0 +1,9 @@
+version = 1
+
+[workspaces.alpha.egress]
+http-hosts = ["API.Example.COM"]
+passthrough-hosts = ["downloads.example.net"]
+
+[[workspaces.alpha.egress.tcp]]
+host = "ssh.example.org"
+port = 2222

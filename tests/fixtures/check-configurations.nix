@@ -40,11 +40,6 @@ let
         nixStore.sizeMiB = 16384;
       };
       hostServices = [ ];
-      egress = {
-        httpHosts = [ ];
-        passthroughHosts = [ ];
-        tcp = [ ];
-      };
       secrets = { };
       secretVariables = { };
     };
@@ -110,17 +105,17 @@ let
         GITHUB_TOKEN = "githubToken";
         GH_TOKEN = "githubToken";
       };
-      egress.httpHosts = [ "api.example.com" ];
     };
   identityHostConfiguration = mkHostWith {
     proxyCaCertificate = builtins.readFile proxyTrustCa;
+    policyFile = identityDesiredPolicyFile;
     workspaces.identity = identityWorkspaceEntry;
   };
   identityRegistryFile =
     identityHostConfiguration.config.environment.etc."seter/workspaces.json".source;
   identityActivePolicyFile =
     identityHostConfiguration.config.environment.etc."seter/policy.json".source;
-  identityDesiredPolicyFile = pkgs.writeText "seter-identity-desired-policy.toml" ''
+  identityDesiredPolicyFile = builtins.toFile "seter-identity-desired-policy.toml" ''
     version = 1
     [workspaces.identity.egress]
     http-hosts = ["api.example.com"]
@@ -154,6 +149,7 @@ let
   };
   qemuIdentityHostConfiguration = mkHostWith {
     runner.hypervisor = "qemu";
+    policyFile = identityDesiredPolicyFile;
     proxyCaCertificate = builtins.readFile proxyTrustCa;
     workspaces.identity = identityWorkspaceEntry // {
       resources = identityWorkspaceEntry.resources // {
