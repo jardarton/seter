@@ -42,6 +42,17 @@ in
       description = "Trusted Guest Profile used to build the host-deployed Runner.";
     };
 
+    guestPackages = mkOption {
+      type = types.listOf types.package;
+      default = [ ];
+      description = ''
+        Consumer-approved tools installed into this workspace's system PATH
+        alongside the trusted Guest Profile. Their closures are included in
+        the immutable Runner and read-only Store View. Packages do not grant
+        network access or expose host configuration or credentials.
+      '';
+    };
+
     storeSeeds = mkOption {
       type = types.listOf types.package;
       default = [ ];

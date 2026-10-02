@@ -39,6 +39,7 @@ let
           # Root only explicitly approved outputs in the immutable Runner.
           # microvm's Store View and registration include their closures.
           system.extraDependencies = workspace.storeSeeds;
+          environment.systemPackages = workspace.guestPackages;
           boot.kernelPackages = mkIf (
             cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
           ) pkgs.linuxPackages_6_12;
