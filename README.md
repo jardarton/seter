@@ -152,7 +152,7 @@ version = 1
 http-hosts = ["api.example.com"]
 ```
 
-The registry owns repository credential bindings, storage image names and capacities, host services, and destination-bound secrets. The consumer's [Policy File](./docs/policy-workflow.md) owns additional HTTP, TLS passthrough, and direct-TCP grants. Approved repository hosts are granted automatically. Repository URLs must use HTTPS; only the trusted `default` Guest Profile is currently accepted. Evaluation rejects invalid or duplicate network identity, reused volume names, undefined credential bindings, and host/Runner drift.
+The registry owns repository credential bindings, storage image names and capacities, host services, and destination-bound secrets. The consumer's [Policy File](./docs/policy-workflow.md) owns additional HTTP, TLS passthrough, and direct-TCP grants. Approved HTTPS repository hosts are granted automatically. Repositories without a remote can be declared `local = true` and [imported from a Git bundle](./docs/local-import.md), without a host mount or automatic network grant. Only the trusted `default` Guest Profile is currently accepted. Evaluation rejects invalid or duplicate network identity, reused volume names, undefined credential bindings, and host/Runner drift.
 
 ## Workspace Bootstrap
 

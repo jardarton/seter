@@ -41,7 +41,7 @@ let
             host = repositories.host repository;
             path = repositories.path repository;
             credential = repository.credential;
-          }) workspace.resolvedRepositories;
+          }) (repositories.remote workspace);
           secrets = lib.mapAttrs (secretName: secret: {
             credential = credentialNameFor name secretName;
             inherit (secret) placeholder repositoryOnly;

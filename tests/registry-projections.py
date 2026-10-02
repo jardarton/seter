@@ -10,7 +10,7 @@ import sys
 
 registry, identity_registry, runner, dns, proxy = sys.argv[1:]
 registry = json.loads(Path(registry).read_text())
-assert registry["version"] == 7
+assert registry["version"] == 8
 assert sorted(registry["workspaces"]) == ["alpha", "beta"]
 alpha = registry["workspaces"]["alpha"]
 assert alpha["hostname"] == "alpha.vm"
@@ -30,9 +30,10 @@ assert alpha["storage"] == {
 assert not {"egress", "secrets", "hostServices"} & alpha.keys()
 
 identity_registry = json.loads(Path(identity_registry).read_text())
-assert identity_registry["version"] == 7
+assert identity_registry["version"] == 8
 identity = identity_registry["workspaces"]["identity"]
 assert identity["repositories"]["workspace"] == {
+    "local": False,
     "url": "https://api.example.com/owner/workspace.git", "branch": None,
     "checkoutName": "workspace", "credential": {
         "name": "githubToken", "placeholder": "seter-placeholder-github-0123456789abcdef",

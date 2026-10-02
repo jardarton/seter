@@ -48,6 +48,11 @@ fn run() -> Result<i32> {
             PolicyCommand::Status { workspace, file } => policy::status(&workspace, &file),
         },
         Command::Init { workspace, repo } => lifecycle::init(&workspace, repo.as_deref()),
+        Command::Import {
+            workspace,
+            repo,
+            bundle,
+        } => lifecycle::import(&workspace, repo.as_deref(), &bundle),
         Command::Up { workspace } => lifecycle::up(&workspace),
         Command::Down { workspace } => lifecycle::down(&workspace),
         Command::Run {

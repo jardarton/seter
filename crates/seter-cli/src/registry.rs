@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 pub const REGISTRY_PATH: &str = "/etc/seter/workspaces.json";
-const REGISTRY_VERSION: u32 = 7;
+const REGISTRY_VERSION: u32 = 8;
 pub const RUNNER_IDENTITY_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
@@ -40,7 +40,9 @@ pub struct Workspace {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Repository {
-    pub url: String,
+    #[serde(default)]
+    pub local: bool,
+    pub url: Option<String>,
     pub branch: Option<String>,
     pub checkout_name: String,
     pub credential: Option<RepositoryCredential>,
@@ -209,8 +211,16 @@ impl Registry {
                     "workspace {name:?} repository {repository_name:?} duplicates checkout {:?}",
                     repository.checkout_name
                 );
-                if let Err(error) = validate_repository_url(&repository.url) {
-                    bail!("workspace {name:?} repository {repository_name:?} has an invalid repository URL: {error}");
+                if repository.local {
+                    ensure!(repository.url.is_none() && repository.credential.is_none(),
+                        "workspace {name:?} local repository {repository_name:?} must not have a URL or credential");
+                } else {
+                    let url = repository.url.as_deref().context(
+                        "HTTPS repository requires a URL; declare local = true for bundle imports",
+                    )?;
+                    if let Err(error) = validate_repository_url(url) {
+                        bail!("workspace {name:?} repository {repository_name:?} has an invalid repository URL: {error}");
+                    }
                 }
                 // Mirrors the host module's constraint. Requiring a leading
                 // alphanumeric rejects "." and ".." along with any separator, so a
@@ -458,7 +468,7 @@ mod tests {
 
     const VALID: &str = r#"
     {
-      "version": 7,
+      "version": 8,
       "workspaces": {
         "minimal": {
           "hostname": "minimal.vm",
@@ -593,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_version_seven_registry() {
+    fn parses_version_eight_registry() {
         let registry = Registry::from_reader(VALID.as_bytes()).unwrap();
         let workspace = registry.workspace("minimal").unwrap();
 
@@ -630,7 +640,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let input = VALID.replacen("\"version\": 7", "\"version\": 999", 1);
+        let input = VALID.replacen("\"version\": 8", "\"version\": 999", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error
             .to_string()
@@ -642,6 +652,21 @@ mod tests {
         let input = VALID.replacen("https://git.example", "ssh://git.example", 1);
         let error = Registry::from_reader(input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("repository must use HTTPS"));
+    }
+
+    #[test]
+    fn local_sources_require_explicit_declaration_without_network_credentials() {
+        let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        input["workspaces"]["minimal"]["repositories"]["project"]["url"] = serde_json::Value::Null;
+        assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+        input["workspaces"]["minimal"]["repositories"]["project"]["local"] = true.into();
+        Registry::from_reader(input.to_string().as_bytes()).unwrap();
+        input["workspaces"]["minimal"]["repositories"]["project"]["url"] =
+            "https://git.example/owner/project.git".into();
+        assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
+        input["workspaces"]["minimal"]["repositories"]["project"]["url"] = serde_json::Value::Null;
+        input["workspaces"]["minimal"]["repositories"]["project"]["credential"] = serde_json::json!({"name": "token", "placeholder": "seter-placeholder-local-0123456789abcdef"});
+        assert!(Registry::from_reader(input.to_string().as_bytes()).is_err());
     }
 
     #[test]
