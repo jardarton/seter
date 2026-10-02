@@ -20,10 +20,12 @@ let
   dnsPortsFor = workspaces: import ../nix/modules/host/dns-ports.nix { inherit lib workspaces; };
   workspaceDnsPorts = dnsPortsFor validWorkspaces;
   approvedStoreSeed = pkgs.writeText "seter-registry-approved-store-seed" "approved\n";
+  approvedGuestPackage = pkgs.writeShellScriptBin "workspace-helper" "echo ready";
   seededHostConfiguration = mkHostWith {
     workspaces = validWorkspaces // {
       alpha = validWorkspaces.alpha // {
         storeSeeds = [ approvedStoreSeed ];
+        guestPackages = [ approvedGuestPackage ];
       };
     };
   };
@@ -144,6 +146,13 @@ let
     );
 in
 assert hostConfiguration.config.seter.host.workspaces.alpha.storeSeeds == [ ];
+assert hostConfiguration.config.seter.host.workspaces.alpha.guestPackages == [ ];
+assert builtins.elem approvedGuestPackage
+  seededProjection.workspaceSystems.alpha.config.environment.systemPackages;
+assert
+  !(builtins.elem approvedGuestPackage seededProjection.workspaceSystems.beta.config.environment.systemPackages);
+assert
+  !(builtins.elem approvedStoreSeed seededProjection.workspaceSystems.alpha.config.environment.systemPackages);
 assert
   seededProjection.workspaceSystems.alpha.config.system.extraDependencies == [ approvedStoreSeed ];
 assert seededProjection.workspaceSystems.beta.config.system.extraDependencies == [ ];

@@ -20,9 +20,23 @@ The profile provides:
   filesystem utilities.
 
 The baseline is intentionally not a project toolchain. Compilers, language
-runtimes, editors, agents, and project-specific commands belong in the
-repository's development flake or, in the future, a trusted consumer-owned
-profile. Seter core does not package an agent.
+runtimes and project-specific commands belong in the repository's development
+flake. Trusted consumer configuration can install editors, agents, and other
+workspace-wide tools through `seter.host.workspaces.<name>.guestPackages`:
+
+```nix
+seter.host.workspaces.project.guestPackages = [
+  pkgs.tmux
+  pkgs.ripgrep
+];
+```
+
+This list defaults to empty and extends the selected Guest Profile's system
+packages. Its closures enter the immutable Runner and read-only Store View;
+unlike `storeSeeds`, these packages also enter the guest's system PATH. Changes
+require a trusted host deployment, which can restart the workspace. Tool state
+and logins remain in the persistent Home Volume. Packages do not grant network
+access or import host user configuration. Seter core does not package an agent.
 
 `.envrc` files remain untrusted repository code. The profile installs the
 shell hook but does not approve an `.envrc`; the user must run `direnv allow`

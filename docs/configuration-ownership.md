@@ -9,7 +9,7 @@ Seter separates configuration by authority. A repository's development environme
 
 | Layer | Owner | Defines | Must not define |
 | --- | --- | --- | --- |
-| Workspace Registry | Trusted infra | Repository sources, workspace identity, resource limits, credential bindings, selected Guest Profile, approved store seeds, and effective Policy Grants | Project development commands |
+| Workspace Registry | Trusted infra | Repository sources, workspace identity, resource limits, credential bindings, selected Guest Profile, guest packages, approved store seeds, and effective Policy Grants | Project development commands |
 | Policy File | Trusted infra | Sole source of reviewable HTTP, TLS passthrough, and direct-TCP grants | Real credentials, repository declarations, host-service bindings, or project development commands |
 | Guest Profile | Trusted infra or Seter | Reusable guest packages, services, agents, and baseline bootstrap capabilities | A specific repository's source or host policy |
 | Development flake | Project repository | The development shell and project dependencies | Host or guest security policy |
