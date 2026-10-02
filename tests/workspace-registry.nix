@@ -19,6 +19,21 @@ let
     ;
   dnsPortsFor = workspaces: import ../nix/modules/host/dns-ports.nix { inherit lib workspaces; };
   workspaceDnsPorts = dnsPortsFor validWorkspaces;
+  approvedStoreSeed = pkgs.writeText "seter-registry-approved-store-seed" "approved\n";
+  seededHostConfiguration = mkHostWith {
+    workspaces = validWorkspaces // {
+      alpha = validWorkspaces.alpha // {
+        storeSeeds = [ approvedStoreSeed ];
+      };
+    };
+  };
+  seededProjection = import ../nix/modules/host/projections.nix {
+    cfg = seededHostConfiguration.config.seter.host;
+    inherit lib pkgs;
+    seterMicrovmModule = self.inputs.microvm.nixosModules.microvm;
+    subnetPrefix = 24;
+    parseIpv4 = import ../nix/lib/ipv4.nix { inherit lib; };
+  };
   alphaDnsPort = workspaceDnsPorts.alpha;
   betaDnsPort = workspaceDnsPorts.beta;
   alphaDnsPortWithEarlierWorkspace = (dnsPortsFor ({ aardvark = { }; } // validWorkspaces)).alpha;
@@ -128,6 +143,10 @@ let
       '') (builtins.attrNames workspaces)
     );
 in
+assert hostConfiguration.config.seter.host.workspaces.alpha.storeSeeds == [ ];
+assert
+  seededProjection.workspaceSystems.alpha.config.system.extraDependencies == [ approvedStoreSeed ];
+assert seededProjection.workspaceSystems.beta.config.system.extraDependencies == [ ];
 assert minimalIdentitySocket == "/run/seter/minimal/virtiofs-identity.sock";
 assert minimalIdentityShare.source == "/run/credentials/seter-identity-virtiofsd-minimal.service";
 assert minimalStoreOnDisk;

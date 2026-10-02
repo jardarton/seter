@@ -20,7 +20,7 @@ guest /nix/store (writable overlay)
 
 Interactive development must be able to realize paths after a flake or lock-file change. A conventional remote builder or substituter normally copies its result into the requesting machine's store, so neither makes a read-only guest store sufficient by itself.
 
-Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The deployed Runner closure is supplied by its immutable Store View. Other paths that merely happen to exist in the host store are not visible; required development paths are built or substituted into the private layer.
+Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The deployed Runner closure, including explicitly approved [store seeds](./store-visibility.md#reusing-selected-development-outputs), is supplied by its immutable Store View. Other paths that merely happen to exist in the host store are not visible; missing development paths are built or substituted into the private layer.
 
 The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their matching Runner and Store View for rollback. On boot the guest roots the selected system closure under `/nix/var/nix/gcroots/seter-lower-closures/current`. When that selection changes, it verifies the persistent database after loading the new closure and removes registrations for paths no longer present in the active Store View. This prevents Nix from treating an absent path from an older view as valid; rolling the host generation back loads and registers that generation's closure again.
 
@@ -79,8 +79,8 @@ actually present in that view. See [Host-store visibility](./store-visibility.md
 If the private Nix image is corrupted or full, stop the Workspace and preserve
 the image privately if diagnosis is needed. Use `seter reset <workspace>
 --nix-store` to replace this cache without touching Project data. The next boot
-loads the current guest system closure; development dependencies must be
-realized again. See [storage lifecycle](./storage-lifecycle.md).
+loads the current guest system closure and approved store seeds; other
+development dependencies must be realized again. See [storage lifecycle](./storage-lifecycle.md).
 
 Back up this image only if avoiding dependency rebuilds matters. The project volume remains the higher-value backup target.
 
@@ -89,6 +89,6 @@ Back up this image only if avoiding dependency rebuilds matters. The project vol
 - The host store is not exported; the Runner's closure-filtered EROFS Store View is read-only.
 - Guest Nix builds are sandboxed, but Nix's build sandbox is defense in depth inside the VM rather than a replacement for the VM boundary.
 - Build and fetch traffic originates in the guest and remains subject to Seter network policy.
-- Only registered runner closures are guaranteed to be reused from the host store; physical presence alone does not register a path in the guest database.
+- Only the registered Runner closure and approved store seeds are reused from the host store; physical presence alone does not register a path in the guest database.
 - The fixed-size filesystem bounds store data inside the image, but the host still needs ordinary free-space monitoring for all workspace images.
 - A workspace can exhaust its own private store and make its builds fail. It cannot use that image to consume beyond its configured filesystem capacity; recovery currently resets the dependency cache rather than collecting individual paths.

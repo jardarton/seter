@@ -20,6 +20,11 @@ let
 
   seterPackage = self.packages.${system}.seter;
   unrelatedStoreSentinel = pkgs.writeText "seter-unrelated-host-store-sentinel" "host confidential sentinel\n";
+  approvedSeedDependency = pkgs.writeText "seter-approved-seed-dependency" "approved dependency\n";
+  approvedStoreSeed = pkgs.runCommand "seter-approved-store-seed" { } ''
+    mkdir -p "$out"
+    ln -s ${approvedSeedDependency} "$out/dependency"
+  '';
   bootstrapMitmCaCertificate = ./fixtures/bootstrap-mitm-ca-cert.pem;
   bootstrapMitmCaPrivateKey = ./fixtures/bootstrap-mitm-ca-key.pem;
   bootstrapGitServerCertificate = ./fixtures/bootstrap-git-server-cert.pem;
@@ -137,6 +142,7 @@ let
       branch = "main";
     };
     repositories.local.local = true;
+    storeSeeds = [ approvedStoreSeed ];
     network = {
       address = "10.100.0.20";
       mac = "02:00:00:00:00:20";
@@ -367,10 +373,13 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed("install -m 0600 ${testSshPrivateKey} /tmp/seter-e2e-key")
     machine.succeed("install -d -o operator -g users -m 0700 /home/operator/.ssh; install -o operator -g users -m 0600 ${testSshPrivateKey} /home/operator/.ssh/id_ecdsa")
-    machine.succeed("su - operator -c 'seter import e2e --repo local --bundle ${localBundle}' | grep -F 'Imported local repository at /project/local'")
-    machine.succeed("su - operator -c 'seter init e2e' | grep -F 'Initialized repository at /project/e2e'")
+    # Nested KVM under load can take longer than the CLI's normal SSH wait.
+    # Establish guest readiness before exercising repository bootstrap.
+    machine.succeed("su - operator -c 'seter up e2e'")
     machine.wait_for_unit("seter-vm-e2e.service")
     machine.wait_until_succeeds("ssh-keyscan -T 2 10.100.0.20 > /tmp/e2e-known-hosts 2>/dev/null && test -s /tmp/e2e-known-hosts", timeout=360)
+    machine.succeed("su - operator -c 'seter import e2e --repo local --bundle ${localBundle}' | grep -F 'Imported local repository at /project/local'")
+    machine.succeed("su - operator -c 'seter init e2e' | grep -F 'Initialized repository at /project/e2e'")
 
     machine.succeed("key=$(awk '{print $2}' /tmp/e2e-host-key); grep -F \" $key\" /tmp/e2e-known-hosts")
     ssh_options = "-i /tmp/seter-e2e-key -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/e2e-known-hosts -o GlobalKnownHostsFile=/dev/null"
@@ -436,6 +445,9 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
     machine.succeed("grep -Fx 'host confidential sentinel' ${unrelatedStoreSentinel}")
+    # Approved roots and their transitive dependencies are registered in the
+    # guest store, while ambient host paths remain excluded above.
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'grep -Fx \"approved dependency\" ${approvedStoreSeed}/dependency && nix-store --check-validity ${approvedStoreSeed} ${approvedSeedDependency} && ! touch ${approvedStoreSeed}/guest-write'")
 
     # A repository needs only its normal flake and .envrc. Copying this local
     # fixture models the post-bootstrap working tree without introducing any
