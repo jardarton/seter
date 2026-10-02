@@ -129,7 +129,6 @@ class SeterPolicy:
                     or not isinstance(passthrough_hosts, list)
                     or not isinstance(secrets, dict)
                     or not isinstance(repositories, dict)
-                    or not repositories
                 ):
                     raise ValueError("invalid workspace policy")
 
