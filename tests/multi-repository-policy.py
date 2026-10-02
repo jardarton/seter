@@ -141,12 +141,22 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertEqual(request.headers["Authorization"], placeholders)
 
     def test_invalid_collections_fail_without_readiness(self):
-        for repositories in ({}, [], {"bad": None}, {"../bad": self.workspace["repositories"]["frontend"]}):
+        for repositories in ([], {"bad": None}, {"../bad": self.workspace["repositories"]["frontend"]}):
             candidate = copy.deepcopy(self.workspace)
             candidate["repositories"] = repositories
             with self.assertRaises(OptionsError):
                 self.load(candidate)
             self.assertFalse(self.ready.exists())
+
+    def test_local_only_workspace_has_no_repository_authority(self):
+        self.workspace["repositories"] = {}
+        self.workspace["secrets"]["frontend"]["repositoryOnly"] = False
+        workspace = self.load()
+        self.assertIsNone(self.inject(workspace, "frontend", "git.example", "/api"))
+        self.assertEqual(workspace["secrets"]["backend"]["repositoryScope"], frozenset())
+        self.assertIsNotNone(self.inject(workspace, "backend", "git.example", "/team/backend.git/info/refs"))
+        self.assertIsNotNone(self.inject(workspace, "backend", "git.example", "/api"))
+    def test_invalid_repository_fields_fail_without_readiness(self):
         for field, value in (("path", "/team/../bad"), ("credential", "missing"), ("host", "unapproved.example")):
             candidate = copy.deepcopy(self.workspace)
             candidate["repositories"]["backend"][field] = value
