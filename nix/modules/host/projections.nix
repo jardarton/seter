@@ -36,6 +36,9 @@ let
             vcpu = workspace.resources.vcpu;
             ssh.authorizedKeys = workspace.ssh.authorizedKeys;
           };
+          # Root only explicitly approved outputs in the immutable Runner.
+          # microvm's Store View and registration include their closures.
+          system.extraDependencies = workspace.storeSeeds;
           boot.kernelPackages = mkIf (
             cfg.runner.hypervisor == "qemu" && pkgs.stdenv.hostPlatform.isAarch64
           ) pkgs.linuxPackages_6_12;
@@ -72,7 +75,12 @@ let
         ;
       defaultRepository = workspace.defaultRepository;
       repositories = mapAttrs (_: repository: {
-        inherit (repository) local url branch checkoutName;
+        inherit (repository)
+          local
+          url
+          branch
+          checkoutName
+          ;
         credential =
           if repository.credential == null then
             null

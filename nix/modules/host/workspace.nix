@@ -42,6 +42,18 @@ in
       description = "Trusted Guest Profile used to build the host-deployed Runner.";
     };
 
+    storeSeeds = mkOption {
+      type = types.listOf types.package;
+      default = [ ];
+      description = ''
+        Consumer-approved Nix outputs whose transitive closures are included
+        in this workspace's read-only Store View. This can reuse an existing
+        development shell or tool closure without exposing ambient host-store
+        contents. Seeds do not install commands into the guest PATH or grant
+        network access. Review their complete closures for confidential data.
+      '';
+    };
+
     developmentPorts = mkOption {
       type = types.addCheck (types.listOf (types.ints.between 1024 65535)) (
         ports: builtins.length ports == builtins.length (lib.unique ports)

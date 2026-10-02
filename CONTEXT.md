@@ -33,7 +33,7 @@ The immutable host-deployed artifact that boots a workspace with its trusted Gue
 _Avoid_: VM image, launcher
 
 **Store View**:
-The workspace-specific read-only set of host Nix store paths reachable from its deployed and retained Runner closures.
+The workspace-specific read-only set of host Nix store paths reachable from its deployed and retained Runner closures, including explicitly approved development outputs (`storeSeeds`).
 _Avoid_: Host store, shared store
 
 **Workspace SSH Identity**:
