@@ -12,12 +12,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Bootstrap all approved HTTPS repositories, or only --repo.
+    /// Bootstrap HTTPS repositories and verify local imports, or only --repo.
     Init {
         workspace: String,
         /// Repository key; omit to initialize every registered repository.
         #[arg(long)]
         repo: Option<String>,
+    },
+    /// Import a Git bundle into a registered local repository; never overwrite a checkout.
+    Import {
+        workspace: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        bundle: PathBuf,
     },
     /// Start a workspace using its host-deployed Runner.
     Up { workspace: String },

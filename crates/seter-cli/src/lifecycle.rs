@@ -5,7 +5,7 @@ use std::{
     io::{self, IsTerminal, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -23,6 +23,7 @@ const RUNNER_IDENTITY_FILE: &str = "share/seter/identity.json";
 const MAX_RUNNER_IDENTITY_BYTES: u64 = 64 * 1024;
 
 const BOOTSTRAP_SCRIPT: &str = include_str!("lifecycle/bootstrap.sh");
+const LOCAL_BOOTSTRAP_SCRIPT: &str = include_str!("lifecycle/local-bootstrap.sh");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -105,6 +106,9 @@ pub fn init(name: &str, requested: Option<&str>) -> Result<i32> {
 }
 
 fn bootstrap_remote_command(repository: &Repository) -> String {
+    if repository.local {
+        return local_remote_command(repository, "check");
+    }
     let placeholder = repository
         .credential
         .as_ref()
@@ -113,11 +117,52 @@ fn bootstrap_remote_command(repository: &Repository) -> String {
     format!(
         "sh -c {} seter-bootstrap {} {} {} {}",
         shell_quote(BOOTSTRAP_SCRIPT),
-        shell_quote(&repository.url),
+        shell_quote(
+            repository
+                .url
+                .as_deref()
+                .expect("validated HTTPS repository")
+        ),
         shell_quote(&checkout_path(repository)),
         shell_quote(repository.branch.as_deref().unwrap_or("")),
         shell_quote(placeholder),
     )
+}
+
+fn local_remote_command(repository: &Repository, mode: &str) -> String {
+    format!(
+        "sh -c {} seter-local-bootstrap {} {} {}",
+        shell_quote(LOCAL_BOOTSTRAP_SCRIPT),
+        shell_quote(&checkout_path(repository)),
+        shell_quote(repository.branch.as_deref().unwrap_or("")),
+        shell_quote(mode)
+    )
+}
+
+pub fn import(name: &str, requested: Option<&str>, bundle: &Path) -> Result<i32> {
+    let registry = Registry::load_default()?;
+    let workspace = registry.workspace(name)?;
+    let (_, repository) = workspace.select_repository(requested)?;
+    ensure!(
+        repository.local,
+        "seter import requires a registered local repository"
+    );
+    let file = fs::File::open(bundle)
+        .with_context(|| format!("cannot open Git bundle {}", bundle.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "Git bundle must be a regular file"
+    );
+    up(name)?;
+    let ssh = SshSession::connect(name, workspace)?;
+    let status = ssh
+        .command(false)
+        .arg("--")
+        .arg(local_remote_command(repository, "import"))
+        .stdin(Stdio::from(file))
+        .status()
+        .context("failed to transfer Git bundle over SSH")?;
+    Ok(status.code().unwrap_or(255))
 }
 
 pub fn up(name: &str) -> Result<i32> {

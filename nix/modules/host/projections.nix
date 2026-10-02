@@ -61,7 +61,7 @@ let
   workspaceRunners = mapAttrs (_: system: system.config.microvm.declaredRunner) workspaceSystems;
 
   lifecycleRegistry = {
-    version = 7;
+    version = 8;
     workspaces = mapAttrs (name: workspace: {
       inherit (workspace)
         hostname
@@ -72,7 +72,7 @@ let
         ;
       defaultRepository = workspace.defaultRepository;
       repositories = mapAttrs (_: repository: {
-        inherit (repository) url branch checkoutName;
+        inherit (repository) local url branch checkoutName;
         credential =
           if repository.credential == null then
             null

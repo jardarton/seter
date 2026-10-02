@@ -19,7 +19,7 @@ in
     repositories = mkOption {
       type = types.attrsOf (types.submodule (import ./repository.nix));
       default = { };
-      description = "Named approved HTTPS repositories sharing this workspace's authority and storage. Keys default to checkout directory names.";
+      description = "Named approved HTTPS or explicitly local repositories sharing this workspace's authority and storage. Keys default to checkout directory names.";
     };
 
     defaultRepository = mkOption {

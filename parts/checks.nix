@@ -46,6 +46,11 @@
             system
             ;
         };
+        local-import = pkgs.runCommand "seter-local-import-check" { nativeBuildInputs = [ pkgs.git ]; } ''
+          ${pkgs.python3}/bin/python ${../tests/local-import.py} \
+            ${../crates/seter-cli/src/lifecycle/local-bootstrap.sh}
+          touch "$out"
+        '';
         workspace-registry = import ../tests/workspace-registry.nix {
           inherit
             self

@@ -50,6 +50,15 @@ let
       ];
     }).config;
   config = host base;
+  localConfig = host (
+    base
+    // {
+      repositories.local.local = true;
+      defaultRepository = "local";
+      secrets = { };
+    }
+  );
+  repositoryHelpers = import ../nix/lib/repositories.nix { inherit lib; };
   rejected = workspace: lib.any (assertion: !assertion.assertion) (host workspace).assertions;
   python = pkgs.python3.withPackages (ps: [
     (ps.mitmproxy.overridePythonAttrs (old: {
@@ -59,6 +68,37 @@ let
   policyPython = import ../nix/lib/policy-python.nix { inherit pkgs; };
 in
 assert lib.all (assertion: assertion.assertion) config.assertions;
+assert lib.all (assertion: assertion.assertion) localConfig.assertions;
+assert repositoryHelpers.hosts localConfig.seter.host.workspaces.product == [ ];
+assert repositoryHelpers.remote localConfig.seter.host.workspaces.product == { };
+assert rejected (
+  base
+  // {
+    repositories.local = {
+      local = true;
+      url = "https://git.example/team/local.git";
+    };
+    defaultRepository = "local";
+    secrets = { };
+  }
+);
+assert rejected (
+  base
+  // {
+    repositories.local = {
+      local = true;
+      credential = "gitToken";
+    };
+    defaultRepository = "local";
+  }
+);
+assert rejected (
+  base
+  // {
+    repositories.local = { };
+    defaultRepository = "local";
+  }
+);
 assert rejected (
   base
   // {
@@ -113,7 +153,7 @@ pkgs.runCommand "seter-multi-repository-check"
   }
   ''
     export SETER_REGISTRY=${config.environment.etc."seter/workspaces.json".source}
-    jq -e '.version == 7 and .workspaces.product.defaultRepository == "frontend" and
+    jq -e '.version == 8 and .workspaces.product.defaultRepository == "frontend" and
       (.workspaces.product.repositories | keys == ["backend", "frontend"]) and
       .workspaces.product.repositories.frontend.checkoutName == "frontend" and
       .workspaces.product.repositories.backend.checkoutName == "api"' "$SETER_REGISTRY"

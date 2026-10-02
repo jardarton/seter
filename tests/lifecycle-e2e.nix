@@ -26,6 +26,16 @@ let
   bootstrapGitServerPrivateKey = ./fixtures/bootstrap-git-server-key.pem;
   repositoryToken = "seter-bootstrap-test-token-0123456789";
   backendToken = "seter-backend-test-token-0123456789";
+  localBundle = pkgs.runCommand "seter-local-source.bundle" { nativeBuildInputs = [ pkgs.git ]; } ''
+    mkdir source
+    git -C source init --initial-branch=main
+    printf 'local source\n' > source/README.md
+    git -C source add README.md
+    GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+      git -C source -c user.name=Fixture -c user.email=fixture@example.invalid commit -m initial
+    git -C source branch worker
+    git -C source bundle create "$out" --all
+  '';
 
   gitHttpServer = pkgs.writeText "seter-bootstrap-git-http-server.py" ''
     import os
@@ -126,6 +136,7 @@ let
       credential = "backendToken";
       branch = "main";
     };
+    repositories.local.local = true;
     network = {
       address = "10.100.0.20";
       mac = "02:00:00:00:00:20";
@@ -320,6 +331,7 @@ pkgs.testers.runNixOSTest {
             runner
             normalDevelopmentFlake
             unrelatedStoreSentinel
+            localBundle
           ];
           qemu = {
             forceAccel = lib.mkForce true;
@@ -350,17 +362,22 @@ pkgs.testers.runNixOSTest {
     # The registry, lifecycle units, and immutable Runner are one NixOS
     # generation. No project installable or mutable current-runner link exists.
     machine.succeed("test $(readlink -f /etc/seter/runners/e2e) = ${runner}")
-    machine.succeed("jq -e '.version == 7 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repositories.e2e.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repositories.e2e.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
+    machine.succeed("jq -e '.version == 8 and .workspaces.e2e.guestProfile == \"default\" and .workspaces.e2e.repositories.e2e.url == \"https://git.fixture/owner/e2e.git\" and .workspaces.e2e.repositories.e2e.credential.placeholder == \"seter-placeholder-repository-0123456789abcdef\" and .workspaces.e2e.runner.path == \"${runner}\"' /etc/seter/workspaces.json")
     machine.fail("test -e /var/lib/seter/workspaces/e2e/current")
 
     machine.succeed("install -m 0600 ${testSshPrivateKey} /tmp/seter-e2e-key")
     machine.succeed("install -d -o operator -g users -m 0700 /home/operator/.ssh; install -o operator -g users -m 0600 ${testSshPrivateKey} /home/operator/.ssh/id_ecdsa")
+    machine.succeed("su - operator -c 'seter import e2e --repo local --bundle ${localBundle}' | grep -F 'Imported local repository at /project/local'")
     machine.succeed("su - operator -c 'seter init e2e' | grep -F 'Initialized repository at /project/e2e'")
     machine.wait_for_unit("seter-vm-e2e.service")
     machine.wait_until_succeeds("ssh-keyscan -T 2 10.100.0.20 > /tmp/e2e-known-hosts 2>/dev/null && test -s /tmp/e2e-known-hosts", timeout=360)
 
     machine.succeed("key=$(awk '{print $2}' /tmp/e2e-host-key); grep -F \" $key\" /tmp/e2e-known-hosts")
     ssh_options = "-i /tmp/seter-e2e-key -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/e2e-known-hosts -o GlobalKnownHostsFile=/dev/null"
+    machine.succeed(f"ssh {ssh_options} seter@10.100.0.20 -- 'git -C /project/local rev-parse worker; test -z \"$(git -C /project/local remote)\"; printf dirty > /project/local/README.md'")
+    machine.fail("su - operator -c 'seter import e2e --repo local --bundle ${localBundle}'")
+    machine.succeed("su - operator -c 'seter init e2e --repo local'")
+    machine.succeed(f"ssh {ssh_options} seter@10.100.0.20 -- 'grep -Fx dirty /project/local/README.md'")
     machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'cd /project/e2e && test $(git remote get-url origin) = https://git.fixture/owner/e2e.git && test $(git branch --show-current) = main && grep -Fx bootstrap-ready README.md && if direnv exec . true; then exit 1; fi && printf sentinel > bootstrap-sentinel'")
     gitserver.succeed("grep -F 'GET /owner/e2e.git/info/refs?service=git-upload-pack' /tmp/git-authorized-requests")
     machine.succeed("su - operator -c 'seter init e2e' | grep -F 'already initialized'")

@@ -39,6 +39,10 @@ hyphens. Directories must be unique within the Workspace; nested paths and
 symlinks are not supported as managed checkout targets. At least one
 repository is required. Every URL must use HTTPS on port 443.
 
+Declare a repository without a remote using `local = true`, with no URL or
+credential, then import a self-contained Git bundle. Local entries add no
+automatic network grants. See [local import](./local-import.md).
+
 The Guest Profile, SSH identity, volumes, resources, policy grants, and VM
 lifecycle remain Workspace-wide. Repository code never participates in
 building the trusted Runner. Repository hosts are automatically granted DNS
@@ -111,7 +115,7 @@ migration or deletion operation.
 
 ## Deployment
 
-The generated lifecycle registry is version 7 and proxy policy is version 4;
+The generated lifecycle registry is version 8 and proxy policy is version 4;
 the Runner identity remains version 3. Deploy CLI and host configuration
 together through the normal NixOS generation, rather than editing generated
 JSON.
