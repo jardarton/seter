@@ -278,6 +278,7 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 - `apps.<system>.default`: Seter CLI application
 - `nixosModules.host`: host-side Seter module
 - `nixosModules.limaHost`: `aarch64-linux` Seter Host integration for the pinned macOS Lima bootstrap
+- `lib.devShellSeeds`: approved development shell and pinned interactive Bash companions for Store View reuse
 - `nixosModules.guest`: low-level guest building block used by Seter's trusted profile and standalone verification
 - `nixosConfigurations.minimal`: buildable reference microVM
 - `apps.x86_64-linux.test-minimal`: KVM-backed minimal guest verification
