@@ -33,12 +33,22 @@ NixOS module assertions can catch conflicting option values, but an arbitrary re
 
 The host boundary still contains such a guest: host-owned network policy, resource limits, lifecycle privilege separation, and credential bindings remain authoritative. But Seter must not describe arbitrary project Nix as unable to replace the trusted guest baseline.
 
+## Trusted consumer Guest Profiles
+
+Consumer infra can define named NixOS modules with `seter.host.guestProfiles`
+and select them per Workspace. They are layered on the built-in `default`
+profile, and may read the generated guest configuration. These modules belong
+to trusted host configuration; Seter never imports workload repository modules
+through this interface. Assertions guard declarative invariants, but trusted
+modules can run arbitrary guest services and activation scripts. This is not an
+“extension only” contract. See [ADR 0012](adr/0012-trusted-consumer-guest-profiles.md)
+and the [shell/Home Manager example](guest-profile-default.md#trusted-consumer-profiles).
+
 ## Future specialized workloads
 
 The initial milestone deliberately defers specialized guest composition. A later decision may choose one or more explicit models:
 
 - a restricted capability schema translated into trusted NixOS configuration;
-- trusted custom Guest Profiles maintained in consumer infra;
 - an advanced project-owned runner path documented as fully project-controlled and untrusted inside the VM boundary.
 
 No future model should be called “extension only” unless Seter exposes a genuinely restricted interface rather than an arbitrary NixOS module.

@@ -52,7 +52,7 @@ assert identity["runner"]["identity"] == {
         "prefixLength": 24, "tap": "seter-identity",
     },
     "proxy": {"url": "http://10.100.0.1:18081"}, "ssh": {"user": "seter"},
-    "guestProfile": "default", "developmentPorts": [3000],
+    "guestProfile": "terminal", "developmentPorts": [3000],
     "resources": {"memoryMiB": 4096, "vcpu": 2},
     "storage": {
         "project": {"image": "identity-project.img", "sizeMiB": 4096},

@@ -12,6 +12,7 @@ let
     mkHostWith
     validWorkspaces
     identityHostConfiguration
+    terminalProfile
     identityRegistryFile
     identityDesiredPolicyFile
     identityGuestConfiguration
@@ -22,8 +23,10 @@ let
   approvedStoreSeed = pkgs.writeText "seter-registry-approved-store-seed" "approved\n";
   approvedGuestPackage = pkgs.writeShellScriptBin "workspace-helper" "echo ready";
   seededHostConfiguration = mkHostWith {
+    guestProfiles.terminal = terminalProfile;
     workspaces = validWorkspaces // {
       alpha = validWorkspaces.alpha // {
+        guestProfile = "terminal";
         storeSeeds = [ approvedStoreSeed ];
         guestPackages = [ approvedGuestPackage ];
       };
@@ -145,6 +148,14 @@ let
       '') (builtins.attrNames workspaces)
     );
 in
+assert seededProjection.workspaceSystems.alpha.config.users.users.seter.shell == pkgs.zsh;
+assert builtins.elem pkgs.hello
+  seededProjection.workspaceSystems.alpha.config.environment.systemPackages;
+assert seededProjection.workspaceSystems.alpha.config.programs.direnv.nix-direnv.enable;
+assert lib.all (entry: entry.assertion) seededProjection.workspaceSystems.alpha.config.assertions;
+assert seededProjection.lifecycleRegistry.workspaces.alpha.guestProfile == "terminal";
+assert
+  seededProjection.lifecycleRegistry.workspaces.alpha.runner.identity.guestProfile == "terminal";
 assert hostConfiguration.config.seter.host.workspaces.alpha.storeSeeds == [ ];
 assert hostConfiguration.config.seter.host.workspaces.alpha.guestPackages == [ ];
 assert builtins.elem approvedGuestPackage
@@ -239,7 +250,7 @@ assert lib.hasInfix
   (
     builtins.unsafeDiscardStringContext qemuHostConfiguration.config.systemd.services.seter-vm-alpha.serviceConfig.ExecStop
   );
-assert identityHostConfiguration.config.seter.host.workspaces.identity.guestProfile == "default";
+assert identityHostConfiguration.config.seter.host.workspaces.identity.guestProfile == "terminal";
 assert identityGuestConfiguration.config.seter.guest.name == "identity";
 assert identityGuestConfiguration.config.programs.direnv.enable;
 assert identityGuestConfiguration.config.programs.direnv.enableBashIntegration;

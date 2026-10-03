@@ -69,7 +69,7 @@ Seter is not a replacement for Qubes OS. Qubes isolates your whole computing lif
 
 ## Core concepts
 
-The trusted NixOS configuration owns one typed **Workspace Registry**. For every entry, the host module builds a trusted `default`-profile **Runner**, includes it in the same NixOS generation, roots its closure, and writes the lifecycle registry consumed by `seter`.
+The trusted NixOS configuration owns one typed **Workspace Registry**. For every entry, the host module builds a trusted **Runner** with the built-in `default` profile and any selected consumer Guest Profile, includes it in the same NixOS generation, roots its closure, and writes the lifecycle registry consumed by `seter`.
 
 ```text
 trusted Workspace Registry ── NixOS deployment ──> host policy + Runner
@@ -80,6 +80,8 @@ trusted Workspace Registry ── NixOS deployment ──> host policy + Runner
 ```
 
 A Runner contains Seter's guest baseline and registered non-secret identity, never project code. The approved HTTPS repositories enter later through Workspace Bootstrap. Cold starts validate and execute the already deployed immutable Runner without evaluating Nix. Guest Profile or identity changes therefore use the operator's normal trusted host deployment; there is no `seter update` command.
+
+Consumer infra can define named [trusted Guest Profiles](./docs/guest-profile-default.md#trusted-consumer-profiles) for shells, dotfiles, agents, and guest services.
 
 The trusted [`default` Guest Profile](./docs/guest-profile-default.md) includes
 flake-enabled Nix with the private writable store, Git and system HTTPS trust,

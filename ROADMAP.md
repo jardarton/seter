@@ -82,7 +82,7 @@ The first profile includes only:
 - direnv and nix-direnv with shell integration;
 - baseline interactive shell utilities.
 
-Seter core remains agent-agnostic. Trusted consumer-owned profiles may eventually package agents, but additional public profiles and specialized composition are deferred.
+Seter core remains agent-agnostic. Trusted consumer-owned Guest Profiles can now configure shells, dotfiles, agents, and services on top of the default baseline. Evaluation checks cover profile selection and protected-setting rejections. Additional public profiles and repository-owned guest composition remain deferred.
 
 Evidence: a repository with only a normal development flake can use Seter without containing Seter-specific NixOS configuration.
 

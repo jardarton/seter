@@ -80,6 +80,12 @@ let
     };
   };
 
+  terminalProfile = { config, pkgs, ... }: {
+    programs.zsh.enable = true;
+    users.users.${config.seter.guest.ssh.user}.shell = pkgs.zsh;
+    environment.systemPackages = [ pkgs.hello ];
+  };
+
   identityWorkspaceEntry =
     (mkTestWorkspace {
       ip = "10.100.0.12";
@@ -87,6 +93,7 @@ let
       tap = "seter-identity";
     })
     // {
+      guestProfile = "terminal";
       developmentPorts = [ 3000 ];
       repositories.workspace = {
         url = "https://api.example.com/owner/workspace.git";
@@ -107,6 +114,7 @@ let
       };
     };
   identityHostConfiguration = mkHostWith {
+    guestProfiles.terminal = terminalProfile;
     proxyCaCertificate = builtins.readFile proxyTrustCa;
     policyFile = identityDesiredPolicyFile;
     workspaces.identity = identityWorkspaceEntry;
@@ -132,6 +140,7 @@ let
       self.nixosModules.guest
       identityWorkspace.guestModule
       (import ../../nix/modules/guest/profiles/default.nix)
+      terminalProfile
       {
         # Supplied by the host module from the same registry entry.
         seter.guest.memory =
@@ -141,6 +150,7 @@ let
     ];
   };
   qemuIdentityHostConfiguration = mkHostWith {
+    guestProfiles.terminal = terminalProfile;
     runner.hypervisor = "qemu";
     policyFile = identityDesiredPolicyFile;
     proxyCaCertificate = builtins.readFile proxyTrustCa;
@@ -165,6 +175,7 @@ let
       self.nixosModules.guest
       qemuIdentityWorkspace.guestModule
       (import ../../nix/modules/guest/profiles/default.nix)
+      terminalProfile
       {
         seter.guest = {
           memory = qemuIdentityHostConfiguration.config.seter.host.workspaces.identity.resources.memoryMiB;
@@ -189,6 +200,7 @@ in
     mkHostWith
     mkHost
     validWorkspaces
+    terminalProfile
     identityWorkspaceEntry
     identityHostConfiguration
     identityRegistryFile

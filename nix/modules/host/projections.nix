@@ -58,7 +58,11 @@ let
           # rather than anything an operator configures or reads.
           microvm.vsock.cid = 3 + parseIpv4 workspace.network.address;
         }
-      ];
+      ]
+      ++ lib.optional (workspace.guestProfile != "default") (
+        cfg.guestProfiles.${workspace.guestProfile}
+          or (throw "seter.host.workspaces.${name}.guestProfile: unknown Guest Profile '${workspace.guestProfile}'; define it in seter.host.guestProfiles")
+      );
     }
   ) cfg.workspaces;
 
@@ -125,6 +129,7 @@ let
 in
 {
   inherit
+    lifecycleRegistry
     workspaceDefinitions
     workspaceSystems
     workspaceRunners

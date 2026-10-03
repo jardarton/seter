@@ -154,6 +154,19 @@ in
       description = "IPv4 address assigned to the Seter bridge and used as the guest gateway.";
     };
 
+    guestProfiles = mkOption {
+      type = types.attrsOf types.deferredModule;
+      default = { };
+      description = ''
+        Named consumer-owned NixOS modules layered on the built-in default
+        Guest Profile. These are trusted host configuration and may add guest
+        services or activation scripts. The name default is reserved. Names
+        start with an ASCII letter or digit and contain only ASCII letters,
+        digits, underscores, dots, or hyphens. Never include secrets or host
+        runtime secret paths in these modules.
+      '';
+    };
+
     workspaces = mkOption {
       type = types.attrsOf workspaceType;
       default = { };

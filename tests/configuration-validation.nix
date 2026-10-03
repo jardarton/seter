@@ -13,6 +13,7 @@ let
     mkHost
     validWorkspaces
     identityGuestConfiguration
+    terminalProfile
     ;
   # Force every option value the seter modules define, stopping at
   # derivations so evaluation does not descend into their build graph.
@@ -40,6 +41,48 @@ let
         ) configuration.config.assertions) true
       )
     );
+
+  profileHost =
+    profile:
+    mkHostWith {
+      guestProfiles.terminal = profile;
+      workspaces.alpha = validWorkspaces.alpha // {
+        guestProfile = "terminal";
+      };
+    };
+  profileProjection =
+    profile:
+    import ../nix/modules/host/projections.nix {
+      cfg = (profileHost profile).config.seter.host;
+      inherit lib pkgs;
+      seterMicrovmModule = self.inputs.microvm.nixosModules.microvm;
+      subnetPrefix = 24;
+      parseIpv4 = import ../nix/lib/ipv4.nix { inherit lib; };
+    };
+  profileGuest = profile: (profileProjection profile).workspaceSystems.alpha;
+  profileOverrides = {
+    address.seter.guest.network.address = lib.mkForce "10.100.0.99";
+    firewall.networking.firewall.allowedTCPPorts = lib.mkForce [
+      22
+      8080
+    ];
+  };
+  unknownProfileRejected =
+    !(forceConfiguration (mkHostWith {
+      workspaces.alpha = validWorkspaces.alpha // {
+        guestProfile = "missing";
+      };
+    })).success;
+  reservedProfileRejected =
+    !(forceConfiguration (mkHostWith {
+      guestProfiles.default = { };
+      workspaces = validWorkspaces;
+    })).success;
+  invalidProfileNameRejected =
+    !(forceConfiguration (mkHostWith {
+      guestProfiles."bad/name" = { };
+      workspaces = validWorkspaces;
+    })).success;
 
   configurationRejected = workspaces: !(forceConfiguration (mkHost workspaces)).success;
 
@@ -627,6 +670,9 @@ let
   '';
   hostChecks = {
     inherit
+      unknownProfileRejected
+      reservedProfileRejected
+      invalidProfileNameRejected
       networkRejectionsPass
       outOfSubnetGatewayRejected
       nonHttpsRepositoryRejected
@@ -671,6 +717,14 @@ in
 assert lib.all (name: lib.assertMsg hostChecks.${name} "Configuration check failed: ${name}") (
   builtins.attrNames hostChecks
 );
+assert lib.assertMsg (forceConfiguration (profileGuest terminalProfile)).success
+  "Valid custom profile rejected";
+assert lib.all (
+  name:
+  lib.assertMsg (
+    !(forceConfiguration (profileGuest profileOverrides.${name})).success
+  ) "Expected protected setting rejection through custom profile: ${name}"
+) (builtins.attrNames profileOverrides);
 assert lib.assertMsg (forceConfiguration (mkHost validWorkspaces)).success
   "Valid host baseline rejected";
 assert lib.assertMsg (forceConfiguration (mkGuest { })).success "Valid guest baseline rejected";
