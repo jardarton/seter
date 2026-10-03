@@ -288,6 +288,14 @@ class PolicyServer:
         if question.rdclass != dns.rdataclass.IN:
             return deny("only the IN DNS class is accepted")
         if not host_allowed(self.allowed_names, name):
+            # TODO: Denied names stall guest clients instead of failing fast.
+            # In the lifecycle KVM test, Nix spent 5 x 15 s on "Resolving timed
+            # out" for an ungranted cache.nixos.org while this server answered
+            # REFUSED to hundreds of retried queries. Guest resolvers apparently
+            # treat REFUSED as a server failure and keep retrying. Investigate
+            # answering ungranted names with an authoritative NXDOMAIN (or
+            # NODATA) so lookups end immediately, keep the deny audit record,
+            # and add a KVM assertion that a denied lookup returns quickly.
             return deny("name is not exactly allowlisted or matched by an allowed Host Pattern")
 
         if question.rdtype == dns.rdatatype.AAAA:
