@@ -26,12 +26,12 @@ The host store is still part of the trusted boot/runtime supply chain. Every dep
 
 ### Store View changes
 
-Paths substituted into or built in the private layer can depend on paths that only the booted Store View supplied, because Nix does not copy a dependency that is already valid. A Runner change can remove such a dependency from the next view. Nix keeps an absent path registered while any valid path refers to it, so a plain `nix-store --verify` cannot remove it; the dependent then fails at runtime, and Nix never substitutes the absent path again.
+Paths substituted into or built in the private layer can depend on paths that only the booted Store View supplied, because Nix does not copy a dependency that is already valid. A Runner change can remove such a dependency from the next view. Nix keeps an absent path registered while any valid path refers to it; the dependent then fails at runtime, and Nix never substitutes the absent path again. `nix-store --verify` cannot clean this up: when an absent path's only referrers are themselves absent but still needed, it tries to invalidate the path anyway and aborts on the database's foreign-key constraint.
 
 After the selected Runner changes, `seter-nix-store-repair.service` therefore runs once the guest network is up:
 
-1. `nix-store --verify --repair` removes unreferenced absent paths and substitutes referenced ones again, normally from the host Nix cache. Repair never builds, because rebuilding from a deriver could compile a whole toolchain during boot.
-2. Private paths that still depend on an unavailable path are deleted, so Nix substitutes or builds them again on demand rather than trusting them. The service refuses to delete any path present in the active Store View, which would otherwise leave a whiteout.
+1. Each absent path that a present path still needs, directly or through other absent paths, is substituted again with `nix-store --repair-path`, normally from the host Nix cache. Repair never builds, because rebuilding from a deriver could compile a whole toolchain during boot.
+2. Every path that is still absent is deleted together with its dependents. This removes registrations nothing needs, and makes Nix substitute or build unrepairable dependents again on demand rather than trusting them. The service refuses to delete any path present in the active Store View, which would otherwise leave a whiteout.
 3. The service records the booted view in `/nix/var/nix/seter-store-view` only after no absent path remains registered. A failed or interrupted repair runs again on the next boot.
 
 Builds started before the service finishes can still encounter absent dependencies.
