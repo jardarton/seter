@@ -93,8 +93,21 @@ in
         "localhost"
         "::1"
       ]
-      ++ optional cfg.network.enable cfg.network.address;
+      ++ optional cfg.network.enable cfg.network.address
+      ++ optional (cfg.network.enable && cfg.nixCache.url != null) cfg.network.gateway;
       description = "Destinations excluded from the convenience explicit proxy variables.";
+    };
+
+    nixCache.url = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "http://10.100.0.1:5000";
+      description = ''
+        Host Nix cache reached through the Seter gateway relay. When set, the
+        guest prefers it over public substituters. It is marked trusted
+        because only the host can answer on the gateway address and it serves
+        unsigned host-built paths; Nix still verifies each NAR hash.
+      '';
     };
 
     secretPlaceholders = mkOption {
@@ -152,6 +165,11 @@ in
     # logrotate-checkconf unit in this minimal image.
     services.logrotate.enable = lib.mkDefault false;
     security.pki.certificates = optional (cfg.proxyCaCertificate != null) cfg.proxyCaCertificate;
+    # NixOS appends cache.nixos.org after this entry; the lower priority value
+    # also makes Nix ask the host first.
+    nix.settings.substituters = mkIf (cfg.nixCache.url != null) [
+      "${cfg.nixCache.url}?trusted=true&priority=10"
+    ];
     environment.sessionVariables =
       cfg.secretPlaceholders
       // optionalAttrs (cfg.proxy != null) {

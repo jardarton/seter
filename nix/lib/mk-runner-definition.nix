@@ -5,6 +5,7 @@
   prefixLength,
   proxyPort,
   proxyCaCertificate ? null,
+  nixCacheUrl ? null,
   hypervisor ? "cloud-hypervisor",
 }:
 let
@@ -149,6 +150,7 @@ in
         inherit hypervisor;
         inherit vcpu;
         proxy = proxyUrl;
+        nixCache.url = nixCacheUrl;
         secretPlaceholders = guestSecretPlaceholders;
 
         projectVolume = {

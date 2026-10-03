@@ -118,6 +118,8 @@ Authorization grants the daemon's full protocol capability: workspaces that shar
 
 Only TCP loopback targets are supported initially.
 
+Seter itself uses this mechanism for the read-only [host Nix cache](./store-visibility.md#host-nix-cache): with `seter.host.nixCache.enable`, the default, every workspace whose `nixCache.enable` is set is implicitly authorized for the `nix-cache` relay. Consumers do not list it in `hostServices`.
+
 ## Proxy CA trust
 
 mitmproxy generates its site interception CA once, in persistent `/var/lib/seter-proxy` state. That directory and both private-key formats remain readable only by the unprivileged proxy account. Seter publishes only the public certificate, under `/var/lib/seter-proxy-public/seter-proxy-ca-cert.pem`.

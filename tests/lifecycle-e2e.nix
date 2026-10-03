@@ -20,6 +20,9 @@ let
 
   seterPackage = self.packages.${system}.seter;
   unrelatedStoreSentinel = pkgs.writeText "seter-unrelated-host-store-sentinel" "host confidential sentinel\n";
+  # Present only in the host store; the guest must substitute it from the host
+  # Nix cache because it is absent from the Runner Store View.
+  hostCacheProbe = pkgs.writeText "seter-host-cache-probe" "served by host cache\n";
   approvedSeedDependency = pkgs.writeText "seter-approved-seed-dependency" "approved dependency\n";
   approvedStoreSeed = pkgs.runCommand "seter-approved-store-seed" { } ''
     mkdir -p "$out"
@@ -337,6 +340,7 @@ pkgs.testers.runNixOSTest {
             runner
             normalDevelopmentFlake
             unrelatedStoreSentinel
+            hostCacheProbe
             localBundle
           ];
           qemu = {
@@ -445,6 +449,10 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
     machine.succeed("grep -Fx 'host confidential sentinel' ${unrelatedStoreSentinel}")
+    # An existing host path is absent from the Store View until guest Nix
+    # substitutes it from the read-only host cache into its private store.
+    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'test ! -e ${hostCacheProbe} && nix config show substituters | grep -F http://10.100.0.1:5000 && nix-store --realise ${hostCacheProbe} && grep -Fx \"served by host cache\" ${hostCacheProbe}'")
+    machine.succeed("systemctl is-active harmonia.socket")
     # Approved roots and their transitive dependencies are registered in the
     # guest store, while ambient host paths remain excluded above.
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'grep -Fx \"approved dependency\" ${approvedStoreSeed}/dependency && nix-store --check-validity ${approvedStoreSeed} ${approvedSeedDependency} && ! touch ${approvedStoreSeed}/guest-write'")

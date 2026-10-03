@@ -229,7 +229,7 @@ An operator grant for any of those exact names or addresses changes the result. 
 |---|---|
 | Hostname, OS, process, and session collection | The malware can inventory the guest and its processes. It sees a Seter guest identity and workspace state, not the host's process table or another workspace. Obtaining public-IP data still requires an allowed network service. |
 | Arbitrary shell/interpreter commands | Allowed with the guest user's authority. The security boundary is the VM, not a shell-command filter. |
-| Directory listing, file modification, and upload | The Project and Home Volumes are fully exposed to the workspace user. The malware cannot ambiently enumerate the host home, another workspace, or unrelated host Nix-store paths. Upload still needs an allowed egress destination. |
+| Directory listing, file modification, and upload | The Project and Home Volumes are fully exposed to the workspace user. The malware cannot ambiently enumerate the host home, another workspace, or unrelated host Nix-store paths. It can substitute a host store path whose hash it already knows from the read-only host Nix cache; store contents are not treated as secret. Upload still needs an allowed egress destination. |
 | Clipboard collection through `xclip` or `xsel` | The default Guest Profile includes neither tool and exposes no host clipboard, X11 forwarding, or desktop session. A clipboard deliberately added inside the guest would be guest-local authority and could be read. This does not address other classes of malicious terminal-output behavior. |
 | Installing `axios` and `socket.io-client` | Not prevented if the required package-registry destination is granted. The packages can be written into the project, Home Volume caches, or other workspace-private state. |
 | Persistence in VS Code, Cursor, Discord, GitHub Desktop, or global npm | Most named targets are absent from the minimal default profile. Nix-provided global applications reside in immutable store paths rather than a normal user-writable installation. However, Seter does not generally prevent persistence in writable project files, shell configuration, editor-server state, language caches, or user-installed tooling in the Home Volume. |
@@ -256,7 +256,7 @@ For this incident, Seter's main containment gains are:
 
 - no host-home mount, SSH-agent forwarding, X11 forwarding, host browser profile, or ambient host credential files;
 - one workspace-specific Project Volume and Home Volume, with no access to another workspace's state;
-- a closure-filtered read-only Store View instead of the full host `/nix/store`;
+- a closure-filtered read-only Store View instead of the full host `/nix/store`, plus a read-only host Nix cache that cannot build, evaluate, or write on the host;
 - host-owned isolation from the host, private LAN, other workspace TAPs, and ungranted routed destinations; and
 - configured VM memory and CPU limits plus fixed-capacity Project, Home, and private Nix-store images.
 

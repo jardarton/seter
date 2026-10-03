@@ -189,6 +189,16 @@ in
       description = "Named host gateway services this workspace may access.";
     };
 
+    nixCache.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Substitute from the host Nix cache when seter.host.nixCache.enable is
+        set. Disable to keep this workspace limited to its Runner Store View,
+        its private store, and public substituters.
+      '';
+    };
+
     egress = {
       httpHosts = mkOption {
         type = types.listOf hostPatternType;
