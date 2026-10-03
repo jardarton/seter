@@ -244,6 +244,14 @@ assert builtins.head nixCacheGuests.alpha.config.nix.settings.substituters == ho
 assert builtins.elem "https://cache.nixos.org/"
   nixCacheGuests.alpha.config.nix.settings.substituters;
 assert lib.hasInfix "10.100.0.1" nixCacheGuests.alpha.config.environment.sessionVariables.NO_PROXY;
+# A host-cache failure after advertising a path falls back to a guest build.
+assert nixCacheGuests.alpha.config.nix.settings.fallback;
+assert !(nixCacheDisabledGuests.alpha.config.nix.settings ? fallback);
+# Gateway listeners, including the cache relay, are unreachable from any
+# interface other than the bridge, even with a permissive host firewall.
+assert lib.hasInfix
+  ''iifname != { "lo", "seter0" } ip daddr 10.100.0.1 counter drop comment "seter gateway is workspace-only"''
+  nftablesConfig.tables.seter_l3.content;
 # A workspace opt-out removes both its authorization and its substituter.
 assert nixCacheOptOutConfiguration.config.seter.host.generated.hostServices.beta == [ ];
 assert

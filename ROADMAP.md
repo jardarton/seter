@@ -230,7 +230,7 @@ The first usable milestone is complete only when:
 
 - all automated checks, including the full KVM workflow, pass from a clean checkout;
 - the packaged NixOS host and Runner deployment works through the public API;
-- no guest can enumerate, modify, or build in the host store; unrelated host paths are absent until explicitly substituted from the read-only host Nix cache;
+- no guest can modify or build in the host store; unrelated host paths are absent from its Store View and reach its private store only by substitution from the read-only host Nix cache;
 - no real repository credential is observable in the guest or injected outside its exact repository path;
 - policy grants require explicit operator review and declarative host deployment;
 - reset and GC preserve working-tree sentinels;

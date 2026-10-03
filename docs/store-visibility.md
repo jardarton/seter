@@ -11,7 +11,7 @@ A workspace sees host-store paths in two ways: its Runner's boot-time Store View
 
 Each deployed Runner carries a read-only EROFS Store View containing its transitive Nix closure, including any development outputs explicitly approved through `storeSeeds`. microvm.nix constructs the image from trusted Nix closure metadata during Runner deployment. The host's `/nix/store` is never shared with the guest.
 
-At boot, the selected Store View and the workspace-private writable overlay appear at the normal guest `/nix/store`. Project dependencies built or substituted later are written only to the private upper store. The Store View holds only the boot closure and approved seeds, so a workspace boots without depending on the host cache and cannot enumerate other host paths.
+At boot, the selected Store View and the workspace-private writable overlay appear at the normal guest `/nix/store`. Project dependencies built or substituted later are written only to the private upper store. The Store View holds only the boot closure and approved seeds, so a workspace boots without depending on the host cache. Other host paths stay out of the guest store until it substitutes them from the cache.
 
 Older NixOS generations root their corresponding Runners and Store View images for rollback. Activating a generation selects its matching immutable view; an active VM continues using the view with which it booted. Because the private Nix database persists across that selection, boot reconciles registrations whenever the selected view changes so paths absent from the newly active view are not incorrectly treated as valid. Retirement and garbage collection may remove old generations only under the separate lifecycle rules.
 
@@ -37,7 +37,7 @@ When guest Nix needs a path that already exists on the host, it copies that path
 Properties:
 
 - Harmonia serves only existing valid paths. It has no build, evaluation, or upload interface, so no workspace request runs code on the host or changes the host store.
-- A workspace can fetch any host path whose store hash it knows, including another workspace's source snapshots or configuration artifacts. It cannot list the store.
+- Treat the whole host store as readable by every workspace that uses the cache, including another workspace's source snapshots and configuration artifacts. Harmonia's file-serving endpoint can expose store directory listings, so do not rely on store path hashes being unguessable.
 - The guest marks the cache as trusted instead of checking signatures. Only the host can answer on the gateway address because bridge ingress is bound to each TAP's registered MAC and IP; Nix still checks every NAR hash.
 - Fetching through the relay is not an exfiltration path: its only endpoint is the trusted host. Exfiltration is limited by [egress policy](./network-boundary.md).
 

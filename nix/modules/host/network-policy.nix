@@ -124,6 +124,11 @@ in
               type filter hook input priority -5; policy accept;
               ${hostInputRules}
               iifname "${cfg.bridge}" counter drop comment "seter unregistered host isolation"
+              # Gateway services listen on the bridge address, which the host
+              # also accepts on other interfaces. Keep DNS, proxy, and relay
+              # ports reachable only from workspaces, even if a LAN interface is
+              # trusted or the native firewall is disabled.
+              iifname != { "lo", "${cfg.bridge}" } ip daddr ${cfg.gateway} counter drop comment "seter gateway is workspace-only"
             }
 
             chain forward {

@@ -501,6 +501,13 @@ let
     };
   };
 
+  explicitNixCacheServiceRejected = configurationRejected {
+    alpha = validWorkspaces.alpha // {
+      nixCache.enable = false;
+      hostServices = [ "nix-cache" ];
+    };
+  };
+
   duplicateWorkspaceHostServiceRejected = hostConfigurationRejected {
     gatewayServices.adb = {
       listenPort = 5037;
@@ -703,6 +710,7 @@ let
       excessiveDnsTimeoutRejected
       insufficientDnsTimeoutRejected
       undefinedHostServiceRejected
+      explicitNixCacheServiceRejected
       duplicateWorkspaceHostServiceRejected
       duplicateGatewayServicePortRejected
       gatewayServiceProxyPortRejected
