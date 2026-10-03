@@ -45,7 +45,7 @@ A workspace's permission to read from and write to its explicitly approved repos
 _Avoid_: Git access, repository secret
 
 **Guest Profile**:
-A reusable, trusted definition of the operating-system capabilities available inside a workspace.
+A reusable, trusted definition of the operating-system capabilities available inside a workspace. Seter supplies the built-in `default`; consumer-owned NixOS modules in trusted host configuration can define named profiles layered on that baseline. These are not repository-owned Project Guest Configuration.
 _Avoid_: VM template, base image
 
 **Project Guest Configuration**:

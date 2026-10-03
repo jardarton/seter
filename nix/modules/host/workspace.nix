@@ -37,9 +37,9 @@ in
     };
 
     guestProfile = mkOption {
-      type = types.enum [ "default" ];
+      type = types.strMatching "[a-zA-Z0-9][a-zA-Z0-9_.-]*";
       default = "default";
-      description = "Trusted Guest Profile used to build the host-deployed Runner.";
+      description = "Built-in default or a name defined in seter.host.guestProfiles, used to build the trusted host-deployed Runner.";
     };
 
     guestPackages = mkOption {

@@ -186,8 +186,8 @@ impl Registry {
 
         for (name, workspace) in &self.workspaces {
             ensure!(
-                workspace.guest_profile == "default",
-                "workspace {name:?} uses unsupported Guest Profile {:?}",
+                valid_component_name(&workspace.guest_profile),
+                "workspace {name:?} has an invalid Guest Profile name {:?}",
                 workspace.guest_profile
             );
             ensure!(
@@ -203,7 +203,7 @@ impl Registry {
             let mut checkouts = HashSet::new();
             for (repository_name, repository) in &workspace.repositories {
                 ensure!(
-                    valid_repository_name(repository_name),
+                    valid_component_name(repository_name),
                     "workspace {name:?} has an invalid repository name {repository_name:?}"
                 );
                 ensure!(
@@ -227,7 +227,7 @@ impl Registry {
                 // checkout name can never escape the project directory.
                 let checkout = &repository.checkout_name;
                 ensure!(
-                    valid_repository_name(checkout),
+                    valid_component_name(checkout),
                     "workspace {name:?} has an invalid repository checkout name {checkout:?} for {repository_name:?}"
                 );
                 if let Some(branch) = &repository.branch {
@@ -389,7 +389,7 @@ impl Registry {
     }
 }
 
-fn valid_repository_name(name: &str) -> bool {
+fn valid_component_name(name: &str) -> bool {
     name.chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric())
@@ -615,6 +615,37 @@ mod tests {
         assert_eq!(workspace.repositories["project"].checkout_name, "project");
         assert_eq!(workspace.runner.identity.guest_profile, "default");
         assert_eq!(workspace.storage.home.size_mi_b, 4096);
+    }
+
+    #[test]
+    fn custom_guest_profiles_are_validated_and_bound_to_runner() {
+        for profile in ["dev", "terminal-v2", "Team.profile_1", "1"] {
+            let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+            input["workspaces"]["minimal"]["guestProfile"] = profile.into();
+            let error = Registry::from_reader(input.to_string().as_bytes()).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("Runner Guest Profile does not match"));
+            input["workspaces"]["minimal"]["runner"]["identity"]["guestProfile"] = profile.into();
+            Registry::from_reader(input.to_string().as_bytes()).unwrap();
+        }
+        for profile in [
+            "",
+            " ",
+            "dev shell",
+            "../dev",
+            ".",
+            "-dev",
+            "dev/profile",
+            "dé v",
+            "dev\n",
+        ] {
+            let mut input: serde_json::Value = serde_json::from_str(VALID).unwrap();
+            input["workspaces"]["minimal"]["guestProfile"] = profile.into();
+            input["workspaces"]["minimal"]["runner"]["identity"]["guestProfile"] = profile.into();
+            let error = Registry::from_reader(input.to_string().as_bytes()).unwrap_err();
+            assert!(error.to_string().contains("invalid Guest Profile name"));
+        }
     }
 
     #[test]

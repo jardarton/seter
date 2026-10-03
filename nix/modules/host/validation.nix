@@ -109,6 +109,16 @@ in
 {
   assertions = [
     {
+      assertion = !(builtins.hasAttr "default" cfg.guestProfiles);
+      message = "seter.host.guestProfiles.default is reserved for the built-in Guest Profile";
+    }
+    {
+      assertion = lib.all (name: builtins.match "[a-zA-Z0-9][a-zA-Z0-9_.-]*" name != null) (
+        attrNames cfg.guestProfiles
+      );
+      message = "seter.host.guestProfiles names must start with an ASCII letter or digit and contain only ASCII letters, digits, underscores, dots, or hyphens";
+    }
+    {
       assertion =
         cfg.runner.hypervisor != "qemu"
         || !pkgs.stdenv.hostPlatform.isAarch64
@@ -304,6 +314,11 @@ in
         workspace.storage.nixStore.image
       ];
       message = "seter.host.workspaces.${workspace.name} volume images must use distinct names";
+    }
+    {
+      assertion =
+        workspace.guestProfile == "default" || builtins.hasAttr workspace.guestProfile cfg.guestProfiles;
+      message = "seter.host.workspaces.${workspace.name}.guestProfile: unknown Guest Profile '${workspace.guestProfile}'; define it in seter.host.guestProfiles";
     }
     {
       assertion = hasUniqueValues workspace.hostServices;
