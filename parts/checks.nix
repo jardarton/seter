@@ -25,6 +25,7 @@
     in
     {
       checks = {
+        dev-shell-seeds = import ../tests/dev-shell-seeds.nix { inherit self pkgs system; };
         inherit (self.packages.${system}) seter;
         nixos-host-module = hostConfiguration.config.system.build.toplevel;
         nixos-guest-module = import ../tests/guest-module.nix {

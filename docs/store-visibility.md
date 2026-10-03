@@ -20,17 +20,27 @@ If the filtered image cannot be built or opened, Runner deployment or workspace 
 Trusted consumer configuration can include an already-built development shell or tool in one workspace's Store View:
 
 ```nix
-seter.host.workspaces.project.storeSeeds = [
-  inputs.project.devShells.${pkgs.system}.default
-  # nix develop may request this separately from the development-shell output.
-  inputs.project.inputs.nixpkgs.legacyPackages.${pkgs.system}.bashInteractive
-  inputs.project.inputs.nixpkgs.legacyPackages.${pkgs.system}.bashInteractive.man
-];
+seter.host.workspaces.project.storeSeeds = inputs.seter.lib.devShellSeeds {
+  devFlake = inputs.project;
+  system = pkgs.stdenv.hostPlatform.system;
+  # shellName = "tools"; # defaults to "default"
+};
 ```
 
 `storeSeeds` defaults to an empty list. Each approved output and its transitive closure become immutable Runner dependencies, are registered in the guest Nix database at boot, and remain rooted by retained host generations. When the guest requests those exact outputs, it can reuse them without rebuilding or fetching them. New outputs still use the private store. Seeds do not install commands into the guest PATH, approve `.envrc`, change the Guest Profile, or grant network access.
 
-Keep the development flake's own dependency pins when selecting these outputs. If they differ from the guest baseline, include companion outputs requested by the development tools, such as the pinned interactive Bash used by `nix develop`. Include the outputs tooling installs: `nix develop` can request Bash's manual output alongside its executable output, while a single package seed roots only its selected output.
+The exported `seter.lib.devShellSeeds` helper selects the development shell
+and that flake's own pinned `inputs.nixpkgs.legacyPackages.${system}.bashInteractive`
+`out` and `man` outputs. `nix develop` and nix-direnv can request these companions
+separately; rooting just the shell may leave them unavailable. Keep the
+development flake's own dependency pins instead of substituting the Host's Bash.
+For flakes without `inputs.nixpkgs`, the helper returns only the shell; consumers
+using another package-set layout must approve its companions explicitly. A
+missing shell fails evaluation with a descriptive error.
+
+Seeds only help while the Host's pin of the development flake matches the lock
+used inside the Workspace. Changing the workspace lock can request different
+outputs that still need guest builds or substitution.
 
 Approval covers the complete transitive closure, including source or configuration paths it references. Select reviewed outputs rather than a host system or broad store inventory. Seter embeds the selected closure in its EROFS image, so reuse avoids guest builds and private-store copies but still consumes host image storage. Updating seeds requires a host deployment and a workspace restart.
 

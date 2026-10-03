@@ -28,6 +28,7 @@
       systems = import systems;
 
       imports = [
+        ./parts/lib.nix
         ./parts/modules.nix
         ./parts/packages.nix
         ./parts/checks.nix
