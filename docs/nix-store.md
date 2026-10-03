@@ -22,7 +22,19 @@ Interactive development must be able to realize paths after a flake or lock-file
 
 Seter deliberately keeps these builds in the guest instead of forwarding the physical host's Nix daemon. Project-controlled derivations therefore execute inside the VM, fixed-output fetches traverse the workspace's DNS and egress policy, and a workspace cannot fill or mutate the host store through Nix. The deployed Runner closure, including explicitly approved [store seeds](./store-visibility.md#reusing-selected-development-outputs), is supplied by its immutable Store View. Other paths are substituted into the private layer, first from the read-only [host Nix cache](./store-visibility.md#host-nix-cache) when the host already has them, or built or fetched by the guest.
 
-The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their matching Runner and Store View for rollback. On boot the guest roots the selected system closure under `/nix/var/nix/gcroots/seter-lower-closures/current`. When that selection changes, it verifies the persistent database after loading the new closure and removes registrations for paths no longer present in the active Store View. This prevents Nix from treating an absent path from an older view as valid; rolling the host generation back loads and registers that generation's closure again.
+The host store is still part of the trusted boot/runtime supply chain. Every deployed Runner is an explicit dependency of its NixOS system generation; retained system generations therefore retain their matching Runner and Store View for rollback. On boot the guest roots the selected system closure under `/nix/var/nix/gcroots/seter-lower-closures/current` and registers that closure in the persistent database. Rolling the host generation back therefore registers that generation's closure again.
+
+### Store View changes
+
+Paths substituted into or built in the private layer can depend on paths that only the booted Store View supplied, because Nix does not copy a dependency that is already valid. A Runner change can remove such a dependency from the next view. Nix keeps an absent path registered while any valid path refers to it, so a plain `nix-store --verify` cannot remove it; the dependent then fails at runtime, and Nix never substitutes the absent path again.
+
+After the selected Runner changes, `seter-nix-store-repair.service` therefore runs once the guest network is up:
+
+1. `nix-store --verify --repair` removes unreferenced absent paths and substitutes referenced ones again, normally from the host Nix cache. Repair never builds, because rebuilding from a deriver could compile a whole toolchain during boot.
+2. Private paths that still depend on an unavailable path are deleted, so Nix substitutes or builds them again on demand rather than trusting them. The service refuses to delete any path present in the active Store View, which would otherwise leave a whiteout.
+3. The service records the booted view in `/nix/var/nix/seter-store-view` only after no absent path remains registered. A failed or interrupted repair runs again on the next boot.
+
+Builds started before the service finishes can still encounter absent dependencies.
 
 ## Configuration
 

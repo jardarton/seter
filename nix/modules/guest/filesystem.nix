@@ -194,32 +194,85 @@ in
     # but it can already corrupt its own private image and recovery is the same.
     environment.systemPackages = mkIf nixStore.enable [ nixGcGuard ];
 
-    # The private Nix database persists while each Runner carries a different
-    # immutable Store View. When the selected Runner changes, remove database
-    # registrations for paths that disappeared with the old view; otherwise
-    # Nix would continue treating those absent paths as valid. A rolled-back
-    # host generation loads its own Runner closure again before this runs.
     boot.postBootCommands = mkIf nixStore.enable (
       lib.mkAfter ''
         booted_system="$(${pkgs.coreutils}/bin/readlink -f /run/booted-system)"
-        view_marker=/nix/var/nix/seter-store-view
         booted_root=/nix/var/nix/gcroots/seter-lower-closures/current
         ${pkgs.coreutils}/bin/mkdir -p /nix/var/nix/gcroots/seter-lower-closures
         ${pkgs.findutils}/bin/find /nix/var/nix/gcroots/seter-lower-closures \
           -mindepth 1 -maxdepth 1 ! -name current -delete
         ${pkgs.coreutils}/bin/ln -sfn "$booted_system" "$booted_root"
-
-        previous_view=
-        if test -f "$view_marker"; then
-          previous_view="$(${pkgs.coreutils}/bin/cat "$view_marker")"
-        fi
-        if test "$previous_view" != "$booted_system"; then
-          ${config.nix.package}/bin/nix-store --verify
-          ${pkgs.coreutils}/bin/printf '%s\n' "$booted_system" > "$view_marker.tmp"
-          ${pkgs.coreutils}/bin/mv -f "$view_marker.tmp" "$view_marker"
-        fi
       ''
     );
+
+    # The private Nix database persists while each Runner carries a different
+    # immutable Store View. Paths fetched or built in the private layer can
+    # depend on paths that only the previous view supplied. Nix keeps an
+    # absent path registered while valid paths refer to it, so after the
+    # selected Runner changes, first fetch such paths again, normally from the
+    # host Nix cache. Delete private paths that still depend on an unavailable
+    # path, so Nix fetches or builds them again rather than trusting them. A
+    # rolled-back host generation loads its own Runner closure again before
+    # this runs. The marker advances only after a clean result, so an
+    # interrupted or failed repair is retried on the next boot.
+    systemd.services.seter-nix-store-repair = mkIf nixStore.enable {
+      description = "Repair the private Nix database after a Store View change";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [
+        "network-online.target"
+        "nix-daemon.service"
+      ];
+      path = [ config.nix.package ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -euo pipefail
+        booted_system="$(readlink -f /run/booted-system)"
+        view_marker=/nix/var/nix/seter-store-view
+        if test "$(cat "$view_marker" 2>/dev/null || true)" = "$booted_system"; then
+          exit 0
+        fi
+
+        missing_paths() {
+          nix --extra-experimental-features nix-command path-info --all |
+            while IFS= read -r path; do
+              test -e "$path" || printf '%s\n' "$path"
+            done
+        }
+
+        # Repair only substitutes: rebuilding from a deriver could compile a
+        # whole toolchain during boot. A repair that cannot fetch every path
+        # exits nonzero after fetching the others.
+        nix-store --verify --repair --option max-jobs 0 --option connect-timeout 10 || true
+
+        mapfile -t missing < <(missing_paths)
+        if test "''${#missing[@]}" -gt 0; then
+          mapfile -t dependents < <(nix-store --query --referrers-closure "''${missing[@]}")
+          for path in "''${dependents[@]}"; do
+            # Deleting a lower path would leave a whiteout that hides it from
+            # every future Store View. Current views are complete closures, so
+            # none of their paths can depend on an absent path.
+            if test -e "/nix/.ro-store/''${path#/nix/store/}"; then
+              echo "refusing to delete $path, which belongs to the active Store View" >&2
+              exit 1
+            fi
+          done
+          printf 'deleting %s private paths that depend on unavailable paths\n' "''${#dependents[@]}"
+          nix-store --delete --ignore-liveness "''${dependents[@]}"
+        fi
+
+        mapfile -t missing < <(missing_paths)
+        if test "''${#missing[@]}" -gt 0; then
+          printf 'still registered but absent: %s\n' "''${missing[@]}" >&2
+          exit 1
+        fi
+        printf '%s\n' "$booted_system" > "$view_marker.tmp"
+        mv -f "$view_marker.tmp" "$view_marker"
+      '';
+    };
 
     systemd.tmpfiles.settings."10-seter-project" = mkIf (volume.enable && cfg.ssh.enable) {
       ${cfg.projectDirectory}.d = {

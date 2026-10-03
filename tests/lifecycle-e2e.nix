@@ -28,6 +28,17 @@ let
     mkdir -p "$out"
     ln -s ${approvedSeedDependency} "$out/dependency"
   '';
+  # Host-only paths whose dependencies only the initial Store View supplies.
+  # After a Runner change, the guest fetches the first dependency again from
+  # the host cache; without the cache, it deletes the second dependent.
+  repairedDependent = pkgs.runCommand "seter-repaired-dependent" { } ''
+    mkdir -p "$out"
+    ln -s ${approvedSeedDependency} "$out/dependency"
+  '';
+  deletedDependent = pkgs.runCommand "seter-deleted-dependent" { } ''
+    mkdir -p "$out"
+    ln -s ${approvedStoreSeed} "$out/seed"
+  '';
   bootstrapMitmCaCertificate = ./fixtures/bootstrap-mitm-ca-cert.pem;
   bootstrapMitmCaPrivateKey = ./fixtures/bootstrap-mitm-ca-key.pem;
   bootstrapGitServerCertificate = ./fixtures/bootstrap-git-server-cert.pem;
@@ -308,6 +319,19 @@ pkgs.testers.runNixOSTest {
           workspaces.e2e = workspace;
         };
 
+        # Dropping the store seed produces Runners whose Store Views lack it.
+        specialisation = {
+          runner-without-seed.configuration = {
+            seter.host.workspaces.e2e.storeSeeds = lib.mkForce [ ];
+          };
+          runner-without-seed-or-cache.configuration = {
+            seter.host.workspaces.e2e = {
+              storeSeeds = lib.mkForce [ ];
+              nixCache.enable = false;
+            };
+          };
+        };
+
         networking.hosts."11.0.0.2" = [ "git.fixture" ];
         networking.interfaces.eth1.ipv4.addresses = [
           {
@@ -341,6 +365,8 @@ pkgs.testers.runNixOSTest {
             normalDevelopmentFlake
             unrelatedStoreSentinel
             hostCacheProbe
+            repairedDependent
+            deletedDependent
             localBundle
           ];
           qemu = {
@@ -447,7 +473,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("set +e; su - operator -c 'seter init e2e' > /tmp/git-symlink 2>&1; code=$?; set -e; test $code = 1; grep -F 'symbolic-link .git directory' /tmp/git-symlink")
     machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'rm /project/e2e/.git; rmdir /project/e2e; mv /project/e2e-before-symlink-check /project/e2e'")
 
-    machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest && command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
+    machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'systemctl is-active --quiet seter-nix-store-repair.service'", timeout=300)
+    machine.succeed(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- 'test -e /etc/vm-guest &&command -v git && command -v curl && command -v diff && command -v file && command -v find && command -v grep && command -v less && command -v sed && command -v ssh && command -v tar && command -v xz && command -v direnv && test -e /etc/direnv/direnvrc && grep -F nix-direnv /etc/direnv/direnvrc && bash -lic \"type _direnv_hook >/dev/null\" && test -s /etc/ssl/certs/ca-bundle.crt && nix config show experimental-features | grep -F nix-command | grep -F flakes && test $(findmnt -n -o FSTYPE /nix/store | sort -u) = overlay && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && test $(readlink -f /nix/var/nix/gcroots/seter-lower-closures/current) = $(readlink -f /run/booted-system) && test ! -e ${unrelatedStoreSentinel} && ! test -r /run/seter-identity/ssh_host_ed25519_key && printf project-persistent > /project/runner-model-marker && printf home-persistent > ~/.seter-home-marker && printf nix-persistent > /tmp/nix-marker && nix-store --add-fixed sha256 /tmp/nix-marker > /project/nix-marker-path'")
     machine.succeed("grep -Fx 'host confidential sentinel' ${unrelatedStoreSentinel}")
     # An existing host path is absent from the Store View until guest Nix
     # substitutes it from the read-only host cache into its private store.
@@ -523,6 +550,37 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test $(cat /project/runner-model-marker) = project-persistent && test $(cat ~/.seter-home-marker) = home-persistent && test $(cat $(cat /project/nix-marker-path)) = nix-persistent && test -e /project/e2e/run-persistent && test -e ~/.run-home-persistent && cd /project/normal-development-flake && direnv exec . env | grep -Fx NORMAL_DEVELOPMENT_FLAKE=ready && test ! -e ${unrelatedStoreSentinel}'", timeout=300)
     machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
     machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
+
+    # Paths fetched into the private store can depend on paths that only the
+    # booted Store View supplied. After a Runner change, the guest fetches
+    # them again from the host cache, or deletes the dependents when no
+    # substituter can supply them. Either way no absent path stays registered.
+    base_system = machine.succeed("readlink -f /run/current-system").strip()
+    store_repaired = "systemctl is-active --quiet seter-nix-store-repair.service && test $(cat /nix/var/nix/seter-store-view) = $(readlink -f /run/booted-system) && nix path-info --all | while read -r path; do test -e $path || exit 1; done"
+
+    def boot_runner(system):
+        machine.succeed(f"{system}/bin/switch-to-configuration test")
+        machine.succeed("su - operator -c 'seter up e2e' | grep -F 'Started e2e at 10.100.0.20'")
+        machine.wait_until_succeeds(f"timeout 60s ssh {ssh_options} seter@10.100.0.20 -- '{store_repaired}'", timeout=600)
+
+    def stop_workspace():
+        machine.succeed("su - operator -c 'seter down e2e' | grep -F 'Stopped e2e'")
+        machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
+
+    boot_runner(base_system)
+    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --realise ${repairedDependent} && test ! -e /nix/.rw-store/store/$(basename ${approvedSeedDependency})'")
+    stop_workspace()
+    boot_runner(f"{base_system}/specialisation/runner-without-seed")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test ! -e /nix/.ro-store/$(basename ${approvedSeedDependency}) && test -e /nix/.rw-store/store/$(basename ${approvedSeedDependency}) && grep -Fx \"approved dependency\" ${repairedDependent}/dependency'")
+    stop_workspace()
+    boot_runner(base_system)
+    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --check-validity ${approvedStoreSeed} && nix-store --realise ${deletedDependent}'")
+    stop_workspace()
+    boot_runner(f"{base_system}/specialisation/runner-without-seed-or-cache")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- '! nix-store --check-validity ${deletedDependent} && ! nix-store --check-validity ${approvedStoreSeed} && nix-store --check-validity ${repairedDependent}'")
+    stop_workspace()
+    machine.succeed(f"{base_system}/bin/switch-to-configuration test")
+
     # Reset is stopped-only and --all-state mechanically excludes the Project
     # Volume. Preserve sentinels and trusted host artifacts while replacing
     # both reproducible images.
