@@ -21,9 +21,7 @@ let
 
   serviceUnitName = name: "seter-gateway-${name}";
   serviceNames = attrNames cfg.gatewayServices;
-  workspaceServiceNames = flatten (
-    mapAttrsToList (_: workspace: workspace.hostServices) cfg.workspaces
-  );
+  workspaceServiceNames = flatten (builtins.attrValues cfg.generated.hostServices);
   activeServices = filterAttrs (
     name: _: builtins.elem name workspaceServiceNames
   ) cfg.gatewayServices;
@@ -38,7 +36,7 @@ let
   authorizationsFor =
     serviceName:
     mapAttrsToList (workspaceName: _: workspaceName) (
-      filterAttrs (_: workspace: builtins.elem serviceName workspace.hostServices) cfg.workspaces
+      filterAttrs (_: services: builtins.elem serviceName services) cfg.generated.hostServices
     );
 
   authorizationFiles = mapAttrsToList (

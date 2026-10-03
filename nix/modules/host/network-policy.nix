@@ -67,7 +67,7 @@ let
           service = cfg.gatewayServices.${serviceName};
         in
         ''iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} tcp dport ${toString service.listenPort} counter accept comment "seter host service ${workspace.name} ${serviceName}"''
-      ) workspace.hostServices;
+      ) cfg.generated.hostServices.${workspace.name};
     in
     ''
       iifname "${cfg.bridge}" ip saddr ${address} ip daddr ${cfg.gateway} udp dport ${toString workspace.dnsPort} accept comment "seter DNS ${workspace.name}"

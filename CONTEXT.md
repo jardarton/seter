@@ -36,6 +36,10 @@ _Avoid_: VM image, launcher
 The workspace-specific read-only set of host Nix store paths reachable from its deployed and retained Runner closures, including explicitly approved development outputs (`storeSeeds`).
 _Avoid_: Host store, shared store
 
+**Host Nix Cache**:
+The read-only binary cache through which a workspace substitutes paths already present in the host Nix store. It serves existing paths only and never builds or evaluates on the host.
+_Avoid_: Shared store, remote builder
+
 **Workspace SSH Identity**:
 The server identity used to verify that an SSH connection terminates at the intended workspace.
 _Avoid_: User key, login key

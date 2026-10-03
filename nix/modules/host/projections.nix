@@ -17,6 +17,11 @@ let
       prefixLength = subnetPrefix;
       proxyPort = cfg.proxy.explicitPort;
       proxyCaCertificate = cfg.proxyCaCertificate;
+      nixCacheUrl =
+        if builtins.elem "nix-cache" cfg.generated.hostServices.${name} then
+          "http://${cfg.gateway}:${toString cfg.nixCache.listenPort}"
+        else
+          null;
       hypervisor = cfg.runner.hypervisor;
     }
   ) cfg.workspaces;

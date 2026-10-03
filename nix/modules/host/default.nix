@@ -129,6 +129,7 @@ in
     ./dns.nix
     ./host-services.nix
     ./network-policy.nix
+    ./nix-cache.nix
     ./proxy.nix
     ./tcp-egress.nix
   ];
@@ -191,6 +192,20 @@ in
           inherit lib;
           workspaces = cfg.workspaces;
         };
+      };
+      # Effective gateway services per workspace, including the implicit
+      # host Nix cache. Consumers declare only hostServices.
+      hostServices = mkOption {
+        internal = true;
+        readOnly = true;
+        type = types.attrsOf (types.listOf types.str);
+        default = lib.mapAttrs (
+          _: workspace:
+          lib.unique (
+            workspace.hostServices
+            ++ lib.optional (cfg.nixCache.enable && workspace.nixCache.enable) "nix-cache"
+          )
+        ) cfg.workspaces;
       };
     };
 

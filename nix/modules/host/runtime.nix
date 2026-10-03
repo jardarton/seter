@@ -89,7 +89,7 @@ let
         "seter-proxy.service"
       ]
       ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
-      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
+      ++ map (service: "seter-gateway-${service}.socket") cfg.generated.hostServices.${name};
       requires = [
         "nftables.service"
         "seter-bridge.service"
@@ -97,7 +97,7 @@ let
         "seter-proxy.service"
       ]
       ++ lib.optional (workspace.egress.tcp != [ ]) "seter-tcp-egress-${name}.service"
-      ++ map (service: "seter-gateway-${service}.socket") workspace.hostServices;
+      ++ map (service: "seter-gateway-${service}.socket") cfg.generated.hostServices.${name};
       partOf = [ "seter-runtime-${name}.target" ];
       serviceConfig = {
         Type = "oneshot";

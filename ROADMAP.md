@@ -64,7 +64,7 @@ Evidence: evaluation tests prove registry invariants, host/Runner identity align
 - Add a persistent Home Volume while retaining separate Project and private Nix-store volumes.
 - Ensure a workspace cannot enumerate a sentinel path placed elsewhere in the host Nix store.
 
-Evidence: adversarial KVM tests prove strict SSH identity, absence of unrelated host-store paths, persistence of all intended state, and no writable path to the host store.
+Evidence: adversarial KVM tests prove strict SSH identity, absence of unrelated host-store paths from the booted Store View, persistence of all intended state, and no writable path to the host store. [ADR 0013](./docs/adr/0013-serve-host-store-as-workspace-nix-cache.md) later added read-only substitution of existing host paths through the host Nix cache, proven by the same KVM workflow.
 
 ### 3. Implement the trusted `default` Guest Profile
 
@@ -230,7 +230,7 @@ The first usable milestone is complete only when:
 
 - all automated checks, including the full KVM workflow, pass from a clean checkout;
 - the packaged NixOS host and Runner deployment works through the public API;
-- no guest can read unrelated host-store sentinel paths;
+- no guest can enumerate, modify, or build in the host store; unrelated host paths are absent until explicitly substituted from the read-only host Nix cache;
 - no real repository credential is observable in the guest or injected outside its exact repository path;
 - policy grants require explicit operator review and declarative host deployment;
 - reset and GC preserve working-tree sentinels;

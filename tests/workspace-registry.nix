@@ -73,6 +73,32 @@ let
   gatewayServiceFirewallPorts =
     gatewayServiceConfiguration.config.networking.firewall.interfaces.seter0.allowedTCPPorts;
 
+  projectionFor =
+    configuration:
+    import ../nix/modules/host/projections.nix {
+      cfg = configuration.config.seter.host;
+      inherit lib pkgs;
+      seterMicrovmModule = self.inputs.microvm.nixosModules.microvm;
+      subnetPrefix = 24;
+      parseIpv4 = import ../nix/lib/ipv4.nix { inherit lib; };
+    };
+  nixCacheConfig = hostConfiguration.config;
+  nixCacheGuests = (projectionFor hostConfiguration).workspaceSystems;
+  nixCacheOptOutConfiguration = mkHostWith {
+    workspaces = validWorkspaces // {
+      beta = validWorkspaces.beta // {
+        nixCache.enable = false;
+      };
+    };
+  };
+  nixCacheOptOutGuests = (projectionFor nixCacheOptOutConfiguration).workspaceSystems;
+  nixCacheDisabledConfiguration = mkHostWith {
+    nixCache.enable = false;
+    workspaces = validWorkspaces;
+  };
+  nixCacheDisabledGuests = (projectionFor nixCacheDisabledConfiguration).workspaceSystems;
+  hostCacheSubstituter = "http://10.100.0.1:5000?trusted=true&priority=10";
+
   secretPolicyWorkspaces = validWorkspaces // {
     alpha = validWorkspaces.alpha // {
       secrets.githubToken = {
@@ -202,6 +228,37 @@ assert gatewayServiceSocket.unitConfig.StopWhenUnneeded;
 assert gatewayService.serviceConfig.DynamicUser;
 assert lib.hasInfix "systemd-socket-proxyd --exit-idle-time=5s 127.0.0.1:15037"
   gatewayService.serviceConfig.ExecStart;
+# The host Nix cache is a loopback-only Harmonia behind the standard gateway
+# relay, authorized for every workspace by default.
+assert nixCacheConfig.services.harmonia.cache.enable;
+assert nixCacheConfig.services.harmonia.cache.settings.bind == "127.0.0.1:5000";
+assert
+  nixCacheConfig.systemd.sockets.seter-gateway-nix-cache.listenStreams == [ "10.100.0.1:5000" ];
+assert lib.hasInfix "systemd-socket-proxyd --exit-idle-time=5s 127.0.0.1:5000"
+  nixCacheConfig.systemd.services.seter-gateway-nix-cache.serviceConfig.ExecStart;
+assert builtins.elem "seter-gateway-nix-cache.socket" alphaTapRequires;
+assert lib.hasInfix
+  ''ip saddr 10.100.0.10 ip daddr 10.100.0.1 tcp dport 5000 counter accept comment "seter host service alpha nix-cache"''
+  nftablesConfig.tables.seter_l3.content;
+assert builtins.head nixCacheGuests.alpha.config.nix.settings.substituters == hostCacheSubstituter;
+assert builtins.elem "https://cache.nixos.org/"
+  nixCacheGuests.alpha.config.nix.settings.substituters;
+assert lib.hasInfix "10.100.0.1" nixCacheGuests.alpha.config.environment.sessionVariables.NO_PROXY;
+# A workspace opt-out removes both its authorization and its substituter.
+assert nixCacheOptOutConfiguration.config.seter.host.generated.hostServices.beta == [ ];
+assert
+  !(lib.hasInfix "seter host service beta nix-cache" nixCacheOptOutConfiguration.config.networking.nftables.tables.seter_l3.content);
+assert
+  !(builtins.elem "seter-gateway-nix-cache.socket" nixCacheOptOutConfiguration.config.systemd.services.seter-tap-beta.requires);
+assert
+  !(builtins.elem hostCacheSubstituter nixCacheOptOutGuests.beta.config.nix.settings.substituters);
+assert builtins.elem hostCacheSubstituter
+  nixCacheOptOutGuests.alpha.config.nix.settings.substituters;
+# Disabling the host cache removes Harmonia and every guest substituter.
+assert !nixCacheDisabledConfiguration.config.services.harmonia.cache.enable;
+assert !(nixCacheDisabledConfiguration.config.systemd.sockets ? seter-gateway-nix-cache);
+assert
+  !(builtins.elem hostCacheSubstituter nixCacheDisabledGuests.alpha.config.nix.settings.substituters);
 assert nftablesConfig.enable;
 assert nftablesConfig.tables.seter_l2.family == "bridge";
 assert nftablesConfig.tables.seter_l3.family == "inet";

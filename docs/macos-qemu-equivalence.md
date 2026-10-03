@@ -14,7 +14,7 @@ surfaces. Cloud Hypervisor remains the native-Linux default.
 | Isolation | Dedicated account, cgroup limits, filesystem hardening, device allowlist, and QEMU seccomp sandbox constrain the process. |
 | Resources | Registered memory and vCPU count enter the trusted Runner; Host memory and CPU limits remain authoritative. |
 | Storage | Separate raw Project, Home, and private Nix-store volumes attach as virtio block devices. Root remains ephemeral. |
-| Store View | The Runner's read-only EROFS closure is below the private writable overlay; the ambient Host store is not shared. |
+| Store View | The Runner's read-only EROFS closure is below the private writable overlay; the Host store is not mounted, and existing Host paths are substituted only through the read-only host Nix cache. |
 | SSH identity | The Host-created server key enters the VMM unit through a private systemd credential and reaches the guest through fw_cfg. A required root-only staging service runs before sshd. Key bytes are absent from the Nix store and command line. |
 | Networking | The Host creates the exact registered TAP, MAC, and address binding, with queue count matching vCPUs. |
 | Policy | Host nftables, DNS, proxy, and relay services enforce authority independently of the VMM. Selecting QEMU grants no additional destinations or Host services. |
