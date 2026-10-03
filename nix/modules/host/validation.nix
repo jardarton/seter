@@ -325,6 +325,12 @@ in
       message = "seter.host.workspaces.${workspace.name}.hostServices must not contain duplicates";
     }
     {
+      # The host Nix cache is authorized only through its enable options, so
+      # an explicit grant cannot silently override a workspace opt-out.
+      assertion = !(builtins.elem "nix-cache" workspace.hostServices);
+      message = "seter.host.workspaces.${workspace.name}.hostServices must not list the reserved nix-cache service; use seter.host.nixCache.enable and seter.host.workspaces.${workspace.name}.nixCache.enable";
+    }
+    {
       assertion = lib.all validSecretName (workspaceSecretNames workspace);
       message = "seter.host.workspaces.${workspace.name} secret names must start with a letter and contain only letters, digits, underscores, or hyphens, up to 63 characters";
     }

@@ -167,9 +167,12 @@ in
     security.pki.certificates = optional (cfg.proxyCaCertificate != null) cfg.proxyCaCertificate;
     # NixOS appends cache.nixos.org after this entry; the lower priority value
     # also makes Nix ask the host first.
-    nix.settings.substituters = mkIf (cfg.nixCache.url != null) [
-      "${cfg.nixCache.url}?trusted=true&priority=10"
-    ];
+    nix.settings = mkIf (cfg.nixCache.url != null) {
+      substituters = [ "${cfg.nixCache.url}?trusted=true&priority=10" ];
+      # The host cache is opportunistic. If it disappears after advertising a
+      # path, build that path in the guest rather than failing the request.
+      fallback = lib.mkDefault true;
+    };
     environment.sessionVariables =
       cfg.secretPlaceholders
       // optionalAttrs (cfg.proxy != null) {

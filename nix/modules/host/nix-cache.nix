@@ -21,9 +21,9 @@ in
         Serve the host Nix store read-only to workspaces as a binary cache.
         Guests substitute already-present host paths instead of rebuilding or
         downloading them. The cache never builds or evaluates anything, so
-        workspace requests cannot execute code on the host. A workspace can
-        fetch any host store path whose hash it knows; secrets must therefore
-        never enter the host store.
+        workspace requests cannot execute code on the host. Every workspace
+        using the cache can read the whole host store, so secrets must never
+        enter it.
       '';
     };
 
