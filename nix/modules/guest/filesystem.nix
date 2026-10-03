@@ -209,12 +209,17 @@ in
     # immutable Store View. Paths fetched or built in the private layer can
     # depend on paths that only the previous view supplied. Nix keeps an
     # absent path registered while valid paths refer to it, so after the
-    # selected Runner changes, first fetch such paths again, normally from the
-    # host Nix cache. Delete private paths that still depend on an unavailable
-    # path, so Nix fetches or builds them again rather than trusting them. A
-    # rolled-back host generation loads its own Runner closure again before
-    # this runs. The marker advances only after a clean result, so an
-    # interrupted or failed repair is retried on the next boot.
+    # selected Runner changes, fetch the absent paths that present paths still
+    # need again, normally from the host Nix cache. Then delete every path
+    # that is still absent, together with its dependents, so Nix fetches or
+    # builds them again rather than trusting them. A rolled-back host
+    # generation loads its own Runner closure again before this runs. The
+    # marker advances only after a clean result, so an interrupted or failed
+    # repair is retried on the next boot.
+    #
+    # `nix-store --verify` cannot do this: it tries to invalidate an absent
+    # path whose only referrers are absent but still needed, and then aborts
+    # on the database's foreign-key constraint.
     systemd.services.seter-nix-store-repair = mkIf nixStore.enable {
       description = "Repair the private Nix database after a Store View change";
       wantedBy = [ "multi-user.target" ];
@@ -236,17 +241,33 @@ in
           exit 0
         fi
 
+        present() {
+          while IFS= read -r path; do
+            if test -e "$path"; then printf '%s\n' "$path"; fi
+          done
+        }
+        absent() {
+          while IFS= read -r path; do
+            test -e "$path" || printf '%s\n' "$path"
+          done
+        }
         missing_paths() {
-          nix --extra-experimental-features nix-command path-info --all |
-            while IFS= read -r path; do
-              test -e "$path" || printf '%s\n' "$path"
-            done
+          nix --extra-experimental-features nix-command path-info --all | absent
         }
 
-        # Repair only substitutes: rebuilding from a deriver could compile a
-        # whole toolchain during boot. A repair that cannot fetch every path
-        # exits nonzero after fetching the others.
-        nix-store --verify --repair --option max-jobs 0 --option connect-timeout 10 || true
+        mapfile -t missing < <(missing_paths)
+        if test "''${#missing[@]}" -gt 0; then
+          mapfile -t users < <(nix-store --query --referrers-closure "''${missing[@]}" | present)
+          if test "''${#users[@]}" -gt 0; then
+            mapfile -t needed < <(nix-store --query --requisites "''${users[@]}" | absent)
+            printf 'fetching %s absent paths that present paths need\n' "''${#needed[@]}"
+            for path in "''${needed[@]}"; do
+              # Repair only substitutes: rebuilding from a deriver could
+              # compile a whole toolchain during boot.
+              nix-store --repair-path "$path" --option max-jobs 0 --option connect-timeout 10 || true
+            done
+          fi
+        fi
 
         mapfile -t missing < <(missing_paths)
         if test "''${#missing[@]}" -gt 0; then
@@ -260,7 +281,7 @@ in
               exit 1
             fi
           done
-          printf 'deleting %s private paths that depend on unavailable paths\n' "''${#dependents[@]}"
+          printf 'removing %s absent paths and their dependents\n' "''${#missing[@]}"
           nix-store --delete --ignore-liveness "''${dependents[@]}"
         fi
 

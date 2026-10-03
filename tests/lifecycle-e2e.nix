@@ -28,16 +28,18 @@ let
     mkdir -p "$out"
     ln -s ${approvedSeedDependency} "$out/dependency"
   '';
+  removedStoreSeed = pkgs.writeText "seter-removed-store-seed" "removed seed\n";
   # Host-only paths whose dependencies only the initial Store View supplies.
-  # After a Runner change, the guest fetches the first dependency again from
+  # After a Runner change, the guest fetches the first dependent's absent
+  # chain (seed, then the dependency only the seed references) again from
   # the host cache; without the cache, it deletes the second dependent.
   repairedDependent = pkgs.runCommand "seter-repaired-dependent" { } ''
     mkdir -p "$out"
-    ln -s ${approvedSeedDependency} "$out/dependency"
+    ln -s ${approvedStoreSeed} "$out/seed"
   '';
   deletedDependent = pkgs.runCommand "seter-deleted-dependent" { } ''
     mkdir -p "$out"
-    ln -s ${approvedStoreSeed} "$out/seed"
+    ln -s ${removedStoreSeed} "$out/seed"
   '';
   bootstrapMitmCaCertificate = ./fixtures/bootstrap-mitm-ca-cert.pem;
   bootstrapMitmCaPrivateKey = ./fixtures/bootstrap-mitm-ca-key.pem;
@@ -156,7 +158,10 @@ let
       branch = "main";
     };
     repositories.local.local = true;
-    storeSeeds = [ approvedStoreSeed ];
+    storeSeeds = [
+      approvedStoreSeed
+      removedStoreSeed
+    ];
     network = {
       address = "10.100.0.20";
       mac = "02:00:00:00:00:20";
@@ -568,16 +573,16 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_fails("systemctl is-active --quiet seter-runtime-e2e.target")
 
     boot_runner(base_system)
-    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --realise ${repairedDependent} && test ! -e /nix/.rw-store/store/$(basename ${approvedSeedDependency})'")
+    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --realise ${repairedDependent} && test ! -e /nix/.rw-store/store/$(basename ${approvedStoreSeed}) && test ! -e /nix/.rw-store/store/$(basename ${approvedSeedDependency})'")
     stop_workspace()
     boot_runner(f"{base_system}/specialisation/runner-without-seed")
-    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'test ! -e /nix/.ro-store/$(basename ${approvedSeedDependency}) && test -e /nix/.rw-store/store/$(basename ${approvedSeedDependency}) && grep -Fx \"approved dependency\" ${repairedDependent}/dependency'")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- 'for path in ${approvedStoreSeed} ${approvedSeedDependency}; do test ! -e /nix/.ro-store/$(basename $path) && test -e /nix/.rw-store/store/$(basename $path) || exit 1; done; grep -Fx \"approved dependency\" ${repairedDependent}/seed/dependency'")
     stop_workspace()
     boot_runner(base_system)
-    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --check-validity ${approvedStoreSeed} && nix-store --realise ${deletedDependent}'")
+    machine.succeed(f"timeout 240s ssh {ssh_options} seter@10.100.0.20 -- 'nix-store --check-validity ${removedStoreSeed} && nix-store --realise ${deletedDependent}'")
     stop_workspace()
     boot_runner(f"{base_system}/specialisation/runner-without-seed-or-cache")
-    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- '! nix-store --check-validity ${deletedDependent} && ! nix-store --check-validity ${approvedStoreSeed} && nix-store --check-validity ${repairedDependent}'")
+    machine.succeed(f"timeout 30s ssh {ssh_options} seter@10.100.0.20 -- '! nix-store --check-validity ${deletedDependent} && ! nix-store --check-validity ${removedStoreSeed} && nix-store --check-validity ${repairedDependent}'")
     stop_workspace()
     machine.succeed(f"{base_system}/bin/switch-to-configuration test")
 
