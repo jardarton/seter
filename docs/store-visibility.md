@@ -41,6 +41,8 @@ Properties:
 - The guest marks the cache as trusted instead of checking signatures. Only the host can answer on the gateway address because bridge ingress is bound to each TAP's registered MAC and IP; Nix still checks every NAR hash.
 - Fetching through the relay is not an exfiltration path: its only endpoint is the trusted host. Exfiltration is limited by [egress policy](./network-boundary.md).
 
+Upstream note: a review of Harmonia 3.1.0, the nixpkgs version Seter currently deploys, found that a dot-segment path in its file-serving endpoint returns a directory listing of the store rather than only the requested path's contents. Seter's threat model already treats the store as readable, so this changes no Seter guarantee, but it has not yet been reported to Harmonia. Report it upstream and, if a later Seter release must keep the store unlistable, expose only the binary-cache endpoints Nix needs (`nix-cache-info`, `.narinfo`, and `nar/`) instead of relaying Harmonia unchanged.
+
 Keep real secrets out of the host store. In particular, never reference a secret through `builtins.readFile`, a `path:` flake that includes untracked key files, or any other store-copying expression.
 
 ## Reusing selected development outputs
