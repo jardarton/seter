@@ -21,6 +21,18 @@ assertions; shared synthetic configurations live in `fixtures/`.
 - VM scenarios cover real sudo authorization, service failure handling, network
   isolation, credential injection and redaction, revocation, guest trust, and the
   lifecycle of persistent volumes. `lifecycle-e2e.nix` requires nested KVM.
+- `macos-client.nix` runs `macos-client.py` as an ordinary user against real
+  OpenSSH and synthetic services. It covers command transport, bundle streaming,
+  policy paths, deployment arguments, Docker Unix-socket access, port
+  collisions, and connection cleanup. Lima and application clients are
+  synthetic; physical Mac acceptance remains separate.
+
+Run the native client integration directly with a built binary, Python, and
+OpenSSH available:
+
+```console
+python3 tests/macos-client.py target/debug/seter
+```
 
 The Python CLI tests accept a built binary and generated synthetic fixtures as
 positional arguments; see their module docstrings. Run them as a non-root user.

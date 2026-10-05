@@ -1,5 +1,19 @@
 { inputs, self, ... }:
 {
+  flake.packages.aarch64-darwin.seter =
+    let
+      pkgs = inputs.nixpkgs.legacyPackages.aarch64-darwin;
+    in
+    pkgs.callPackage ../nix/package.nix { };
+
+  flake.packages.aarch64-darwin.default = self.packages.aarch64-darwin.seter;
+
+  flake.apps.aarch64-darwin.default = {
+    type = "app";
+    program = "${self.packages.aarch64-darwin.seter}/bin/seter";
+    meta.description = "Manage Seter Hosts and Workspaces from macOS";
+  };
+
   perSystem =
     { pkgs, ... }:
     let

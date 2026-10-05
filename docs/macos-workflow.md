@@ -2,9 +2,11 @@
 
 ## Scope
 
-This is the accepted manual operator workflow for the initial macOS
-integration. Seter still runs inside the trusted `aarch64-linux` Seter Host;
-there is no Darwin Seter CLI and no automatic Lima or tunnel management.
+This documents the explicit SSH operator path established by the initial
+macOS integration. The [native client](./macos-client.md) now handles daily
+Host and Workspace commands from the Mac, with Linux integration coverage and
+physical Mac acceptance pending. The manual path remains useful for
+troubleshooting and Workspace service tunnels.
 
 Complete [bootstrap and deployment](./macos-deployment.md) first. The
 commands below use the default Lima instance `seter`, Workspace `example`, and

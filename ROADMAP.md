@@ -183,6 +183,15 @@ The automated native-NixOS KVM scenario must cover this complete sequence:
 
 After automated success, perform a private real-project trial involving normal development and agent work. Record only generalized product defects publicly. The milestone is not complete until that workflow is comfortable enough to repeat rather than merely possible once.
 
+## Documentation TODOs
+
+- [ ] Clarify the `storeSeeds` trust boundary: selecting a project's development
+  shell evaluates its Nix during Host deployment and can build missing outputs
+  through the Host's configured builders. Document that approval includes
+  trusting the seed's evaluation and build code as well as its complete closure,
+  and qualify existing claims that project code executes only in the Workspace
+  or is never evaluated while building a Runner.
+
 ## Explicitly deferred
 
 - macOS acceptance is tracked separately in the [macOS integration roadmap](./macos-roadmap.md);
@@ -194,7 +203,6 @@ After automated success, perform a private real-project trial involving normal d
 - [automated repository credentials](#automate-github-repository-credentials);
 - automatic `.envrc` approval;
 - mutable or automatically learned runtime policy;
-- Herdr integration and remote agent restoration;
 - disposable/snapshotted command workspaces;
 - automatic Project Volume deletion.
 

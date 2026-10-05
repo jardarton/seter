@@ -42,7 +42,7 @@ to trusted host configuration; Seter never imports workload repository modules
 through this interface. Assertions guard declarative invariants, but trusted
 modules can run arbitrary guest services and activation scripts. This is not an
 “extension only” contract. See [ADR 0012](adr/0012-trusted-consumer-guest-profiles.md)
-and the [shell/Home Manager example](guest-profile-default.md#trusted-consumer-profiles).
+and the [shared Host and Guest environment guide](guest-profile-default.md#share-packages-and-configuration-with-the-host).
 
 ## Future specialized workloads
 

@@ -3,6 +3,12 @@
 ## Status and scope
 
 This roadmap owns the remaining macOS acceptance gates and later client work.
+
+The [native client](./docs/macos-client.md) now implements Host lifecycle,
+deployment, terminal entry, Workspace command transport, Docker socket access,
+and Host service forwarding. Linux OpenSSH integration tests cover connection
+mechanics; physical Mac acceptance
+remains outstanding.
 The [validation summary](./docs/macos-validation.md) is the canonical source
 for physical results and their limits.
 
@@ -87,13 +93,14 @@ an outer restart; a clean stopped state with retained volumes is sufficient.
 
 ## Non-goals and later work
 
-The first integration has no Darwin Seter CLI, automatic Lima provisioning or
-startup, automatic tunnels, direct/subnet routing, Tailscale integration, USB
-passthrough, broad home sharing, multi-Host management, backup/restore, or
-recovery from deletion/corruption. No separate Linux builder is required.
+Automatic Lima provisioning, Workspace-specific managed tunnels,
+direct/subnet routing, Tailscale integration, USB passthrough,
+broad home sharing, multi-Host management, backup/restore, and recovery from
+deletion/corruption remain outside this integration. No separate Linux builder
+is required. Instance deletion remains an explicit Lima operation.
 
 The attended SSH-agent bridge trusts the Seter Host for that connection and
 must not forward the agent into a Workspace. It is not an unattended identity
-solution. A purpose-built operator identity and a native client may follow
-once the manual workflow is stable. Managed launch, routing, and backups must
+solution. A purpose-built operator identity may follow. Managed launch,
+routing, and backups must
 preserve the same isolation and consumer-ownership boundaries.
