@@ -41,7 +41,10 @@ between versions.
 Start with the [quickstart](./quickstart.md) to configure a host and launch your first workspace. See [project-description.md](./project-description.md) for the intended architecture and threat model.
 
 For macOS, start with [deployment](./docs/macos-deployment.md), then follow the
-[operator workflow](./docs/macos-workflow.md).
+[native client guide](./docs/macos-client.md). The same `seter` executable runs
+on the Mac; `seter host` accesses its managed Linux Host, while ordinary
+Workspace commands use that Host's existing Linux CLI. Native client behavior
+has Linux integration coverage and still requires physical Mac acceptance.
 
 ## How Seter compares
 
@@ -82,6 +85,9 @@ trusted Workspace Registry ── NixOS deployment ──> host policy + Runner
 A Runner contains Seter's guest baseline and registered non-secret identity, never project code. The approved HTTPS repositories enter later through Workspace Bootstrap. Cold starts validate and execute the already deployed immutable Runner without evaluating Nix. Guest Profile or identity changes therefore use the operator's normal trusted host deployment; there is no `seter update` command.
 
 Consumer infra can define named [trusted Guest Profiles](./docs/guest-profile-default.md#trusted-consumer-profiles) for shells, dotfiles, agents, and guest services.
+The [shared environment guide](./docs/guest-profile-default.md#share-packages-and-configuration-with-the-host)
+shows how to reuse consumer-owned packages and configuration on the Host and
+in Workspaces.
 
 The trusted [`default` Guest Profile](./docs/guest-profile-default.md) includes
 flake-enabled Nix with the private writable store, Git and system HTTPS trust,
@@ -274,7 +280,7 @@ On `x86_64-linux`, `nix flake check` includes a nested-KVM lifecycle test that b
 ## Flake outputs
 
 - `devShells.{x86_64-linux,aarch64-linux,aarch64-darwin}.default`: Rust development shell
-- `packages.<system>.seter`: Rust CLI
+- `packages.{x86_64-linux,aarch64-linux,aarch64-darwin}.seter`: Rust CLI
 - `apps.<system>.default`: Seter CLI application
 - `nixosModules.host`: host-side Seter module
 - `nixosModules.limaHost`: `aarch64-linux` Seter Host integration for the pinned macOS Lima bootstrap

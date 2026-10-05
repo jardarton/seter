@@ -6,7 +6,10 @@
   coreutils,
   openssl,
   openssh,
+  stdenv,
   systemd,
+  lima,
+  nixos-rebuild-ng,
 }:
 rustPlatform.buildRustPackage {
   pname = "seter";
@@ -40,14 +43,20 @@ rustPlatform.buildRustPackage {
 
   postFixup = ''
     wrapProgram $out/bin/seter \
-      --set SETER_PRIVILEGED_HELPER "$out/bin/seter" \
+      ${lib.optionalString stdenv.isLinux ''--set SETER_PRIVILEGED_HELPER "$out/bin/seter"''} \
       --prefix PATH : ${
-        lib.makeBinPath [
-          coreutils
-          openssl
-          openssh
-          systemd
-        ]
+        lib.makeBinPath (
+          [
+            coreutils
+            openssl
+            openssh
+          ]
+          ++ lib.optionals stdenv.isLinux [ systemd ]
+          ++ lib.optionals stdenv.isDarwin [
+            lima
+            nixos-rebuild-ng
+          ]
+        )
       }
   '';
 }

@@ -99,6 +99,10 @@
         };
       }
       // lib.optionalAttrs (system == "x86_64-linux") {
+        macos-client = import ../tests/macos-client.nix {
+          inherit pkgs;
+          seter = self.packages.${system}.seter;
+        };
         minimal-runner = self.nixosConfigurations.minimal.config.microvm.declaredRunner;
         lifecycle-e2e = import ../tests/lifecycle-e2e.nix {
           inherit

@@ -11,6 +11,13 @@ deployment and operator path. This is a summary of supplied acceptance results,
 not a claim that Linux CI reproduces macOS behavior or that all eligible Macs
 have been tested.
 
+The native Darwin CLI and its Host lifecycle, deployment, Docker, and
+service-forwarding integrations were implemented subsequently. Linux tests
+exercise the client against real OpenSSH with TCP and Unix-socket forwarding;
+the Darwin package evaluates on Linux. These results do not establish native
+Mac execution or physical Lima and Docker acceptance. Follow
+the [native client guide](./macos-client.md) and rerun those workflows on a Mac.
+
 The validated stack used Lima/vz, the pinned nixos-lima bootstrap, QEMU/KVM,
 Linux 6.12 LTS in both Linux layers, and a four-vCPU Workspace. Dependency
 revisions are controlled by `flake.lock` and the image digest in

@@ -37,6 +37,9 @@ pub(crate) fn enter_privileged_mode() -> Result<()> {
         "SETER_SSH",
         "SETER_SUDO",
         "SETER_PRIVILEGED_HELPER",
+        "SETER_CLIENT_CONFIG",
+        "SETER_HERDR_SSH_BRIDGE",
+        "SETER_HERDR_REAL_SSH",
     ] {
         env::remove_var(variable);
     }

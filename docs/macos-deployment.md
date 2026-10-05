@@ -8,8 +8,9 @@ and the [operator workflow](./macos-workflow.md) for daily use after deployment.
 
 This procedure creates one persistent `aarch64-linux` Seter Host from the
 checked-in [`lima/seter.yaml`](../lima/seter.yaml) template and remotely deploys
-a consumer-owned NixOS flake. Seter commands still run in the Linux Seter Host.
-There is no Darwin Seter executable.
+a consumer-owned NixOS flake. The native Darwin `seter` client invokes
+Workspace operations on the Linux Seter Host. See the
+[client guide](./macos-client.md) for Host integrations and their validation limits.
 
 The bootstrap image is
 `nixos-lima-v0.2.1-aarch64.qcow2`, selected by an immutable release URL and
@@ -79,14 +80,18 @@ non-default instance name is needed.
 
 ## Deploy from macOS and build on Linux
 
-Deploy the example configuration:
+Install the native client and configure the consumer deployment:
 
 ```sh
-nix run path:.#macos-host -- \
-  deploy "$HOME/seter-exchange/consumer" seter-host
+nix profile install path:.#seter
+seter host configure --lima seter \
+  --flake "$HOME/seter-exchange/consumer" \
+  --configuration seter-host \
+  --exchange-directory "$HOME/seter-exchange"
+seter host deploy
 ```
 
-The wrapper obtains Lima's generated SSH configuration, evaluates the flake in
+The client obtains Lima's generated SSH configuration, evaluates the flake in
 the macOS Nix process, and invokes `nixos-rebuild` with the Seter Host as both
 `--build-host` and `--target-host`. Consequently all `aarch64-linux` closures
 are built or substituted in the Seter Host; another Linux machine and Darwin
@@ -163,8 +168,8 @@ If activation was interrupted but SSH still works:
 If the Seter Host stopped, use:
 
 ```sh
-nix run path:.#macos-host -- start
-nix run path:.#macos-host -- deploy "$HOME/seter-exchange/consumer" seter-host
+seter host start
+seter host deploy
 ```
 
 Do not create a replacement instance over the problem, detach or rewrite the

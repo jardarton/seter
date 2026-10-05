@@ -1,5 +1,6 @@
 mod audit;
 mod cli;
+mod client;
 mod host_patterns;
 mod lifecycle;
 mod policy;
@@ -23,9 +24,40 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<i32> {
+    if let Some(code) = client::herdr_bridge()? {
+        return Ok(code);
+    }
     let cli = Cli::parse();
 
+    if let Command::Host { command } = &cli.command {
+        return client::host(command, cli.client_config.as_deref());
+    }
+    if let Command::ClientProbe {
+        port,
+        socket,
+        websocket_path,
+    } = &cli.command
+    {
+        return client::probe_endpoint(*port, socket.as_deref(), websocket_path.as_deref());
+    }
+    let internal = matches!(
+        cli.command,
+        Command::StartWorkspace { .. }
+            | Command::StopWorkspace { .. }
+            | Command::ExportAudit { .. }
+            | Command::ResetWorkspace { .. }
+            | Command::CollectGarbage
+            | Command::DestroyProjectVolume { .. }
+    );
+    if !internal
+        && !matches!(cli.command, Command::Completions { .. })
+        && client::enabled(cli.client_config.as_deref())
+    {
+        return client::workspace(&cli.command, cli.client_config.as_deref());
+    }
+
     match cli.command {
+        Command::Host { .. } | Command::ClientProbe { .. } => unreachable!(),
         Command::List => {
             let registry = registry::Registry::load_default()?;
             for name in registry.workspaces.keys() {

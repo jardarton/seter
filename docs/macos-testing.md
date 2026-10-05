@@ -1,7 +1,7 @@
 # Validating the macOS path
 
 Use the ordinary [deployment](./macos-deployment.md) and
-[operator workflow](./macos-workflow.md), with a disposable Workspace and
+[native client](./macos-client.md), with a disposable Workspace and
 consumer-owned configuration. Do not maintain a second diagnostic Host or
 guest implementation in Seter merely to obtain a passing boot.
 
@@ -30,6 +30,11 @@ and rejection of wrong-source, wrong-type, or read-only exchange mounts. They
 do not exercise Lima activation or actual virtiofs mounting; repeat the physical
 deployment/cold-boot checks when changing these helpers.
 
+The native client check runs against real OpenSSH on Linux, with synthetic
+Lima discovery and application clients. It verifies TCP and Unix-socket
+forwarding, argument boundaries, file streaming, and cleanup.
+It cannot establish Darwin execution or physical Lima behavior.
+
 On the aarch64-linux Seter Host, build from an explicitly supplied Seter source
 checkout outside any Workspace:
 
@@ -49,6 +54,16 @@ source whereas a Git flake excludes them. Do not publish its source snapshots
 or logs without reviewing them for local data.
 
 ## Physical regression checklist
+
+For the native client, additionally verify:
+
+- install the Darwin package and configure a retained instance;
+- enter Host and Workspace shells, interrupt commands, and check exit codes;
+- deploy the configured consumer flake with builds on the Linux Host;
+- connect the real Docker daemon and use both env and context with `docker ps`;
+- forward a real application to Client loopback and check port collisions;
+- stop the Host with active connections, then restart and reconnect;
+- test recovery after Client sleep and external Lima stop/start.
 
 1. **Bootstrap:** create from the pinned template with exactly one selected
    exchange directory; deploy the consumer flake with Linux builds performed
