@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from host_patterns import canonical_pattern, host_allowed
+from host_patterns import canonical_pattern, host_allowed, private_upstream
 
 import dns.asyncquery
 import dns.flags
@@ -29,12 +29,16 @@ import dns.opcode
 import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
+import dns.rrset
 
 
 MAX_UDP_QUERY_BYTES = 4096
 MAX_TCP_QUERY_BYTES = 16384
 MAX_UDP_RESPONSE_BYTES = 1232
 TCP_CLIENT_TIMEOUT_SECONDS = 10.0
+# Local answers need no cache tuning; a short TTL bounds stale guest state
+# after a policy change.
+LOCAL_ANSWER_TTL = 60
 
 
 class TokenBucket:
@@ -59,7 +63,7 @@ class TokenBucket:
 
 class PolicyServer:
     def __init__(self, config: dict[str, Any]):
-        if require_integer(config, "version", 0, 2_147_483_647) != 1:
+        if require_integer(config, "version", 0, 2_147_483_647) != 2:
             raise ValueError("unsupported DNS policy version")
         self.workspace = require_string(config, "workspace")
         self.source_address = str(
@@ -68,6 +72,15 @@ class PolicyServer:
         self.allowed_names = frozenset(
             canonical_pattern(name) for name in require_string_list(config, "allowedNames")
         )
+        local_answers = config.get("localAnswers")
+        if not isinstance(local_answers, dict):
+            raise ValueError("localAnswers must be an object")
+        self.local_answers: dict[str, str] = {}
+        for host, address in local_answers.items():
+            normalized, address = private_upstream(host, address)
+            if normalized in self.local_answers or host_allowed(self.allowed_names, normalized):
+                raise ValueError(f"duplicate local DNS answer for {host!r}")
+            self.local_answers[normalized] = address
         self.backend_address = str(
             ipaddress.IPv4Address(require_string(config, "backendAddress"))
         )
@@ -287,6 +300,29 @@ class PolicyServer:
         query_type = dns.rdatatype.to_text(question.rdtype)
         if question.rdclass != dns.rdataclass.IN:
             return deny("only the IN DNS class is accepted")
+        local_address = self.local_answers.get(name)
+        if local_address is not None:
+            if question.rdtype == dns.rdatatype.A:
+                response = local_response(query, dns.rcode.NOERROR)
+                response.flags |= dns.flags.AA
+                response.answer.append(
+                    dns.rrset.from_text(
+                        question.name, LOCAL_ANSWER_TTL, "IN", "A", local_address
+                    )
+                )
+            elif question.rdtype == dns.rdatatype.AAAA:
+                response = local_response(query, dns.rcode.NOERROR)
+            else:
+                return deny("only A and AAAA queries are supported")
+            self.audit(
+                source=source,
+                decision="allow",
+                reason="private upstream answered from its reviewed address",
+                name=name,
+                query_type=query_type,
+                protocol=protocol,
+            )
+            return response_wire(response, query, tcp=tcp)
         if not host_allowed(self.allowed_names, name):
             # TODO: Denied names stall guest clients instead of failing fast.
             # In the lifecycle KVM test, Nix spent 5 x 15 s on "Resolving timed

@@ -13,7 +13,7 @@ let
         mkdir -p "$out"
         openssl req -x509 -newkey rsa:2048 -nodes -days 36500 \
           -subj '/CN=allowed.example' \
-          -addext 'subjectAltName=DNS:allowed.example,DNS:second-allowed.example,DNS:passthrough.example' \
+          -addext 'subjectAltName=DNS:allowed.example,DNS:second-allowed.example,DNS:passthrough.example,DNS:service.lan.example' \
           -addext 'basicConstraints=critical,CA:TRUE' \
           -keyout "$out/key.pem" -out "$out/cert.pem"
       '';
@@ -71,6 +71,13 @@ pkgs.testers.runNixOSTest {
       "private-passthrough.example"
     ];
     networking.hosts."224.0.0.1" = [ "multicast.example" ];
+    # Only the namespace clients resolve this name; the proxy never does.
+    # lan-rebind.example is an ordinary HTTP grant whose proxy-side lookup
+    # returns the reviewed private address; it must still be refused.
+    networking.hosts."10.0.0.2" = [
+      "service.lan.example"
+      "lan-rebind.example"
+    ];
     # Exercise the strongest reload mode: Seter's managed tables must
     # be recreated as part of the same transaction after a full flush.
     networking.nftables.flushRuleset = true;
@@ -110,6 +117,7 @@ pkgs.testers.runNixOSTest {
               # verification happens before an injected request can
               # reach a destination with the wrong certificate.
               "bad-cert.example"
+              "service.lan.example"
             ];
             headers = [ "authorization" ];
           };
@@ -410,6 +418,43 @@ pkgs.testers.runNixOSTest {
       machine.wait_for_unit("seter-test-private-http.service")
       machine.succeed("${lib.getExe pkgs.netcat} -z -w 1 127.0.0.1 18081")
       machine.fail("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${lib.getExe pkgs.netcat} -z -w 1 127.0.0.1 18081")
+
+      # A Private HTTPS Upstream pins one reviewed name to one private
+      # address for one workspace. The guest receives that address from
+      # its policy listener without an upstream query, the proxy connects
+      # to the literal rather than resolving the name, and credential
+      # injection and response redaction apply as for a public host.
+      machine.succeed("ip -n outside address add 10.0.0.2/24 dev eth0; ip route add 10.0.0.2/32 via 11.0.0.2 dev outside-host")
+      machine.succeed("systemd-run --unit=seter-test-private-https --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${pkgs.python3}/bin/python ${proxyHttpServer} 443 ${proxyTestCertificate}/cert.pem ${proxyTestCertificate}/key.pem 10.0.0.2")
+      machine.wait_for_unit("seter-test-private-https.service")
+      machine.succeed("systemd-run --unit=seter-test-private-other-port --property=Type=simple -- ${pkgs.iproute2}/bin/ip netns exec outside ${lib.getExe pkgs.socat} TCP4-LISTEN:8443,bind=10.0.0.2,reuseaddr,fork EXEC:${pkgs.coreutils}/bin/true")
+      machine.wait_for_unit("seter-test-private-other-port.service")
+      machine.wait_until_succeeds("${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 443")
+      machine.succeed("test $(ip netns exec alpha dig +short @10.100.0.1 service.lan.example A) = 10.0.0.2")
+      machine.succeed("test $(ip netns exec alpha dig +tcp +short @10.100.0.1 SERVICE.lan.example A) = 10.0.0.2")
+      machine.succeed("test -z \"$(ip netns exec alpha dig +short @10.100.0.1 service.lan.example AAAA)\"")
+      machine.succeed("ip netns exec beta dig @10.100.0.1 service.lan.example A | grep -F 'status: REFUSED'")
+      machine.fail("journalctl -u seter-test-upstream.service | grep -Fi 'service.lan.example'")
+      machine.succeed("ip netns exec alpha curl --noproxy '*' --insecure --fail --silent https://service.lan.example/index.html | grep -F 'allowed upstream'")
+      machine.succeed("ip netns exec alpha curl --proxy http://10.100.0.1:${toString config.seter.host.proxy.explicitPort} --cacert /var/lib/seter-proxy-public/seter-proxy-ca-cert.pem --fail --silent https://service.lan.example/index.html | grep -F 'allowed upstream'")
+      machine.succeed("rm -f /tmp/seter-secret-received /tmp/secret-body /tmp/secret-headers; ip netns exec alpha curl --noproxy '*' --insecure --fail --silent --dump-header /tmp/secret-headers --output /tmp/secret-body -H 'Authorization: Bearer seter-placeholder-0123456789abcdef' https://service.lan.example/secret")
+      machine.succeed("grep -Fx 'Bearer rotated-runtime-token' /tmp/seter-secret-received; grep -Fx 'Bearer seter-placeholder-0123456789abcdef' /tmp/secret-body; grep -Fi 'X-Reflected-Authorization: Bearer seter-placeholder-0123456789abcdef' /tmp/secret-headers")
+      machine.fail("grep -F rotated-runtime-token /tmp/secret-body /tmp/secret-headers")
+      machine.succeed("journalctl -u seter-proxy.service | grep -F 'seter-audit' | grep -F '\"host\":\"service.lan.example\"' | grep -F '\"injectedSecrets\":[\"githubToken\"]'")
+      # Cleartext, other ports through CONNECT, another workspace, and an
+      # ordinary grant whose proxy-side lookup returns the reviewed address
+      # remain denied. The packet destination never selects the upstream.
+      machine.succeed("rm -f /tmp/seter-secret-received; test $(ip netns exec alpha curl --noproxy '*' --silent --output /tmp/private-upstream-http --write-out '%{http_code}' http://service.lan.example/secret) = 403; grep -F 'restricted to HTTPS on port 443' /tmp/private-upstream-http; test ! -e /tmp/seter-secret-received")
+      machine.succeed("test $(ip netns exec beta curl --noproxy '*' --insecure --silent --output /tmp/private-upstream-beta --write-out '%{http_code}' --resolve service.lan.example:443:10.0.0.2 https://service.lan.example/) = 403; grep -F 'not in this workspace' /tmp/private-upstream-beta")
+      machine.succeed("printf 'CONNECT service.lan.example:8443 HTTP/1.1\\r\\nHost: service.lan.example:8443\\r\\n\\r\\n' | ip netns exec alpha ${lib.getExe pkgs.netcat} -w 2 10.100.0.1 ${toString config.seter.host.proxy.explicitPort} | grep -F '403'")
+      machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/private-upstream-rebind --write-out '%{http_code}' https://lan-rebind.example/) = 403; grep -F 'did not resolve to a public IPv4 address' /tmp/private-upstream-rebind")
+      machine.succeed("test $(ip netns exec alpha curl --noproxy '*' --insecure --silent --output /tmp/private-upstream-packet --write-out '%{http_code}' --resolve private.example:443:10.0.0.2 https://private.example/) = 403; grep -F 'did not resolve to a public IPv4 address' /tmp/private-upstream-packet")
+      # The proxy account's nftables exception is the reviewed address on
+      # port 443 only, and workspaces still cannot route to it directly.
+      machine.succeed("${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 8443")
+      machine.succeed("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 443")
+      machine.fail("${pkgs.util-linux}/bin/runuser -u seter-proxy -- ${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 8443")
+      machine.fail("ip netns exec alpha ${lib.getExe pkgs.netcat} -z -w 1 10.0.0.2 8443")
 
       # Passthrough policy is selected solely from the TLS SNI. The
       # upstream certificate reaches the client unchanged, while the

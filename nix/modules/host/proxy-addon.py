@@ -13,6 +13,7 @@ from host_patterns import (
     exact_valid,
     host_allowed,
     patterns_overlap,
+    private_upstream,
     request_host,
 )
 
@@ -108,7 +109,7 @@ class SeterPolicy:
         try:
             Path(ready_path).unlink(missing_ok=True)
             policy = json.loads(Path(policy_path).read_text())
-            if policy.get("version") != 4:
+            if policy.get("version") != 5:
                 raise ValueError("unsupported policy version")
             workspaces = policy["workspaces"]
             if not isinstance(workspaces, dict):
@@ -148,6 +149,15 @@ class SeterPolicy:
                     )
                 ):
                     raise ValueError("invalid workspace host policy")
+
+                private_http_hosts = self._private_http_hosts(
+                    workspace["privateHttpHosts"],
+                    normalized_http_hosts | normalized_passthrough_hosts,
+                )
+                # A Private HTTPS Upstream is otherwise an ordinary exact
+                # intercepted host: SNI, authority, and secret binding checks
+                # apply unchanged. Only its address selection differs.
+                normalized_http_hosts |= frozenset(private_http_hosts)
 
                 parsed_secrets: dict[str, dict[str, object]] = {}
                 placeholders: list[str] = []
@@ -278,6 +288,7 @@ class SeterPolicy:
                     "name": name,
                     "httpHosts": normalized_http_hosts,
                     "passthroughHosts": normalized_passthrough_hosts,
+                    "privateHttpHosts": private_http_hosts,
                     # Credential values came from systemd's private runtime
                     # credential directory, never from this Nix-store policy.
                     "secrets": parsed_secrets,
@@ -287,6 +298,20 @@ class SeterPolicy:
             Path(ready_path).touch(mode=0o600)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise OptionsError(f"cannot load Seter policy: {error}") from error
+
+    @staticmethod
+    def _private_http_hosts(
+        grants: object, other_patterns: frozenset[str]
+    ) -> dict[str, str]:
+        if not isinstance(grants, dict):
+            raise ValueError("invalid private HTTPS upstream policy")
+        parsed: dict[str, str] = {}
+        for host, address in grants.items():
+            normalized, address = private_upstream(host, address)
+            if normalized in parsed or host_allowed(other_patterns, normalized):
+                raise ValueError(f"invalid private HTTPS upstream {host!r}")
+            parsed[normalized] = address
+        return parsed
 
     def _workspace(self, client_ip: str) -> dict[str, object] | None:
         return self.workspaces.get(client_ip)
@@ -495,6 +520,22 @@ class SeterPolicy:
             return None, f"host {host!r} did not resolve to a public IPv4 address"
         return public_addresses[0], None
 
+    async def _resolve_upstream(
+        self, workspace: dict[str, object], host: str, port: int
+    ) -> tuple[str | None, str | None]:
+        """Select the pinned upstream address for an authorized host.
+
+        A Private HTTPS Upstream uses its reviewed literal address and is never
+        resolved, so no DNS answer can move it. Every other host must resolve
+        to a public address.
+        """
+        private_address = workspace["privateHttpHosts"].get(host)
+        if private_address is not None:
+            if port != 443:
+                return None, f"private upstream {host!r} is restricted to HTTPS on port 443"
+            return private_address, None
+        return await self._resolve_public_ipv4(host, port)
+
     async def _resolve_public_ipv4(
         self, host: str, port: int
     ) -> tuple[str | None, str | None]:
@@ -575,7 +616,7 @@ class SeterPolicy:
                     "HTTP or TLS-passthrough allowlist"
                 )
             else:
-                address, error = await self._resolve_public_ipv4(host, port)
+                address, error = await self._resolve_upstream(workspace, host, port)
                 if error is not None:
                     reason = error
                 else:
@@ -714,7 +755,7 @@ class SeterPolicy:
                         decision = "allow"
                         reason = "host is allowlisted and matches the pinned upstream connection"
                 else:
-                    address, error = await self._resolve_public_ipv4(host, port)
+                    address, error = await self._resolve_upstream(workspace, host, port)
                     if error is not None:
                         reason = error
                     else:

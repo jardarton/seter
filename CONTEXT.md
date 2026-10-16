@@ -72,6 +72,10 @@ _Avoid_: Firewall config, allowlist file
 An exact hostname or a leading wildcard that matches exactly one subordinate DNS label. A wildcard excludes the named apex and cannot bind credential authority.
 _Avoid_: Domain, glob, recursive wildcard
 
+**Private HTTPS Upstream**:
+A Policy Grant that pins one exact hostname to one reviewed non-public IPv4 address for intercepted HTTPS, without resolving the name.
+_Avoid_: LAN exception, rebinding allowance
+
 **Workspace Retirement**:
 The removal of a workspace from active use while retaining its Project Volume unless a separate destructive action explicitly removes it.
 _Avoid_: Garbage collection, deletion

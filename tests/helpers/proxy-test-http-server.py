@@ -52,7 +52,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 handler = partial(Handler, directory="/tmp/seter-upstream")
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
-server = ThreadingHTTPServer(("11.0.0.2", port), handler)
+address = sys.argv[4] if len(sys.argv) > 4 else "11.0.0.2"
+server = ThreadingHTTPServer((address, port), handler)
 if port == 443:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(sys.argv[2], sys.argv[3])

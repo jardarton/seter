@@ -28,8 +28,11 @@ let
       ) workspace.secrets
     ) cfg.workspaces
   );
+  privateUpstreams = lib.concatMap (workspace: workspace.egress.privateHttp) (
+    builtins.attrValues cfg.workspaces
+  );
   policy = {
-    version = 4;
+    version = 5;
     workspaces = builtins.listToAttrs (
       lib.mapAttrsToList (
         name: workspace:
@@ -37,6 +40,9 @@ let
           inherit name;
           httpHosts = normalizeHosts ((repositories.hosts workspace) ++ workspace.egress.httpHosts);
           passthroughHosts = normalizeHosts workspace.egress.passthroughHosts;
+          privateHttpHosts = builtins.listToAttrs (
+            map (grant: nameValuePair (lib.toLower grant.host) grant.address) workspace.egress.privateHttp
+          );
           repositories = lib.mapAttrs (_: repository: {
             host = repositories.host repository;
             path = repositories.path repository;
@@ -286,6 +292,9 @@ in
     # second boundary on the proxy account itself so a parser bug cannot turn
     # the unprivileged service into a path to host or private-network services.
     # DNS is the only private-address exception required by getaddrinfo.
+    # Reviewed Private HTTPS Upstreams add exact address-and-port-443
+    # exceptions, still after the host-local and workspace rejects. The addon
+    # decides which workspace and hostname may use each one.
     networking.nftables.tables.seter_proxy_output = {
       family = "inet";
       content = ''
@@ -295,6 +304,12 @@ in
           meta skuid ${toString proxyCfg.uid} tcp dport 53 accept
           meta skuid ${toString proxyCfg.uid} ip saddr ${cfg.gateway} tcp sport { ${toString proxyCfg.port}, ${toString proxyCfg.explicitPort} } ct state established accept
           meta skuid ${toString proxyCfg.uid} fib daddr type { local, broadcast, multicast } counter reject comment "seter proxy local destination"
+          meta skuid ${toString proxyCfg.uid} ip daddr ${cfg.subnet} counter reject comment "seter proxy workspace destination"
+          ${lib.optionalString (privateUpstreams != [ ]) ''
+            meta skuid ${toString proxyCfg.uid} ip daddr { ${
+              lib.concatStringsSep ", " (unique (map (grant: grant.address) privateUpstreams))
+            } } tcp dport 443 accept comment "seter proxy private HTTPS upstream"
+          ''}
           meta skuid ${toString proxyCfg.uid} ip daddr {
             0.0.0.0/8,
             10.0.0.0/8,
@@ -311,7 +326,6 @@ in
             224.0.0.0/4,
             240.0.0.0/4
           } counter reject comment "seter proxy non-public destination"
-          meta skuid ${toString proxyCfg.uid} ip daddr ${cfg.subnet} counter reject comment "seter proxy workspace destination"
         }
       '';
     };

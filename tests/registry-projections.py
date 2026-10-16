@@ -63,19 +63,21 @@ assert identity["runner"]["identity"] == {
 assert identity["runner"]["path"] == runner
 
 expected_dns = {
-    "version": 1, "workspace": "alpha", "sourceAddress": "10.100.0.10",
-    "allowedNames": ["example.invalid"], "backendAddress": "127.0.0.1", "backendPort": 15353,
+    "version": 2, "workspace": "alpha", "sourceAddress": "10.100.0.10",
+    "allowedNames": ["example.invalid"], "localAnswers": {},
+    "backendAddress": "127.0.0.1", "backendPort": 15353,
 }
 dns = json.loads(Path(dns).read_text())
 assert {key: dns[key] for key in expected_dns} == expected_dns
 proxy_text = Path(proxy).read_text()
 assert "/run/secrets/github-token" not in proxy_text
 proxy = json.loads(proxy_text)
-assert proxy["version"] == 4
+assert proxy["version"] == 5
 alpha = proxy["workspaces"]["10.100.0.10"]
 assert alpha["name"] == "alpha"
 assert alpha["httpHosts"] == ["example.invalid", "api.example.com"]
 assert alpha["passthroughHosts"] == []
+assert alpha["privateHttpHosts"] == {}
 assert alpha["repositories"]["workspace"] == {
     "host": "example.invalid", "path": "/owner/workspace.git", "credential": None,
 }

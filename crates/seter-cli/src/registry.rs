@@ -48,6 +48,24 @@ pub struct Repository {
     pub credential: Option<RepositoryCredential>,
 }
 
+impl Repository {
+    /// Lower-case host of a remote repository URL; local imports have none.
+    pub fn host(&self) -> Option<String> {
+        let authority = self
+            .url
+            .as_deref()?
+            .strip_prefix("https://")?
+            .split('/')
+            .next()?;
+        Some(
+            authority
+                .strip_suffix(":443")
+                .unwrap_or(authority)
+                .to_ascii_lowercase(),
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryCredential {

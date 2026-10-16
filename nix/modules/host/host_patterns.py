@@ -92,3 +92,23 @@ def patterns_overlap(left: str, right: str) -> bool:
 
 def host_allowed(patterns: frozenset[str], host: str) -> bool:
     return any(pattern_matches(pattern, host) for pattern in patterns)
+
+
+# Mirrors the Nix and Rust Policy File validation of private-http grants.
+_PRIVATE_UPSTREAM_NETWORKS = tuple(
+    ipaddress.IPv4Network(network)
+    for network in ("10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def private_upstream(host: object, address: object) -> tuple[str, str]:
+    """Validate one Private HTTPS Upstream and return its canonical form."""
+    if not isinstance(address, str) or not exact_valid(host) or re.fullmatch(r"[0-9.]+", host):
+        raise ValueError(f"invalid private HTTPS upstream {host!r}")
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ValueError as error:
+        raise ValueError(f"invalid private HTTPS upstream {host!r}") from error
+    if str(parsed) != address or not any(parsed in network for network in _PRIVATE_UPSTREAM_NETWORKS):
+        raise ValueError(f"invalid private HTTPS upstream {host!r}")
+    return canonical_host(host), address

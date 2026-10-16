@@ -158,7 +158,7 @@ pkgs.runCommand "seter-multi-repository-check"
       .workspaces.product.repositories.frontend.checkoutName == "frontend" and
       .workspaces.product.repositories.backend.checkoutName == "api"' "$SETER_REGISTRY"
     test "$(seter list)" = product
-    jq -e '.version == 4 and
+    jq -e '.version == 5 and
       (.workspaces["10.100.0.10"].httpHosts | sort == ["git.example", "second.example"]) and
       (.workspaces["10.100.0.10"].repositories | keys == ["backend", "frontend"]) and
       .workspaces["10.100.0.10"].repositories.backend == {

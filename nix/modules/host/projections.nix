@@ -126,6 +126,9 @@ let
           tcp = map (
             destination: destination // { host = lib.toLower destination.host; }
           ) workspace.egress.tcp;
+          "private-http" = map (
+            grant: grant // { host = lib.toLower grant.host; }
+          ) workspace.egress.privateHttp;
         };
       }) cfg.workspaces;
     }

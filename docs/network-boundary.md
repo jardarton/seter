@@ -25,7 +25,7 @@ The nftables policy is installed before any TAP can start. A policy-loading fail
 
 ## DNS
 
-A separate unprivileged policy resolver runs on demand for each active workspace behind the bridge gateway. Workspaces may query the gateway over TCP or UDP, but the resolver accepts only names derived from that workspace's approved repository hosts and configured HTTP, passthrough, and direct-TCP destinations.
+A separate unprivileged policy resolver runs on demand for each active workspace behind the bridge gateway. Workspaces may query the gateway over TCP or UDP, but the resolver accepts only names derived from that workspace's approved repository hosts and configured HTTP, passthrough, and direct-TCP destinations. It answers [Private HTTPS Upstream](#private-https-upstreams) names locally from their reviewed address.
 
 Exact grants match only one name. A `*.example.com` pattern matches exactly one subordinate label, and excludes both the apex and deeper names. nftables redirects each registered source address to its own listener, and the listener independently verifies the registered source address. One workspace's destinations therefore do not broaden another workspace's DNS policy.
 
@@ -59,6 +59,24 @@ The source IP selects the workspace policy. Only exact names, or bounded single-
 Only publicly routed IPv4 answers are accepted. An allowed name therefore cannot rebind the host-side proxy onto loopback, link-local, Seter, or private LAN services.
 
 Denials return HTTP 403 with a policy reason. Raw TCP and HTTP CONNECT tunnels through the interception ports are disabled.
+
+## Private HTTPS Upstreams
+
+A `private-http` Policy Grant deliberately authorizes one exact hostname at one literal non-public IPv4 address:
+
+```toml
+[[workspaces.example.egress.private-http]]
+host = "service.lan.example"
+address = "10.0.0.2"
+```
+
+The address must be in 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, or 192.168.0.0/16, outside `seter.host.subnet`. The hostname must be an exact DNS name that no HTTP, passthrough, repository, or direct-TCP grant of the same workspace also matches.
+
+The proxy treats the name as an ordinary exact intercepted host. SNI and authority checks, credential binding, response redaction, and auditing still apply. Its upstream is the reviewed literal address, which is never resolved. The grant is restricted to HTTPS on port 443, so cleartext requests receive 403. The workspace's DNS listener answers `A` queries for the name with the same address without contacting the backend resolver. The backend therefore keeps its rebinding protection for every other name.
+
+The proxy account's nftables output chain admits only the union of reviewed addresses, on TCP port 443. These exceptions sit after the host-local and workspace-subnet rejects and before the non-public reject. A second workspace without the grant is denied by the proxy policy even though both share one proxy account. See [ADR 0014](adr/0014-reviewed-private-https-upstreams.md).
+
+Review destinations that share a private address carefully. A reverse proxy at that address may route other virtual hosts. Seter sends only the reviewed hostname, but the upstream service decides what that name can reach.
 
 ## TLS passthrough
 

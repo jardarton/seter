@@ -24,9 +24,12 @@ let
     && lib.all (
       value:
       hasOnlyAttrs [ "egress" ] value
-      && hasOnlyAttrs [ "http-hosts" "passthrough-hosts" "tcp" ] (policyEgressFor value)
+      && hasOnlyAttrs [ "http-hosts" "passthrough-hosts" "tcp" "private-http" ] (policyEgressFor value)
       && lib.all (destination: hasOnlyAttrs [ "host" "port" ] destination) (
         (policyEgressFor value).tcp or [ ]
+      )
+      && lib.all (grant: hasOnlyAttrs [ "host" "address" ] grant && grant ? host && grant ? address) (
+        (policyEgressFor value)."private-http" or [ ]
       )
     ) (builtins.attrValues policyWorkspaces);
   valuesFor = select: map select workspaces;
@@ -62,6 +65,42 @@ let
     && parsedAddress != subnetNetwork
     && parsedAddress != subnetBroadcast;
 
+  # Private HTTPS Upstreams may name only RFC 1918 or shared (CGNAT) space.
+  # Loopback, link-local, multicast, reserved, and public addresses each have
+  # a different meaning, and workspace addresses are rejected separately.
+  privateUpstreamRanges = [
+    [
+      "10.0.0.0"
+      8
+    ]
+    [
+      "100.64.0.0"
+      10
+    ]
+    [
+      "172.16.0.0"
+      12
+    ]
+    [
+      "192.168.0.0"
+      16
+    ]
+  ];
+  privateUpstreamAddress =
+    address:
+    let
+      parsedAddress = parseIpv4 address;
+    in
+    parsedAddress != null
+    && lib.any (
+      range:
+      let
+        blockSize = pow2 (32 - builtins.elemAt range 1);
+      in
+      builtins.div parsedAddress blockSize == builtins.div (parseIpv4 (builtins.head range)) blockSize
+    ) privateUpstreamRanges;
+  privateHttpHosts = workspace: map (grant: lib.toLower grant.host) workspace.egress.privateHttp;
+
   workspaceSecretNames = workspace: attrNames workspace.secrets;
   workspaceSecrets = workspace: builtins.attrValues workspace.secrets;
   normalizeHosts = map lib.toLower;
@@ -88,7 +127,9 @@ let
     "upgrade"
   ];
   allowedSecretHosts =
-    workspace: normalizeHosts (repositories.hosts workspace ++ workspace.egress.httpHosts);
+    workspace:
+    normalizeHosts (repositories.hosts workspace ++ workspace.egress.httpHosts)
+    ++ privateHttpHosts workspace;
   secretHosts =
     workspace: normalizeHosts (concatMap (secret: secret.hosts) (workspaceSecrets workspace));
 
@@ -220,6 +261,34 @@ in
         ) workspace.egress.passthroughHosts
       ) workspace.egress.httpHosts;
       message = "seter.host.workspaces.${workspace.name} intercepted HTTP and TLS passthrough Host Patterns must not overlap";
+    }
+    {
+      assertion = lib.all (
+        grant: hostPatterns.exactValid grant.host && parseIpv4 grant.host == null
+      ) workspace.egress.privateHttp;
+      message = "seter.host.workspaces.${workspace.name} private-http hosts must be exact DNS names, not Host Patterns or IPv4 literals";
+    }
+    {
+      assertion = lib.all (
+        grant: privateUpstreamAddress grant.address && !addressInSubnet grant.address
+      ) workspace.egress.privateHttp;
+      message = "seter.host.workspaces.${workspace.name} private-http addresses must be canonical IPv4 addresses in 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, or 192.168.0.0/16, outside seter.host.subnet";
+    }
+    {
+      assertion =
+        hasUniqueValues (privateHttpHosts workspace)
+        && lib.all (
+          host:
+          !lib.any (pattern: hostPatterns.matches pattern host) (
+            workspace.egress.httpHosts ++ workspace.egress.passthroughHosts
+          )
+          && !builtins.elem host (
+            normalizeHosts (
+              repositories.hosts workspace ++ map (destination: destination.host) workspace.egress.tcp
+            )
+          )
+        ) (privateHttpHosts workspace);
+      message = "seter.host.workspaces.${workspace.name} private-http hosts must be unique and must not also be repository, HTTP, passthrough, or direct-TCP destinations";
     }
     {
       assertion = workspace.resolvedRepositories != { };

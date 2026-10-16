@@ -30,6 +30,7 @@ let
           httpHosts = egress."http-hosts" or [ ];
           passthroughHosts = egress."passthrough-hosts" or [ ];
           tcp = egress.tcp or [ ];
+          privateHttp = egress."private-http" or [ ];
         };
     })
   ];

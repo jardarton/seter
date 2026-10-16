@@ -18,6 +18,7 @@ let
     httpHosts = [ ];
     passthroughHosts = [ ];
     tcp = [ ];
+    privateHttp = [ ];
   };
   inlineRejected =
     policyFile: field: value:
@@ -39,6 +40,9 @@ let
     [[workspaces.alpha.egress.tcp]]
     host = "new.example.org"
     port = 2223
+    [[workspaces.alpha.egress.private-http]]
+    host = "new.lan.example"
+    address = "10.0.0.2"
   '';
 in
 assert lib.all (entry: entry.assertion) deployed.assertions;
@@ -52,6 +56,7 @@ assert lib.all
       "httpHosts"
       "passthroughHosts"
       "tcp"
+      "privateHttp"
     ]
   )
   [
@@ -81,9 +86,10 @@ pkgs.runCommand "seter-policy-ownership-check"
     jq -e '.version == 1 and .workspaces.alpha.egress == {
       "http-hosts": ["api.example.com"],
       "passthrough-hosts": ["downloads.example.net"],
-      "tcp": [{host: "ssh.example.org", port: 2222}]
+      "tcp": [{host: "ssh.example.org", port: 2222}],
+      "private-http": []
     } and .workspaces.beta.egress == {
-      "http-hosts": [], "passthrough-hosts": [], "tcp": []
+      "http-hosts": [], "passthrough-hosts": [], "tcp": [], "private-http": []
     }' "$SETER_ACTIVE_POLICY"
 
     # Automatic repository access survives with no Policy File and is excluded
@@ -105,10 +111,11 @@ pkgs.runCommand "seter-policy-ownership-check"
     for grant in \
       '+ http new.example.com' '- http api.example.com' \
       '+ passthrough new.example.net' '- passthrough downloads.example.net' \
-      '+ tcp new.example.org:2223' '- tcp ssh.example.org:2222'; do
+      '+ tcp new.example.org:2223' '- tcp ssh.example.org:2222' \
+      '+ private-http new.lan.example=10.0.0.2'; do
       grep -Fx -- "$grant" pending
     done
-    test "$(wc -l < pending)" = 7
+    test "$(wc -l < pending)" = 8
 
     # After removing every TOML grant and deploying, status agrees even though
     # the repository's HTTP/DNS authorization remains active.

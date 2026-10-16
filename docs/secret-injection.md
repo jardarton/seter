@@ -114,14 +114,16 @@ A request is eligible for injection only when all of the following hold:
 
 - the source address belongs to the workspace that owns the binding;
 - the destination is in that workspace's intercepted HTTP hosts (including
-  automatically granted repository hosts);
+  automatically granted repository hosts and
+  [Private HTTPS Upstreams](./network-boundary.md#private-https-upstreams));
 - the request uses HTTPS;
 - TLS SNI and HTTP authority match;
 - the secret is bound to that exact normalized hostname;
 - for a repository credential, the request path is an explicitly associated
   repository path or one of its three supported smart-HTTP endpoints;
 - the placeholder occurs in one of the secret's configured header values; and
-- normal public-address pinning succeeds.
+- normal public-address pinning succeeds, or the host is a Private HTTPS
+  Upstream pinned to its reviewed address.
 
 The proxy rewrites the in-memory request after those policy checks, then verifies upstream TLS before transmitting the request. A certificate failure therefore prevents the real value from reaching the upstream server.
 

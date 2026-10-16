@@ -228,6 +228,24 @@ in
         readOnly = true;
         description = "Non-HTTP TCP destinations projected from seter.host.policyFile. Declare grants in the TOML Policy File.";
       };
+      privateHttp = mkOption {
+        type = types.listOf (
+          types.submodule {
+            options = {
+              host = mkOption {
+                type = exactHostType;
+                description = "Exact DNS name of the intercepted HTTPS service.";
+              };
+              address = mkOption {
+                type = types.str;
+                description = "Reviewed non-public IPv4 address the proxy connects to instead of resolving the name.";
+              };
+            };
+          }
+        );
+        readOnly = true;
+        description = "Private HTTPS Upstreams projected from seter.host.policyFile. Declare grants in the TOML Policy File.";
+      };
     };
 
     secretVariables = mkOption {

@@ -54,7 +54,8 @@ class HostPatternTests(unittest.TestCase):
 
     def test_dns_loader_uses_shared_validation(self):
         config = {
-            "version": 1, "workspace": "example", "sourceAddress": "10.100.0.10",
+            "version": 2, "workspace": "example", "sourceAddress": "10.100.0.10",
+            "localAnswers": {},
             "backendAddress": "127.0.0.1", "backendPort": 15353,
             "logQueries": False, "upstreamTimeoutSeconds": 3,
             "maxConcurrentQueries": 64, "queriesPerSecond": 200, "queryBurst": 400,
@@ -69,9 +70,52 @@ class HostPatternTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         dns_policy.PolicyServer(config)
 
+    def test_dns_answers_private_upstreams_locally(self):
+        import asyncio
+        import dns.message
+        import dns.rcode
+        import dns.rdatatype
+
+        config = {
+            "version": 2, "workspace": "example", "sourceAddress": "10.100.0.10",
+            "allowedNames": ["api.example.com"],
+            "localAnswers": {"Service.LAN.example": "10.0.0.2"},
+            "backendAddress": "127.0.0.1", "backendPort": 9,
+            "logQueries": False, "upstreamTimeoutSeconds": 0.1,
+            "maxConcurrentQueries": 64, "queriesPerSecond": 200, "queryBurst": 400,
+        }
+        server = dns_policy.PolicyServer(config)
+
+        def ask(name, rdtype):
+            query = dns.message.make_query(name, rdtype)
+            wire = asyncio.run(server.handle_wire(query.to_wire(), source="10.100.0.10", protocol="udp"))
+            return dns.message.from_wire(wire)
+
+        answer = ask("service.lan.example", dns.rdatatype.A)
+        self.assertEqual(answer.rcode(), dns.rcode.NOERROR)
+        self.assertEqual([rdata.address for rrset in answer.answer for rdata in rrset], ["10.0.0.2"])
+        empty = ask("SERVICE.lan.example", dns.rdatatype.AAAA)
+        self.assertEqual((empty.rcode(), empty.answer), (dns.rcode.NOERROR, []))
+        self.assertEqual(ask("service.lan.example", dns.rdatatype.TXT).rcode(), dns.rcode.REFUSED)
+        self.assertEqual(ask("other.lan.example", dns.rdatatype.A).rcode(), dns.rcode.REFUSED)
+
+        for answers in (
+            {"service.lan.example": "10.0.0.02"},
+            {"service.lan.example": "127.0.0.1"},
+            {"service.lan.example": "8.8.8.8"},
+            {"10.0.0.3": "10.0.0.2"},
+            {"api.example.com": "10.0.0.2"},
+            {"service.lan.example": 1},
+            [],
+        ):
+            with self.subTest(answers=answers):
+                with self.assertRaises((TypeError, ValueError)):
+                    dns_policy.PolicyServer({**config, "localAnswers": answers})
+
     def test_proxy_loader_uses_shared_validation(self):
         workspace = {
             "name": "example", "httpHosts": ["git.example"], "passthroughHosts": [],
+            "privateHttpHosts": {},
             "repositories": {"example": {"host": "git.example", "path": "/team/example.git", "credential": None}},
             "secrets": {},
         }
@@ -85,7 +129,7 @@ class HostPatternTests(unittest.TestCase):
                         with self.subTest(field=field, case=case["label"]):
                             value = copy.deepcopy(workspace)
                             value[field].append(case["input"])
-                            policy_file.write_text(json.dumps({"version": 4, "workspaces": {"10.100.0.10": value}}))
+                            policy_file.write_text(json.dumps({"version": 5, "workspaces": {"10.100.0.10": value}}))
                             policy = proxy_policy.SeterPolicy()
                             if case["pattern"]:
                                 policy.configure({"seter_policy"})

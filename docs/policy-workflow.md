@@ -19,7 +19,13 @@ passthrough-hosts = ["registry-1.docker.io"]
 [[workspaces.example.egress.tcp]]
 host = "example.net"
 port = 2222
+
+[[workspaces.example.egress.private-http]]
+host = "service.lan.example"
+address = "10.0.0.2"
 ```
+
+`private-http` pins an exact HTTPS hostname to a reviewed non-public IPv4 address. See [Private HTTPS Upstreams](./network-boundary.md#private-https-upstreams). Review never proposes this grant from observations, because a denial cannot establish the intended private address. It preserves, validates, and can revoke existing entries.
 
 The consumer's Nix configuration imports this file as the sole source of reviewable egress grants. Personal workspace names, destinations, file locations, and deployment commands remain in private consumer configuration; the public Seter repository defines only the schema and integration contract.
 

@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, Write},
+    net::Ipv4Addr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -45,6 +46,8 @@ pub struct EgressPolicy {
     pub passthrough_hosts: Vec<String>,
     #[serde(default)]
     pub tcp: Vec<TcpGrant>,
+    #[serde(default, rename = "private-http")]
+    pub private_http: Vec<PrivateHttpGrant>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -52,6 +55,39 @@ pub struct EgressPolicy {
 pub struct TcpGrant {
     pub host: String,
     pub port: u16,
+}
+
+/// A reviewed exact HTTPS hostname pinned to a non-public IPv4 address.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateHttpGrant {
+    pub host: String,
+    pub address: String,
+}
+
+// Mirrors the Nix and proxy validation of Private HTTPS Upstream addresses.
+const PRIVATE_UPSTREAM_NETWORKS: [(Ipv4Addr, u8); 4] = [
+    (Ipv4Addr::new(10, 0, 0, 0), 8),
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(172, 16, 0, 0), 12),
+    (Ipv4Addr::new(192, 168, 0, 0), 16),
+];
+
+fn address_in_network(address: &str, network: Ipv4Addr, prefix: u8) -> bool {
+    let Ok(parsed) = address.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+    u32::from(parsed) & mask == u32::from(network) & mask
+}
+
+fn private_upstream_address(address: &str) -> bool {
+    address
+        .parse::<Ipv4Addr>()
+        .is_ok_and(|parsed| parsed.to_string() == address)
+        && PRIVATE_UPSTREAM_NETWORKS
+            .iter()
+            .any(|(network, prefix)| address_in_network(address, *network, *prefix))
 }
 
 impl PolicyFile {
@@ -82,9 +118,15 @@ impl PolicyFile {
                 .tcp
                 .iter_mut()
                 .for_each(|grant| grant.host = grant.host.to_ascii_lowercase());
+            workspace
+                .egress
+                .private_http
+                .iter_mut()
+                .for_each(|grant| grant.host = grant.host.to_ascii_lowercase());
             workspace.egress.http_hosts.sort();
             workspace.egress.passthrough_hosts.sort();
             workspace.egress.tcp.sort();
+            workspace.egress.private_http.sort();
         }
     }
 
@@ -95,45 +137,93 @@ impl PolicyFile {
             self.version
         );
         for (name, workspace) in &self.workspaces {
-            registry
+            let registered = registry
                 .workspace(name)
                 .with_context(|| format!("Policy File refers to unknown workspace {name:?}"))?;
-            validate_patterns(name, "http-hosts", &workspace.egress.http_hosts)?;
-            validate_patterns(
-                name,
-                "passthrough-hosts",
-                &workspace.egress.passthrough_hosts,
-            )?;
-            for http in &workspace.egress.http_hosts {
-                for passthrough in &workspace.egress.passthrough_hosts {
-                    ensure!(
-                        !patterns_overlap(http, passthrough),
-                        "workspace {name:?} has overlapping HTTP and passthrough Host Patterns {http:?} and {passthrough:?}"
-                    );
-                }
-            }
-            let mut tcp = BTreeSet::new();
-            for grant in &workspace.egress.tcp {
-                validate_exact_host(&grant.host).with_context(|| {
-                    format!(
-                        "workspace {name:?} has invalid direct-TCP host {:?}",
-                        grant.host
-                    )
-                })?;
+            validate_egress(name, &workspace.egress)?;
+            let network = &registered.runner.identity.network;
+            let repository_hosts = registered
+                .repositories
+                .values()
+                .filter_map(|repository| repository.host())
+                .collect::<Vec<_>>();
+            for grant in &workspace.egress.private_http {
                 ensure!(
-                    grant.port != 80 && grant.port != 443,
-                    "workspace {name:?} direct TCP must not use intercepted ports 80 or 443"
+                    !repository_hosts.contains(&grant.host),
+                    "workspace {name:?} private-http host {:?} is also a repository host",
+                    grant.host
                 );
                 ensure!(
-                    tcp.insert(grant),
-                    "workspace {name:?} contains duplicate direct-TCP grant {}:{}",
-                    grant.host,
-                    grant.port
+                    !address_in_network(&grant.address, network.address, network.prefix_length),
+                    "workspace {name:?} private-http address {:?} is inside the Seter workspace subnet",
+                    grant.address
                 );
             }
         }
         Ok(())
     }
+}
+
+fn validate_egress(name: &str, egress: &EgressPolicy) -> Result<()> {
+    validate_patterns(name, "http-hosts", &egress.http_hosts)?;
+    validate_patterns(name, "passthrough-hosts", &egress.passthrough_hosts)?;
+    for http in &egress.http_hosts {
+        for passthrough in &egress.passthrough_hosts {
+            ensure!(
+                    !patterns_overlap(http, passthrough),
+                    "workspace {name:?} has overlapping HTTP and passthrough Host Patterns {http:?} and {passthrough:?}"
+                );
+        }
+    }
+    let mut tcp = BTreeSet::new();
+    for grant in &egress.tcp {
+        validate_exact_host(&grant.host).with_context(|| {
+            format!(
+                "workspace {name:?} has invalid direct-TCP host {:?}",
+                grant.host
+            )
+        })?;
+        ensure!(
+            grant.port != 80 && grant.port != 443,
+            "workspace {name:?} direct TCP must not use intercepted ports 80 or 443"
+        );
+        ensure!(
+            tcp.insert(grant),
+            "workspace {name:?} contains duplicate direct-TCP grant {}:{}",
+            grant.host,
+            grant.port
+        );
+    }
+    let mut private_hosts = BTreeSet::new();
+    for grant in &egress.private_http {
+        let host = grant.host.as_str();
+        validate_exact_host(host).with_context(|| {
+            format!("workspace {name:?} has invalid private-http host {host:?}")
+        })?;
+        ensure!(
+            host.parse::<Ipv4Addr>().is_err(),
+            "workspace {name:?} private-http host {host:?} must be a DNS name, not an IPv4 literal"
+        );
+        ensure!(
+                private_upstream_address(&grant.address),
+                "workspace {name:?} private-http address {:?} must be a canonical IPv4 address in 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, or 192.168.0.0/16",
+                grant.address
+            );
+        ensure!(
+            private_hosts.insert(host),
+            "workspace {name:?} contains duplicate private-http host {host:?}"
+        );
+        ensure!(
+                !egress
+                    .http_hosts
+                    .iter()
+                    .chain(&egress.passthrough_hosts)
+                    .any(|pattern| patterns_overlap(pattern, host))
+                    && !egress.tcp.iter().any(|tcp| tcp.host == host),
+                "workspace {name:?} private-http host {host:?} must not also be an HTTP, passthrough, or direct-TCP destination"
+            );
+    }
+    Ok(())
 }
 
 fn validate_patterns(workspace: &str, field: &str, patterns: &[String]) -> Result<()> {
@@ -221,6 +311,12 @@ fn grants(policy: &EgressPolicy) -> BTreeSet<String> {
                 .iter()
                 .map(|grant| format!("tcp {}:{}", grant.host, grant.port)),
         )
+        .chain(
+            policy
+                .private_http
+                .iter()
+                .map(|grant| format!("private-http {}={}", grant.host, grant.address)),
+        )
         .collect()
 }
 
@@ -278,8 +374,17 @@ pub fn review(workspace: &str, file: &Path) -> Result<i32> {
             }
         }
     }
+    // A private-http host is already granted for HTTPS; its denied cleartext
+    // or DNS observations cannot justify a conflicting grant.
+    let private_hosts = target
+        .egress
+        .private_http
+        .iter()
+        .map(|grant| grant.host.clone())
+        .collect::<BTreeSet<_>>();
     for host in http_candidates {
         if !target.egress.http_hosts.contains(&host)
+            && !private_hosts.contains(&host)
             && prompt(&format!("Add exact intercepted-HTTP grant {host}? [y/N] "))? == "y"
         {
             validate_exact_host(&host)?;
@@ -289,6 +394,7 @@ pub fn review(workspace: &str, file: &Path) -> Result<i32> {
     for host in dns_candidates {
         if target.egress.http_hosts.contains(&host)
             || target.egress.passthrough_hosts.contains(&host)
+            || private_hosts.contains(&host)
         {
             continue;
         }
@@ -373,6 +479,10 @@ fn remove_grant(policy: &mut EgressPolicy, text: &str) {
         policy
             .tcp
             .retain(|item| format!("{}:{}", item.host, item.port) != destination);
+    } else if let Some(destination) = text.strip_prefix("private-http ") {
+        policy
+            .private_http
+            .retain(|item| format!("{}={}", item.host, item.address) != destination);
     }
 }
 
@@ -412,16 +522,20 @@ fn render_workspace_preserving(
     let mut document = original
         .parse::<DocumentMut>()
         .context("failed to preserve Policy File TOML")?;
-    let original_tcp = document
-        .get("workspaces")
-        .and_then(Item::as_table)
-        .and_then(|workspaces| workspaces.get(workspace))
-        .and_then(Item::as_table)
-        .and_then(|workspace| workspace.get("egress"))
-        .and_then(Item::as_table)
-        .and_then(|egress| egress.get("tcp"))
-        .and_then(Item::as_array_of_tables)
-        .cloned();
+    let original_tables = |key: &str| {
+        document
+            .get("workspaces")
+            .and_then(Item::as_table)
+            .and_then(|workspaces| workspaces.get(workspace))
+            .and_then(Item::as_table)
+            .and_then(|workspace| workspace.get("egress"))
+            .and_then(Item::as_table)
+            .and_then(|egress| egress.get(key))
+            .and_then(Item::as_array_of_tables)
+            .cloned()
+    };
+    let original_tcp = original_tables("tcp");
+    let original_private_http = original_tables("private-http");
     let egress = &mut document["workspaces"][workspace]["egress"];
 
     if original_egress.http_hosts != policy.http_hosts {
@@ -456,6 +570,39 @@ fn render_workspace_preserving(
             }
         }
         egress["tcp"] = Item::ArrayOfTables(tcp);
+    }
+
+    if original_egress.private_http != policy.private_http {
+        let mut private_http = ArrayOfTables::new();
+        for grant in &policy.private_http {
+            let preserved = original_private_http.as_ref().and_then(|tables| {
+                tables.iter().find(|table| {
+                    table
+                        .get("host")
+                        .and_then(Item::as_str)
+                        .map(str::to_ascii_lowercase)
+                        .as_deref()
+                        == Some(grant.host.as_str())
+                        && table.get("address").and_then(Item::as_str)
+                            == Some(grant.address.as_str())
+                })
+            });
+            if let Some(table) = preserved {
+                private_http.push(table.clone());
+            } else {
+                let mut table = Table::new();
+                table.insert("host", value(grant.host.as_str()));
+                table.insert("address", value(grant.address.as_str()));
+                private_http.push(table);
+            }
+        }
+        if private_http.is_empty() {
+            if let Some(egress) = egress.as_table_mut() {
+                egress.remove("private-http");
+            }
+        } else {
+            egress["private-http"] = Item::ArrayOfTables(private_http);
+        }
     }
     Ok(document.to_string())
 }
@@ -535,6 +682,7 @@ port = 2222
                 host: "deploy.example.com".to_owned(),
                 port: 2222,
             }],
+            ..EgressPolicy::default()
         };
         let rendered = render_workspace_preserving(original, "example", &policy).unwrap();
         assert!(rendered.contains("# consumer context stays here"));
@@ -557,6 +705,134 @@ http-hosts = ["old.example.com"]
         };
         let rendered = render_workspace_preserving(original, "example", &policy).unwrap();
         assert!(rendered.contains("new.example.com"));
+    }
+
+    fn private_grant(host: &str, address: &str) -> PrivateHttpGrant {
+        PrivateHttpGrant {
+            host: host.to_owned(),
+            address: address.to_owned(),
+        }
+    }
+
+    #[test]
+    fn accepts_reviewed_private_https_upstreams() {
+        let policy: PolicyFile = toml::from_str(
+            r#"version = 1
+[workspaces.example.egress]
+http-hosts = ["api.example.com"]
+
+[[workspaces.example.egress.private-http]]
+host = "Service.LAN.example"
+address = "192.168.20.5"
+"#,
+        )
+        .unwrap();
+        let mut policy = policy;
+        policy.normalize();
+        let egress = &policy.workspaces["example"].egress;
+        assert_eq!(
+            egress.private_http,
+            vec![private_grant("service.lan.example", "192.168.20.5")]
+        );
+        validate_egress("example", egress).unwrap();
+        assert!(grants(egress).contains("private-http service.lan.example=192.168.20.5"));
+        for address in ["10.0.0.2", "100.64.0.1", "172.31.255.254"] {
+            validate_egress(
+                "example",
+                &EgressPolicy {
+                    private_http: vec![private_grant("service.lan.example", address)],
+                    ..EgressPolicy::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_private_https_upstreams() {
+        let rejected = |egress: EgressPolicy| validate_egress("example", &egress).is_err();
+        let only = |host: &str, address: &str| EgressPolicy {
+            private_http: vec![private_grant(host, address)],
+            ..EgressPolicy::default()
+        };
+        for address in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "169.254.1.1",
+            "224.0.0.1",
+            "0.0.0.0",
+            "192.168.001.1",
+            "192.168.1",
+            "172.32.0.1",
+            "not-an-address",
+        ] {
+            assert!(rejected(only("service.lan.example", address)), "{address}");
+        }
+        for host in ["*.lan.example", "10.0.0.2", "single"] {
+            assert!(rejected(only(host, "10.0.0.2")), "{host}");
+        }
+        assert!(rejected(EgressPolicy {
+            private_http: vec![
+                private_grant("service.lan.example", "10.0.0.2"),
+                private_grant("service.lan.example", "10.0.0.3"),
+            ],
+            ..EgressPolicy::default()
+        }));
+        assert!(rejected(EgressPolicy {
+            http_hosts: vec!["*.lan.example".to_owned()],
+            ..only("service.lan.example", "10.0.0.2")
+        }));
+        assert!(rejected(EgressPolicy {
+            passthrough_hosts: vec!["service.lan.example".to_owned()],
+            ..only("service.lan.example", "10.0.0.2")
+        }));
+        assert!(rejected(EgressPolicy {
+            tcp: vec![TcpGrant {
+                host: "service.lan.example".to_owned(),
+                port: 2222,
+            }],
+            ..only("service.lan.example", "10.0.0.2")
+        }));
+    }
+
+    #[test]
+    fn matches_workspace_subnets() {
+        let subnet = Ipv4Addr::new(10, 100, 0, 1);
+        assert!(address_in_network("10.100.0.20", subnet, 24));
+        assert!(!address_in_network("10.100.1.20", subnet, 24));
+        assert!(address_in_network("10.0.0.2", subnet, 8));
+        assert!(address_in_network("192.168.20.5", subnet, 0));
+        assert!(!address_in_network("not-an-address", subnet, 24));
+    }
+
+    #[test]
+    fn preserves_and_revokes_private_https_upstreams() {
+        let original = r#"version = 1
+[workspaces.example.egress]
+http-hosts = ["old.example.com"]
+
+[[workspaces.example.egress.private-http]]
+# reviewed LAN service
+host = "service.lan.example"
+address = "10.0.0.2"
+"#;
+        let mut policy: PolicyFile = toml::from_str(original).unwrap();
+        policy.normalize();
+        let mut egress = policy.workspaces["example"].egress.clone();
+        egress.http_hosts = vec!["new.example.com".to_owned()];
+        let rendered = render_workspace_preserving(original, "example", &egress).unwrap();
+        assert!(rendered.contains("# reviewed LAN service"));
+        assert!(rendered.contains("new.example.com"));
+
+        remove_grant(&mut egress, "private-http service.lan.example=10.0.0.2");
+        assert!(egress.private_http.is_empty());
+        let rendered = render_workspace_preserving(original, "example", &egress).unwrap();
+        assert!(!rendered.contains("service.lan.example"));
+        let reparsed: PolicyFile = toml::from_str(&rendered).unwrap();
+        assert!(reparsed.workspaces["example"]
+            .egress
+            .private_http
+            .is_empty());
     }
 
     #[test]

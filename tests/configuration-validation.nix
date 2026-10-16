@@ -477,6 +477,117 @@ let
     workspaces = validWorkspaces;
   };
 
+  # Private HTTPS Upstreams pin an exact name to reviewed RFC 1918 or
+  # shared address space. Everything that could widen that authority fails.
+  privateHttpPolicyFile =
+    extra: grants:
+    builtins.toFile "seter-private-http-policy.toml" (
+      "version = 1\n"
+      + extra
+      + lib.concatMapStrings (grant: ''
+        [[workspaces.alpha.egress.private-http]]
+        host = "${grant.host}"
+        address = "${grant.address}"
+      '') grants
+    );
+  privateHttpConfiguration =
+    extra: grants:
+    mkHostWith {
+      policyFile = privateHttpPolicyFile extra grants;
+      workspaces.alpha = validWorkspaces.alpha // {
+        secrets.token = {
+          placeholder = "seter-placeholder-0123456789abcdef";
+          sourceFile = "/run/secrets/token";
+          hosts = [ "service.lan.example" ];
+          headers = [ "authorization" ];
+        };
+      };
+    };
+  privateHttpRejected =
+    extra: grants: !(forceConfiguration (privateHttpConfiguration extra grants)).success;
+  privateHttpGrant = address: {
+    host = "service.lan.example";
+    inherit address;
+  };
+  privateHttpAccepted =
+    lib.all
+      (address: (forceConfiguration (privateHttpConfiguration "" [ (privateHttpGrant address) ])).success)
+      [
+        "10.0.0.2"
+        "100.64.0.1"
+        "172.16.0.1"
+        "192.168.20.5"
+      ];
+  privateHttpUnsafeAddressRejected =
+    lib.all (address: privateHttpRejected "" [ (privateHttpGrant address) ])
+      [
+        "8.8.8.8"
+        "127.0.0.1"
+        "169.254.1.1"
+        "224.0.0.1"
+        "0.0.0.0"
+        "10.100.0.20"
+        "192.168.001.1"
+        "172.32.0.1"
+      ];
+  privateHttpUnsafeHostRejected =
+    lib.all
+      (
+        host:
+        privateHttpRejected "" [
+          {
+            inherit host;
+            address = "10.0.0.2";
+          }
+        ]
+      )
+      [
+        "*.lan.example"
+        "10.0.0.2"
+        "single"
+      ];
+  privateHttpDuplicateRejected = privateHttpRejected "" [
+    (privateHttpGrant "10.0.0.2")
+    (privateHttpGrant "10.0.0.3")
+  ];
+  privateHttpOverlapRejected =
+    lib.all (extra: privateHttpRejected extra [ (privateHttpGrant "10.0.0.2") ])
+      [
+        ''
+          [workspaces.alpha.egress]
+          http-hosts = ["*.lan.example"]
+        ''
+        ''
+          [workspaces.alpha.egress]
+          passthrough-hosts = ["service.lan.example"]
+        ''
+        ''
+          [[workspaces.alpha.egress.tcp]]
+          host = "service.lan.example"
+          port = 2222
+        ''
+      ];
+  privateHttpRepositoryOverlapRejected = hostConfigurationRejected {
+    policyFile = builtins.toFile "seter-private-http-repository-policy.toml" ''
+      version = 1
+      [[workspaces.alpha.egress.private-http]]
+      host = "example.invalid"
+      address = "10.0.0.2"
+    '';
+    workspaces = validWorkspaces;
+  };
+  privateHttpUnknownFieldRejected = hostConfigurationRejected {
+    policyFile = builtins.toFile "seter-private-http-port-policy.toml" ''
+      version = 1
+      [[workspaces.alpha.egress.private-http]]
+      host = "service.lan.example"
+      address = "10.0.0.2"
+      port = 8443
+    '';
+    workspaces = validWorkspaces;
+  };
+  privateHttpProjection = privateHttpConfiguration "" [ (privateHttpGrant "192.168.20.5") ];
+
   dnsBurstRejected = hostConfigurationRejected {
     dns = {
       queriesPerSecond = 100;
@@ -706,6 +817,13 @@ let
       overlappingWildcardPolicyRejected
       wildcardDirectTcpPolicyRejected
       unknownPolicyWorkspaceRejected
+      privateHttpAccepted
+      privateHttpUnsafeAddressRejected
+      privateHttpUnsafeHostRejected
+      privateHttpDuplicateRejected
+      privateHttpOverlapRejected
+      privateHttpRepositoryOverlapRejected
+      privateHttpUnknownFieldRejected
       dnsBurstRejected
       excessiveDnsTimeoutRejected
       insufficientDnsTimeoutRejected
@@ -773,6 +891,15 @@ assert builtins.elem {
   host = "ssh.example.org";
   port = 2222;
 } importedPolicyAlpha.tcp;
+assert
+  privateHttpProjection.config.seter.host.workspaces.alpha.egress.privateHttp == [
+    {
+      host = "service.lan.example";
+      address = "192.168.20.5";
+    }
+  ];
+assert lib.hasInfix "ip daddr { 192.168.20.5 } tcp dport 443 accept"
+  privateHttpProjection.config.networking.nftables.tables.seter_proxy_output.content;
 pkgs.runCommand "seter-workspace-uniqueness-check" { } ''
   touch "$out"
 ''

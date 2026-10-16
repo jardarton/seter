@@ -29,6 +29,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "name": "product",
             "httpHosts": ["git.example", "second.example"],
             "passthroughHosts": [],
+            "privateHttpHosts": {},
             "repositories": {
                 "frontend": {"host": "git.example", "path": "/team/frontend.git", "credential": "frontend"},
                 "backend": {"host": "git.example", "path": "/team/backend.git", "credential": "backend"},
@@ -48,7 +49,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def load(self, workspace=None):
         self.policy_path.write_text(json.dumps({
-            "version": 4, "workspaces": {"10.100.0.10": workspace or self.workspace}
+            "version": 5, "workspaces": {"10.100.0.10": workspace or self.workspace}
         }))
         policy = module.SeterPolicy()
         options = SimpleNamespace(seter_policy=str(self.policy_path), seter_ready_file=str(self.ready))
@@ -163,6 +164,114 @@ class RepositoryPolicyTests(unittest.TestCase):
             with self.assertRaises(OptionsError):
                 self.load(candidate)
             self.assertFalse(self.ready.exists())
+
+
+
+class PrivateUpstreamTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        (self.directory / "token").write_text("synthetic-private-credential\n")
+        self.workspace = {
+            "name": "product",
+            "httpHosts": ["api.example.com"],
+            "passthroughHosts": ["downloads.example.net"],
+            "privateHttpHosts": {"Service.LAN.example": "10.0.0.2"},
+            "repositories": {},
+            "secrets": {
+                "token": {
+                    "credential": "token",
+                    "placeholder": "seter-placeholder-private-0123456789abcdef",
+                    "hosts": ["service.lan.example"],
+                    "headers": ["authorization"],
+                }
+            },
+        }
+
+    def load(self, workspace=None):
+        policy_path = self.directory / "policy.json"
+        ready = self.directory / "ready"
+        policy_path.write_text(json.dumps({
+            "version": 5, "workspaces": {"10.100.0.10": workspace or self.workspace}
+        }))
+        policy = module.SeterPolicy()
+        options = SimpleNamespace(seter_policy=str(policy_path), seter_ready_file=str(ready))
+        with patch.object(module.ctx, "options", options, create=True), patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.directory)):
+            policy.configure({"seter_policy"})
+        return policy, policy.workspaces["10.100.0.10"]
+
+    def resolve(self, policy, workspace, host, port):
+        import asyncio
+        return asyncio.run(policy._resolve_upstream(workspace, host, port))
+
+    def test_private_host_is_an_exact_intercepted_host_with_a_pinned_address(self):
+        policy, workspace = self.load()
+        self.assertEqual(workspace["privateHttpHosts"], {"service.lan.example": "10.0.0.2"})
+        self.assertIn("service.lan.example", workspace["httpHosts"])
+        self.assertEqual(self.resolve(policy, workspace, "service.lan.example", 443), ("10.0.0.2", None))
+        address, error = self.resolve(policy, workspace, "service.lan.example", 80)
+        self.assertIsNone(address)
+        self.assertIn("HTTPS on port 443", error)
+
+        request = http.Request.make(
+            "GET", "https://service.lan.example/v1/models",
+            headers={"Authorization": "Bearer seter-placeholder-private-0123456789abcdef"},
+        )
+        names, error = module.SeterPolicy._inject_request_secrets(
+            SimpleNamespace(request=request), workspace, "service.lan.example", "https", "/v1/models"
+        )
+        self.assertIsNone(error)
+        self.assertEqual(names, ["token"])
+        self.assertEqual(request.headers["Authorization"], "Bearer synthetic-private-credential")
+
+    def test_grants_are_scoped_to_their_workspace(self):
+        other = copy.deepcopy(self.workspace)
+        other["name"] = "other"
+        other["privateHttpHosts"] = {"service.lan.example": "10.0.0.3"}
+        other["secrets"] = {}
+        policy_path = self.directory / "policy.json"
+        policy_path.write_text(json.dumps({
+            "version": 5,
+            "workspaces": {"10.100.0.10": self.workspace, "10.100.0.11": other},
+        }))
+        policy = module.SeterPolicy()
+        options = SimpleNamespace(seter_policy=str(policy_path), seter_ready_file=str(self.directory / "ready"))
+        with patch.object(module.ctx, "options", options, create=True), patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.directory)):
+            policy.configure({"seter_policy"})
+        for address, expected in (("10.100.0.10", "10.0.0.2"), ("10.100.0.11", "10.0.0.3")):
+            self.assertEqual(
+                self.resolve(policy, policy.workspaces[address], "service.lan.example", 443),
+                (expected, None),
+            )
+
+    def test_public_hosts_never_use_private_addresses(self):
+        policy, workspace = self.load()
+        with patch.object(module.SeterPolicy, "_lookup_public_ipv4", return_value=(None, "no public address")) as lookup:
+            self.assertEqual(self.resolve(policy, workspace, "api.example.com", 443), (None, "no public address"))
+        lookup.assert_called_once_with("api.example.com", 443)
+
+    def test_unsafe_private_upstreams_fail_without_readiness(self):
+        for grants in (
+            {"service.lan.example": "8.8.8.8"},
+            {"service.lan.example": "127.0.0.1"},
+            {"service.lan.example": "169.254.1.1"},
+            {"service.lan.example": "10.0.0.02"},
+            {"service.lan.example": 167772162},
+            {"*.lan.example": "10.0.0.2"},
+            {"10.0.0.3": "10.0.0.2"},
+            {"api.example.com": "10.0.0.2"},
+            {"downloads.example.net": "10.0.0.2"},
+            {"service.lan.example": "10.0.0.2", "SERVICE.lan.example": "10.0.0.3"},
+            [],
+        ):
+            with self.subTest(grants=grants):
+                candidate = copy.deepcopy(self.workspace)
+                candidate["privateHttpHosts"] = grants
+                candidate["secrets"] = {}
+                with self.assertRaises(OptionsError):
+                    self.load(candidate)
+                self.assertFalse((self.directory / "ready").exists())
 
 
 unittest.main()

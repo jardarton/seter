@@ -77,10 +77,15 @@ let
     workspace:
     pkgs.writeText "seter-dns-policy-${workspace.name}.json" (
       builtins.toJSON {
-        version = 1;
+        version = 2;
         workspace = workspace.name;
         sourceAddress = workspace.network.address;
         allowedNames = workspace.dnsNames;
+        # Private HTTPS Upstreams are answered from their reviewed address.
+        # The host backend's rebinding protection would drop the real answer.
+        localAnswers = builtins.listToAttrs (
+          map (grant: lib.nameValuePair (lib.toLower grant.host) grant.address) workspace.egress.privateHttp
+        );
         backendAddress = "127.0.0.1";
         backendPort = dnsCfg.upstreamPort;
         inherit (dnsCfg)

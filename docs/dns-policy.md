@@ -8,6 +8,8 @@ The listener derives its allowlist from the workspace's approved repository host
 
 Matching is case-insensitive and insensitive to one final DNS root dot. Exact grants match only that name. A reviewed single-label Host Pattern such as `*.example.com` matches `api.example.com`, but excludes both `example.com` and `deep.api.example.com`.
 
+Names granted as [Private HTTPS Upstreams](./network-boundary.md#private-https-upstreams) are never forwarded. Their `A` queries receive a local authoritative answer with the reviewed address and a 60-second TTL, and `AAAA` queries receive the usual empty response.
+
 Only Internet-class `A` queries are forwarded. An exact `AAAA` query receives a local `NOERROR` response with no answers so dual-stack clients can immediately continue with IPv4. Other classes and record types receive `REFUSED`. IPv6 and general UDP egress are out of scope.
 
 ## Canonical forwarding
